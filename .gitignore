@@ -1,0 +1,39 @@
+# --- secrets: never commit a real .env ---
+.env
+.env.local
+*.pem
+*.key
+
+# --- python ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- node / frontend ---
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.tsbuildinfo
+
+# --- agent tooling: machine-specific state stays local ---
+.claude/ecc/
+.claude/settings.local.json
+.claude/worktrees/
+
+# --- editors / os ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- project artifacts ---
+backend/data/cache/
+backend/static/
+.env.production
+*.log

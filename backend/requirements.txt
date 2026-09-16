@@ -1,0 +1,25 @@
+# Runtime dependencies — what the production container installs.
+# No LLM, Twilio, or Maps SDK appears here yet: each arrives behind its mode
+# switch (spec Section 1, rule 3).
+fastapi>=0.115
+uvicorn[standard]>=0.32
+sqlalchemy>=2.0.36
+asyncpg>=0.30
+alembic>=1.14
+pydantic>=2.10
+pydantic-settings>=2.7
+python-dotenv>=1.0
+python-multipart>=0.0.20
+numpy>=2.1
+rapidfuzz>=3.10
+ortools>=9.11
+httpx>=0.28
+
+# Authentication
+pyjwt>=2.9
+pwdlib[argon2]>=0.2
+
+# Added later, each behind its own switch:
+#   torch>=2.5     (federated forecasting)
+#   google-genai   (LLM_MODE=live)
+#   twilio         (COMMS_MODE=live)

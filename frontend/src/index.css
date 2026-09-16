@@ -1,0 +1,182 @@
+@import "tailwindcss";
+@import "leaflet/dist/leaflet.css";
+
+@theme {
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", monospace;
+
+  --color-ink: #16191d;
+  --color-ink-2: #4a525c;
+  --color-ink-3: #7d858f;
+  --color-line: #e3e6ea;
+  --color-canvas: #f4f5f7;
+  --color-panel: #ffffff;
+  --color-brand: #0b3d5c;
+  --color-crit: #d92d20;
+  --color-risk: #e0900e;
+  --color-ok: #1b9150;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "tnum" 0;
+}
+
+/* ------------------------------------------------------------ map chrome --- */
+
+.leaflet-container {
+  font-family: var(--font-sans);
+  background: #eef0f2;
+}
+
+.basemap {
+  filter: grayscale(0.9) brightness(1.04) contrast(0.92);
+}
+
+.google-attribution {
+  font-weight: 600;
+}
+
+.leaflet-control-zoom a {
+  color: var(--color-ink) !important;
+}
+
+.leaflet-tooltip {
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(16, 24, 40, 0.12);
+  padding: 0;
+}
+
+.leaflet-tooltip-top::before {
+  border-top-color: var(--color-panel);
+}
+
+.tt {
+  padding: 8px 10px;
+  min-width: 170px;
+  font-size: 12px;
+  color: var(--color-ink);
+}
+
+.tt-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.tt-sub {
+  color: var(--color-ink-3);
+  font-size: 11px;
+  margin-bottom: 5px;
+}
+
+.tt-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.5;
+}
+
+.tt-row i {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+/* ------------------------------------------------------ rollup donuts --- */
+
+.donut-host {
+  background: none;
+  border: none;
+}
+
+.donut {
+  position: relative;
+  cursor: pointer;
+  filter: drop-shadow(0 2px 3px rgba(16, 24, 40, 0.18));
+  transition: transform 120ms ease-out;
+}
+
+.donut:hover {
+  transform: scale(1.08);
+}
+
+.donut-count {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.donut-district .donut-count {
+  font-size: 11px;
+}
+
+.donut-label {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: 2px;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-ink);
+  text-shadow:
+    0 0 3px #fff,
+    0 0 3px #fff,
+    0 0 3px #fff;
+  pointer-events: none;
+}
+
+.donut-district .donut-label {
+  font-size: 10px;
+  font-weight: 500;
+}
+
+/* ---------------------------------------------------------- live states --- */
+
+@keyframes livepulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(27, 145, 80, 0.45);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(27, 145, 80, 0);
+  }
+}
+
+.live-dot {
+  animation: livepulse 2s ease-in-out infinite;
+}
+
+@keyframes toastin {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.toast-in {
+  animation: toastin 200ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-dot,
+  .toast-in,
+  .donut {
+    animation: none;
+    transition: none;
+  }
+}
