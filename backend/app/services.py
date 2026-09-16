@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
-from . import trust
+from . import outbreak, trust
 from .models import (
     BedStatus,
     Facility,
@@ -162,6 +162,11 @@ async def get_snapshots(
     # `scripts.trust` from the same `trust.compute()` the drawer calls live).
     # Re-deriving six signals for every facility on every pan is not viable,
     # and this is a copy of that one calculation, never a second one.
+    # Raised demand from any outbreak currently running over these facilities
+    # (spec 12.5). Applied to whatever rate is in force, so it compounds with
+    # the burn rate and with a federated forecast alike.
+    surge = await outbreak.active_multipliers(session, ids)
+
     # Published forecasts, when the switch is on. Reading rows here keeps torch
     # out of the web service entirely: a training job writes, the API reads.
     forecasts: dict[tuple[str, str], float] = {}
@@ -259,6 +264,19 @@ async def get_snapshots(
             predicted = forecasts.get((fac.id, sku_code))
             if predicted is not None and predicted > 0:
                 burn, rate_source = predicted, "federated"
+
+            # Named apart from `multiplier` above on purpose: that one widens
+            # the *warning threshold* because the data is doubtful, this one
+            # raises the *consumption rate* because an outbreak was declared.
+            # Sharing a name shadowed the first and sent None into classify().
+            surge_multiplier = surge.get((fac.id, sku_code))
+            if surge_multiplier and surge_multiplier > 1.0 and burn is not None:
+                # The declaration says this facility will get through more of
+                # this medicine than its history suggests. Days of cover fall
+                # accordingly, and the solver sees a deficit before anyone has
+                # reported a shortage — which is the entire point.
+                burn *= surge_multiplier
+                rate_source = "outbreak"
             dos = None if burn is None else qty / max(burn, EPSILON)
             at, source, conf = latest_meta[(fac.id, sku_code)]
             sku_rows.append(

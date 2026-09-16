@@ -26,7 +26,9 @@ from . import (
     attendance,
     beds,
     events,
+    ingest,
     movements,
+    outbreak,
     redistribution,
     services,
     trust,
@@ -41,7 +43,17 @@ from .auth import (
 )
 from .config import settings
 from .db import get_session, ping
-from .models import LOC_METHODS, Facility, MedicineMovement, Sku, StockReading
+from .models import (
+    LOC_METHODS,
+    Facility,
+    FacilityContact,
+    EvalReport,
+    FederationRound,
+    MedicineMovement,
+    OutbreakEvent,
+    Sku,
+    StockReading,
+)
 
 WEB_SOURCES = frozenset({"form", "photo", "voice"})
 DEMO_CHANNEL_SOURCES = frozenset({"sms", "ivr", "whatsapp"})
@@ -1287,4 +1299,413 @@ async def facility_trust(
         components=[TrustComponentOut(**c) for c in score.as_rows()],
         computed_at=datetime.now(timezone.utc),
         warning_multiplier=trust.warning_multiplier(score.score),
+    )
+
+
+# ========================================================== silo inspector ===
+# Spec 12.2 and 27 (B3). The platform's central claim is that no facility data
+# leaves a state. These rows are the evidence: measured bytes, tensor shapes, a
+# hash of the weights, and a raw-row count the aggregator asserted before
+# writing. Read-only — training writes them from its own job.
+
+
+class TensorShapeOut(BaseModel):
+    name: str
+    shape: list[int]
+    params: int
+    bytes: int
+
+
+class SiloRoundOut(BaseModel):
+    state: str
+    name: str
+    windows: int | None = None
+    trust: float | None = None
+    # What that trust bought it in the average: the count FedProx weighted by.
+    weight: int | None = None
+    train_loss: float | None = None
+    mae: float | None = None
+    baseline_mae: float | None = None
+    flagged_pct: float | None = None
+
+
+class FederationRoundOut(BaseModel):
+    run_id: str
+    round_no: int
+    strategy: str | None
+    global_val_mae: float | None
+    baseline_mae: float | None
+    per_silo: list[SiloRoundOut]
+    bytes_transmitted: int | None
+    tensor_shapes: list[TensorShapeOut]
+    weights_sha256: str | None
+    raw_rows_transmitted: int
+    silos_reporting: int | None
+    completed_at: datetime
+
+
+@router.get(
+    "/federation/rounds", response_model=list[FederationRoundOut], tags=["federation"]
+)
+async def federation_rounds(
+    limit: int = Query(default=40, ge=1, le=200),
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> list[FederationRoundOut]:
+    # The most recent run only: two runs on one chart would read as one
+    # training curve that improved twice.
+    latest_run = await session.scalar(
+        select(FederationRound.run_id).order_by(FederationRound.completed_at.desc()).limit(1)
+    )
+    if latest_run is None:
+        return []
+    rows = (
+        await session.execute(
+            select(FederationRound)
+            .where(FederationRound.run_id == latest_run)
+            .order_by(FederationRound.round_no.asc())
+            .limit(limit)
+        )
+    ).scalars()
+    return [
+        FederationRoundOut(
+            run_id=r.run_id,
+            round_no=r.round_no,
+            strategy=r.strategy,
+            global_val_mae=r.global_val_mae,
+            baseline_mae=r.baseline_mae,
+            per_silo=[SiloRoundOut(**s) for s in (r.per_silo or [])],
+            bytes_transmitted=r.bytes_transmitted,
+            tensor_shapes=[TensorShapeOut(**t) for t in (r.tensor_shapes or [])],
+            weights_sha256=r.weights_sha256,
+            raw_rows_transmitted=r.raw_rows_transmitted,
+            silos_reporting=r.silos_reporting,
+            completed_at=r.completed_at,
+        )
+        for r in rows
+    ]
+
+
+# =========================================================== ingestion spine ===
+# Spec 13. Every phone channel funnels through one pipeline; this endpoint is
+# that pipeline with the gateway removed, so the whole path — parsing, matching,
+# committing, and the reply the sender would receive — can be exercised and
+# demonstrated with no Twilio account in existence.
+
+
+class SimulateIn(BaseModel):
+    channel: str = "sms"
+    # The handset. Hashed before anything is stored; only a masked form is kept.
+    from_: str = Field(default="", alias="from")
+    text: str | None = None
+    external_id: str | None = None
+    media_url: str | None = None
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+class SimulateOut(BaseModel):
+    accepted: bool
+    duplicate: bool
+    needs_registration: bool
+    facility_id: str | None
+    facility_name: str | None
+    committed: list[dict]
+    # What the sender would receive back, verbatim. A channel that cannot show
+    # its own confirmation cannot be trusted by the people using it.
+    reply: str
+
+
+@router.post("/ingest/simulate", response_model=SimulateOut, tags=["ingest"])
+async def simulate_inbound(
+    payload: SimulateIn,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> SimulateOut:
+    if not settings.demo_mode:
+        raise HTTPException(
+            status_code=403, detail="Channel simulation is available in demo mode only"
+        )
+    if payload.channel not in ingest.CHANNELS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown channel. Expected one of: {', '.join(ingest.CHANNELS)}",
+        )
+
+    submission = ingest.RawSubmission(
+        channel=payload.channel,
+        sender_ref=payload.from_,
+        external_id=payload.external_id,
+        text=payload.text,
+        media_url=payload.media_url,
+    )
+    outcome = await ingest.process(session, submission)
+    await session.commit()
+    return SimulateOut(
+        accepted=outcome.accepted,
+        duplicate=outcome.duplicate,
+        needs_registration=outcome.needs_registration,
+        facility_id=outcome.facility_id,
+        facility_name=outcome.facility_name,
+        committed=outcome.committed,
+        reply=outcome.reply,
+    )
+
+
+class ContactOut(BaseModel):
+    facility_id: str
+    masked: str
+    role: str
+    # Demo only: the number to type into a simulator, since nobody can be
+    # expected to guess a phone number that was hashed on the way in.
+    demo_number: str | None = None
+
+
+@router.get("/facilities/{facility_id}/contacts", response_model=list[ContactOut], tags=["ingest"])
+async def facility_contacts(
+    facility_id: str,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> list[ContactOut]:
+    rows = (
+        await session.execute(
+            select(FacilityContact).where(FacilityContact.facility_id == facility_id)
+        )
+    ).scalars()
+    return [
+        ContactOut(
+            facility_id=c.facility_id,
+            masked=c.masked,
+            role=c.role,
+            # The seed derives demo numbers from the facility id, so the demo
+            # can show one without ever storing it.
+            demo_number=ingest.demo_number(c.facility_id, c.role)
+            if settings.demo_mode
+            else None,
+        )
+        for c in rows
+    ]
+
+
+# =================================================== outbreak pre-positioning ===
+# Spec 12.5. Declaring an outbreak raises expected demand for the commodities
+# that disease consumes, inside a radius, for a fixed window. Nothing else in
+# the platform changes: days of cover fall, the map turns, and the same solver
+# proposes the same kind of transfer — only now before a facility has reported
+# running out rather than after.
+
+
+class OutbreakIn(BaseModel):
+    category: str
+    district: str
+    state: str
+    radius_km: float = Field(default=40.0, gt=0, le=300)
+    severity: float = Field(default=0.7, ge=0.0, le=1.0)
+    ttl_days: float = Field(default=14.0, gt=0, le=60)
+    note: str | None = None
+
+
+class OutbreakOut(BaseModel):
+    id: int
+    district: str | None
+    state_silo: str | None
+    category: str | None
+    label: str
+    radius_km: float | None
+    severity: float | None
+    lat: float | None
+    lng: float | None
+    facilities_affected: int | None
+    commodities: list[str]
+    triggered_at: datetime
+    expires_at: datetime | None
+
+
+def _outbreak_out(event, commodities: list[str]) -> OutbreakOut:
+    return OutbreakOut(
+        id=event.id,
+        district=event.district,
+        state_silo=event.state_silo,
+        category=event.disease_category,
+        label=outbreak.CATEGORY_LABELS.get(
+            event.disease_category or "", event.disease_category or "Outbreak"
+        ),
+        radius_km=event.radius_km,
+        severity=event.severity,
+        lat=event.lat,
+        lng=event.lng,
+        facilities_affected=event.facilities_affected,
+        commodities=commodities,
+        triggered_at=event.triggered_at,
+        expires_at=event.expires_at,
+    )
+
+
+class OutbreakDeclaredOut(BaseModel):
+    outbreak: OutbreakOut
+    # What the declaration did to the facilities inside the radius, measured
+    # rather than promised: how many fell below a week of cover because of it.
+    at_risk_before: int
+    at_risk_after: int
+    earliest_warning_days: float | None
+
+
+@router.get("/outbreak/categories", response_model=dict, tags=["outbreak"])
+async def outbreak_categories(user: Principal = Depends(current_user)) -> dict:
+    # The clinical table itself, so the interface never invents a category the
+    # solver has no commodities for.
+    return {
+        key: {
+            "label": outbreak.CATEGORY_LABELS.get(key, key),
+            "commodities": commodities,
+        }
+        for key, commodities in outbreak.OUTBREAK_COMMODITY_MAP.items()
+    }
+
+
+@router.get("/outbreak/active", response_model=list[OutbreakOut], tags=["outbreak"])
+async def outbreak_active(
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> list[OutbreakOut]:
+    rows = await outbreak.active(session)
+    return [
+        _outbreak_out(
+            e, sorted(outbreak.OUTBREAK_COMMODITY_MAP.get(e.disease_category or "", {}))
+        )
+        for e in rows
+    ]
+
+
+@router.post("/outbreak/declare", response_model=OutbreakDeclaredOut, tags=["outbreak"])
+async def declare_outbreak(
+    payload: OutbreakIn,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> OutbreakDeclaredOut:
+    # Declaring an outbreak moves stock across a district. It carries the same
+    # authority as planning that state's redistribution, and no less.
+    if not can_plan_state(user, payload.state):
+        raise HTTPException(
+            status_code=403,
+            detail="Only this state's officers can declare an outbreak here",
+        )
+    if payload.category not in outbreak.OUTBREAK_COMMODITY_MAP:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown disease category. Known: {', '.join(outbreak.OUTBREAK_COMMODITY_MAP)}",
+        )
+
+    centre = (
+        await session.execute(
+            select(Facility.lat, Facility.lng)
+            .where(Facility.state_silo == payload.state, Facility.district == payload.district)
+            .limit(1)
+        )
+    ).first()
+    if centre is None:
+        raise HTTPException(status_code=404, detail="No facilities in that district")
+
+    before = await services.get_snapshots(session)
+    in_state = [s for s in before if s.state_silo == payload.state]
+    at_risk_before = sum(
+        1 for s in in_state if s.stock_status in (services.STATUS_AT_RISK, services.STATUS_CRITICAL)
+    )
+    cover_before = {
+        (s.id, k.sku_code): k.days_of_stock for s in in_state for k in s.skus
+    }
+
+    event, commodities, affected = await outbreak.declare(
+        session,
+        outbreak.Declaration(
+            category=payload.category,
+            district=payload.district,
+            state_silo=payload.state,
+            lat=centre[0],
+            lng=centre[1],
+            radius_km=payload.radius_km,
+            severity=payload.severity,
+            ttl_days=payload.ttl_days,
+            note=payload.note,
+        ),
+        actor=f"user:{user.id}",
+    )
+    await session.commit()
+
+    # The national map paints from the denormalised snapshot table; without
+    # this the declaration would change days of cover everywhere except the
+    # screen people are actually looking at.
+    for facility_id in affected:
+        await services.refresh_facility_state(session, facility_id)
+
+    after = await services.get_snapshots(session)
+    in_state_after = [s for s in after if s.state_silo == payload.state]
+    at_risk_after = sum(
+        1
+        for s in in_state_after
+        if s.stock_status in (services.STATUS_AT_RISK, services.STATUS_CRITICAL)
+    )
+    gains = [
+        outbreak.warning_gained(cover_before.get((s.id, k.sku_code)), k.days_of_stock)
+        for s in in_state_after
+        for k in s.skus
+        if k.sku_code in commodities
+    ]
+    earliest = max((g for g in gains if g is not None), default=None)
+
+    return OutbreakDeclaredOut(
+        outbreak=_outbreak_out(event, commodities),
+        at_risk_before=at_risk_before,
+        at_risk_after=at_risk_after,
+        earliest_warning_days=earliest,
+    )
+
+
+@router.post("/outbreak/{outbreak_id}/clear", response_model=dict, tags=["outbreak"])
+async def clear_outbreak(
+    outbreak_id: int,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> dict:
+    event = await session.get(OutbreakEvent, outbreak_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Unknown outbreak")
+    if not can_plan_state(user, event.state_silo or ""):
+        raise HTTPException(
+            status_code=403, detail="Only this state's officers can withdraw this declaration"
+        )
+    affected = await outbreak.clear(session, outbreak_id)
+    await session.commit()
+    for facility_id in affected:
+        await services.refresh_facility_state(session, facility_id)
+    return {"cleared": bool(affected), "facilities_restored": len(affected)}
+
+
+# ============================================================== proof layer ===
+# Spec 19. The numbers quoted on stage, served from the last recorded run so
+# the screen and the script cannot drift apart.
+
+
+class EvalReportOut(BaseModel):
+    run_at: datetime
+    dataset_seed: int | None
+    sections: dict
+    notes: str | None
+
+
+@router.get("/eval/report", response_model=EvalReportOut | None, tags=["proof"])
+async def eval_report(
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> EvalReportOut | None:
+    row = await session.scalar(
+        select(EvalReport).order_by(EvalReport.run_at.desc()).limit(1)
+    )
+    if row is None:
+        return None
+    return EvalReportOut(
+        run_at=row.run_at,
+        dataset_seed=row.dataset_seed,
+        sections=row.sections,
+        notes=row.notes,
     )

@@ -25,6 +25,9 @@ Environment = Literal["development", "production"]
 
 # Long enough for HS256, and refused by name in production.
 DEV_JWT_SECRET = "dev-only-signing-secret-never-use-in-production"
+# A fixed development salt, so a seeded handset and a running server agree
+# without either having to be configured.
+DEV_PHONE_SALT = "dev-only-phone-salt-never-use-in-production"
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -147,9 +150,25 @@ class Settings(BaseSettings):
     # burn rate. A week-ahead forecast is worthless once the week has passed.
     forecast_max_age_days: float = 8.0
 
+    # --- phone channels (spec 13) ---
+    # Salt for hashing inbound phone numbers. Deliberately NOT derived from
+    # JWT_SECRET: the two rotate for different reasons, and borrowing the
+    # session secret meant that changing it — or seeding with a different one —
+    # silently orphaned every registered handset, with the only symptom being
+    # "this number is not registered" for people who were.
+    phone_hash_salt: str = ""
+    # An extraction below this is never committed unattended; the pipeline asks
+    # the sender to confirm instead of guessing.
+    channel_confidence_floor: float = 0.6
+
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
+
+    @property
+    def phone_salt(self) -> str:
+        """The salt actually used to hash handsets."""
+        return self.phone_hash_salt or DEV_PHONE_SALT
 
     @property
     def secure_cookies(self) -> bool:
@@ -170,6 +189,12 @@ class Settings(BaseSettings):
         problems: list[str] = []
         if self.jwt_secret == DEV_JWT_SECRET or len(self.jwt_secret) < 32:
             problems.append("JWT_SECRET must be set to a random value of at least 32 characters")
+        if not self.phone_hash_salt or self.phone_hash_salt == DEV_PHONE_SALT:
+            problems.append(
+                "PHONE_HASH_SALT must be set to a random value: it is what stops this "
+                "database from being turned back into a list of health workers' phone "
+                "numbers. Changing it later orphans every registered handset."
+            )
         if self.cookie_secure is False:
             problems.append("COOKIE_SECURE cannot be false in production")
         if self.demo_mode and not self.allow_public_demo:

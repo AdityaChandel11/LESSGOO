@@ -1107,11 +1107,11 @@ A6. **Wire trust into early warning** — threshold widening, stated on the faci
 
 > **Checkpoint A — a short-received batch, a stale bed photo, and a facility whose attendance contradicts its footfall all surface without anyone going looking.**
 
-### Phase B — Federated forecasting *(current)*
+### Phase B — Federated forecasting *(complete)*
 
 B1. Live silo partitions read from the platform's own database, one state per SuperNode. — **done**
 B2. FedProx with trust-weighted contributions, using Flower's built-in strategy and its `num-examples` weighting — no hand-written aggregation. — **done**
-B3. `federation_rounds` and the silo inspector UI. — *next*
+B3. `federation_rounds` and the silo inspector UI. — **done.** The aggregator writes one row per round: measured bytes, every tensor's shape, a SHA-256 of the weights, the per-silo table, and a raw-row count it *asserts* before writing — `assert_weights_only()` inspects every reply and stops the round if anything but weights and scalar numbers arrives, so the zero on screen is a result rather than a constant. Because a metric record may hold only numbers, a silo identifies itself by partition index.
 B4. Flower parity runner. — **superseded, and better:** the app runs on Flower's **deployment** engine, a real SuperLink and four real SuperNode processes, not a simulation.
 B5. Forecast feeds days-of-stock behind `FORECAST_MODE`, burn rate as fallback. — **done**
 
@@ -1119,17 +1119,89 @@ B5. Forecast feeds days-of-stock behind `FORECAST_MODE`, burn rate as fallback. 
 
 **Publishing, not serving.** The trained model never runs inside the web service. `publish_forecast.py` writes predictions into `forecasts` and the API reads rows, so the dashboard image carries no torch and a failed training run degrades to the burn rate instead of taking the site down.
 
-> **Checkpoint B — run rounds, watch validation error fall, and prove from the inspector that only weights moved.**
+> **Checkpoint B — met.** 9 rounds on the deployment engine: error fell from 1.009 (untrained) to a best of 0.109 against the burn rate's 0.150, a 27.7% improvement on the same held-out weeks. 5,697 parameters in 8 tensors, 178 KB per round in both directions, 1.47 MB across the whole run, and 0 facility rows — asserted every round.
 
-### Phase C — Omnichannel (Twilio) and the field client
+### Phase C — Omnichannel (Twilio) and the field client *(current)*
 
-C1. Ingestion spine and simulators (Section 13). C2. SMS. C3. WhatsApp with photo extraction. C4. IVR, with Bhashini voice for consumption (26.4). C5. Field PWA, offline queue, capability detection. C6. The 70/30 split view.
+C1. Ingestion spine and simulators (Section 13). — **done.** One pipeline —
+dedupe, identify, extract, resolve, validate, commit, confirm — with
+`POST /api/ingest/simulate` driving all of it and no Twilio account in
+existence. A phone registry (`facility_contacts`) that stores a salted hash and
+a masked form, never a number. SMS grammar: medicines with quantities however
+they are typed, plus `BEDS`, `IN`/`OUT`, `GOT <batch> <qty>`, `APPROVE`, `HELP`.
+Confirmed by SMS, a delivery settles in the very ledger the dashboard reads.
+C2. SMS over Twilio — webhook, signature validation, idempotency on MessageSid. — *next, needs credentials*
+C3. WhatsApp with photo extraction. C4. IVR, with Bhashini voice for consumption (26.4). — *both need credentials*
+C5. Field client with an offline queue and capability detection. — **done**
+C6. The 70/30 split view. — **done.** The command view and the handset sit in
+one frame: the panel follows whatever facility is selected, so both halves are
+always discussing the same place, and a report sent on the right reaches the
+left through the same live feed every other change uses — no private channel
+between the two panels.
+
+**Three channels, one pipeline.** Smartphone posts a form; weak signal writes
+to the device first and sends itself when a bar returns, so a dead connection
+costs a delay and never a report; feature phone is an SMS keypad running the
+exact pipeline a Twilio message will. The channel changes what a person can
+send, never what the platform does with it. The offline queue survives a reload
+because it lives in the device's own storage, and the panel carries a labelled
+"simulate losing signal" switch so the queue can be demonstrated without
+anyone unplugging the wifi.
+
+**What C2-C4 add, and what they do not.** The channels add a webhook, a
+signature check and a way to deliver the reply. They add no parsing, no
+matching, no permissions and no commit path — those are C1's, already built and
+tested, which is the point of a spine. Until the Twilio credentials exist,
+`/api/ingest/simulate` exercises the identical code.
 
 > **Checkpoint C — a judge texts, WhatsApps a photo, and calls from their own handset; the left panel moves.**
 
 ### Phase D — Differentiators and proof
 
-D1. Copilot (read-only). D2. Outbreak pre-positioning. D3. What-if twin. D4. Jan Aushadhi redirect. D5. Impact replay and eval harness (FedProx vs FedAvg vs local vs centralized).
+D2. **Outbreak pre-positioning** (12.5). — **done.** Declaring an outbreak
+raises expected demand for the commodities that disease consumes, inside a
+radius, for a fixed window — and nothing else changes. Days of cover fall, the
+map turns, and the same solver proposes the same kind of transfer, now before a
+facility has reported running out. Withdrawing the declaration restores
+everything.
+
+**What the measurements actually showed**, on Nashik at 60 km and 0.8 severity:
+cover at one facility fell 4.5 → 1.7 days; facilities reading at risk in the
+district went 6 → 19; the worst-affected became visible as at risk 17.2 days
+sooner than its old rate implied.
+
+**And one result worth keeping because it corrects the naive expectation.** The
+transfer count into the district did not rise — an outbreak across a whole
+district destroys the local spare capacity a plan would have drawn on. What
+changed is *where supply comes from*: transfers into Nashik sourced from
+outside the district went 0 → 10, and 20 shortfalls escalated with "no facility
+within 150 km has ORS to spare — escalate to the state warehouse" rather than
+being quietly unmet. Pre-positioning reaches past the affected area, and says
+so when it cannot.
+
+D5. **Impact replay and eval harness** (19.1, 19.2). — **done.**
+`python -m scripts.run_eval` writes a dated report and `/api/eval/report`
+serves it to a Proof tab, so the screen and the spoken pitch cannot drift
+apart. Measured on the current seed:
+
+| | |
+|---|---|
+| Stock-out facility-days (MH, 120 days) | 5,004 across 250 facilities |
+| Days the medicine existed within 150 km | **99.9%** |
+| Trust layer recall | **0.947** — precision@20 and @50 both **1.00**, @100 0.99 |
+| Trust layer precision across every flag | 0.246, false-positive rate 0.239 |
+| Redistribution constraint violations | **0** |
+| Federated model error | **0.111** against 0.150 burn rate, 0.188 last value, 0.211 same-day-last-week |
+
+**Two numbers are reported in pairs on purpose.** Flag-level precision of 0.246
+looks bad and is true; the layer is tuned to miss almost nothing and then rank,
+so what an officer experiences is precision@k, which is 1.00 for the worst
+fifty. Quoting only one of those would be the trick this panel exists to
+refuse. Likewise the 99.9% is labelled as reachability, not prevention: it says
+the medicine was already within a few hours' drive, not that the platform would
+have moved it in time.
+
+D1. Copilot (read-only). D3. What-if twin. D4. Jan Aushadhi redirect. — *remaining*
 
 ### Phase E — Deployment and hardening
 

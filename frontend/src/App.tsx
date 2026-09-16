@@ -32,11 +32,15 @@ import {
   useLiveUpdates,
 } from "./api";
 import { ActivityFeed, FacilityPanel, NationalPanel, StatePanel } from "./panels";
+import { FederationPanel } from "./federation";
+import { ProofPanel } from "./proof";
+import { FieldPanel } from "./field";
+import { OutbreakControl } from "./outbreak";
 import { MovementsPanel } from "./movements";
 import { AuditQueuePanel } from "./trustpanel";
 import { RedistributionPanel, TransfersPrompt, type Trip, groupTrips } from "./transfers";
 
-type Mode = "stock" | "transfers" | "movements" | "trust";
+type Mode = "stock" | "transfers" | "movements" | "trust" | "federation" | "proof";
 
 const INDIA_VIEW = { lat: 22.8, lng: 81.5, zoom: 5 };
 
@@ -70,7 +74,11 @@ function readUrl(): UrlState {
           ? "movements"
           : q.get("view") === "trust"
             ? "trust"
-            : "stock",
+            : q.get("view") === "federation"
+              ? "federation"
+              : q.get("view") === "proof"
+                ? "proof"
+                : "stock",
     sku: q.get("sku"),
     facility: q.get("facility"),
     at: validAt ? { lat: at[0], lng: at[1], zoom: at[2] } : null,
@@ -181,6 +189,61 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
   // shows exactly the rows that score was computed from — same filter, same
   // query, so the two can never disagree.
   const [evidenceFor, setEvidenceFor] = useState<{ id: string; name: string } | null>(null);
+  // The field client docks on the right: the command view is what a state sees,
+  // this is the handset of someone standing in a health centre. One frame, so
+  // cause and effect are visible in a single glance.
+  const [fieldOpen, setFieldOpen] = useState(() => {
+    try {
+      return localStorage.getItem("swasthsetu.field.open") !== "false";
+    } catch {
+      return true;
+    }
+  });
+  const toggleField = useCallback((open: boolean) => {
+    setFieldOpen(open);
+    try {
+      localStorage.setItem("swasthsetu.field.open", String(open));
+    } catch {
+      /* private window: the dock simply reopens next time */
+    }
+  }, []);
+  // Whose phone the panel is: the facility on screen, so both halves are
+  // always talking about the same place.
+  const [fieldFacility, setFieldFacility] = useState<FacilityDetail | null>(null);
+  // Declared outbreaks, so the map can draw the area the solver reacted to.
+  const [outbreaks, setOutbreaks] = useState<
+    { id: number; lat: number | null; lng: number | null; radius_km: number | null; label: string }[]
+  >([]);
+  useEffect(() => {
+    api
+      .outbreaksActive()
+      .then((rows) =>
+        setOutbreaks(
+          rows.map((o) => ({
+            id: o.id,
+            lat: o.lat,
+            lng: o.lng,
+            radius_km: o.radius_km,
+            label: `${o.label} — ${o.district ?? ""}`,
+          })),
+        ),
+      )
+      .catch(() => setOutbreaks([]));
+  }, [refreshKey]);
+  useEffect(() => {
+    if (!selected) {
+      setFieldFacility(null);
+      return;
+    }
+    let alive = true;
+    api
+      .facility(selected.id)
+      .then((d) => alive && setFieldFacility(d))
+      .catch(() => alive && setFieldFacility(null));
+    return () => {
+      alive = false;
+    };
+  }, [selected?.id, refreshKey]);
   const [basemapFallback, setBasemapFallback] = useState(false);
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   // A plan's shortfall and manual-review lists only come back from the solve,
@@ -521,6 +584,8 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
                 ["transfers", "Redistribution"],
                 ["movements", "Movements"],
                 ["trust", "Data trust"],
+                ["federation", "Federation"],
+                ["proof", "Proof"],
               ] as const
             ).map(([m, label]) => (
               <button
@@ -599,6 +664,10 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               }}
               onBack={() => setSelected(null)}
             />
+          ) : mode === "proof" ? (
+            <ProofPanel refreshKey={refreshKey} />
+          ) : mode === "federation" ? (
+            <FederationPanel refreshKey={refreshKey} />
           ) : mode === "trust" ? (
             <AuditQueuePanel
               stateLabel={
@@ -717,6 +786,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
             basemap={basemap}
             onBasemapFallback={() => setBasemapFallback(true)}
             routes={routes}
+            outbreaks={outbreaks}
             highlightRouteId={highlightTrip}
             onView={onView}
             onSelectFacility={pickFacility}
@@ -728,6 +798,19 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               <div className="text-[11px] font-medium text-ink-3">{medicineName}</div>
               <div className="text-[12.5px] text-ink">{tierHint}</div>
             </div>
+          </div>
+
+          <div className="absolute top-[68px] left-3 z-[900]">
+            <OutbreakControl
+              state={activeState}
+              stateLabel={activeState ? stateName(activeState) : "India"}
+              district={selected?.district ?? null}
+              canDeclare={!!activeState && can.planState(user, activeState)}
+              onChanged={() => {
+                pollNow();
+                setRefreshKey((k) => k + 1);
+              }}
+            />
           </div>
 
           {view.tier !== "state" && (
@@ -838,6 +921,30 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
             </div>
           )}
         </section>
+        {/* ------------------------------------------- field client --- */}
+        {fieldOpen ? (
+          <FieldPanel
+            user={user}
+            skus={skus}
+            facility={fieldFacility}
+            demoMode={session.demo_mode}
+            onSubmitted={() => {
+              // The left half repaints from the same live feed every other
+              // change uses — no private channel between the two panels.
+              pollNow();
+              setRefreshKey((k) => k + 1);
+            }}
+            onCollapse={() => toggleField(false)}
+          />
+        ) : (
+          <button
+            onClick={() => toggleField(true)}
+            title="Show the field client"
+            className="z-[1000] w-8 shrink-0 border-l border-line bg-panel text-[11px] font-medium text-ink-2 hover:bg-canvas"
+          >
+            <span className="inline-block [writing-mode:vertical-rl]">Field client</span>
+          </button>
+        )}
       </main>
     </div>
   );

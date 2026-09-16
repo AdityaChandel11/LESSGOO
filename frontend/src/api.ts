@@ -75,7 +75,7 @@ export interface SkuStock {
   days_of_stock: number | null;
   /** Which rule produced the rate: the last 28 days of readings, or the
    *  federated model's published forecast. */
-  rate_source: "burn_rate" | "federated";
+  rate_source: "burn_rate" | "federated" | "outbreak";
   status: Status;
   is_controlled: boolean;
   cold_chain: boolean;
@@ -295,7 +295,130 @@ export const api = {
   facilityTrust: (facilityId: string) =>
     get<Trust | null>(`/facilities/${encodeURIComponent(facilityId)}/trust`),
   trustQueue: (limit = 50) => get<AuditRow[]>("/trust/queue", { limit }),
+  federationRounds: () => get<FederationRound[]>("/federation/rounds"),
+  submitReading,
+  facilityContacts: (facilityId: string) =>
+    get<FacilityContact[]>(`/facilities/${encodeURIComponent(facilityId)}/contacts`),
+  /** The phone channels, with the gateway removed — same pipeline, no Twilio. */
+  simulateInbound: (body: {
+    channel: string;
+    from: string;
+    text: string;
+    external_id?: string;
+  }) => post<InboundResult>("/ingest/simulate", body),
+  outbreakCategories: () => get<Record<string, OutbreakCategory>>("/outbreak/categories"),
+  outbreaksActive: () => get<Outbreak[]>("/outbreak/active"),
+  declareOutbreak: (body: {
+    category: string;
+    district: string;
+    state: string;
+    radius_km: number;
+    severity: number;
+  }) => post<OutbreakDeclared>("/outbreak/declare", body),
+  clearOutbreak: (id: number) => post<{ cleared: boolean }>(`/outbreak/${id}/clear`),
+  evalReport: () => get<EvalReport | null>("/eval/report"),
 };
+
+/* ------------------------------------------------------- proof layer --- */
+
+export interface EvalReport {
+  run_at: string;
+  dataset_seed: number | null;
+  /** trust · redistribution · federation · impact, each with its own note. */
+  sections: Record<string, Record<string, unknown>>;
+  notes: string | null;
+}
+
+/* ---------------------------------------------------------- outbreak --- */
+
+export interface OutbreakCategory {
+  label: string;
+  /** The medicines this disease actually consumes, and by how much. */
+  commodities: Record<string, number>;
+}
+
+export interface Outbreak {
+  id: number;
+  district: string | null;
+  state_silo: string | null;
+  category: string | null;
+  label: string;
+  radius_km: number | null;
+  severity: number | null;
+  lat: number | null;
+  lng: number | null;
+  facilities_affected: number | null;
+  commodities: string[];
+  triggered_at: string;
+  expires_at: string | null;
+}
+
+export interface OutbreakDeclared {
+  outbreak: Outbreak;
+  at_risk_before: number;
+  at_risk_after: number;
+  /** How much sooner the worst-affected facility becomes visible as at risk. */
+  earliest_warning_days: number | null;
+}
+
+/* ----------------------------------------------------- phone channels --- */
+
+export interface FacilityContact {
+  facility_id: string;
+  /** All a screen may ever show of a number. */
+  masked: string;
+  role: "reporter" | "supervisor";
+  demo_number: string | null;
+}
+
+export interface InboundResult {
+  accepted: boolean;
+  duplicate: boolean;
+  needs_registration: boolean;
+  facility_id: string | null;
+  facility_name: string | null;
+  committed: Record<string, unknown>[];
+  /** Exactly what the sender's handset would receive back. */
+  reply: string;
+}
+
+/* -------------------------------------------------------- federation --- */
+
+export interface TensorShape {
+  name: string;
+  shape: number[];
+  params: number;
+  bytes: number;
+}
+
+export interface SiloRound {
+  state: string;
+  name: string;
+  windows: number | null;
+  trust: number | null;
+  /** The count FedProx weighted this silo by — its windows scaled by trust. */
+  weight: number | null;
+  train_loss: number | null;
+  mae: number | null;
+  baseline_mae: number | null;
+  flagged_pct: number | null;
+}
+
+export interface FederationRound {
+  run_id: string;
+  round_no: number;
+  strategy: string | null;
+  global_val_mae: number | null;
+  baseline_mae: number | null;
+  per_silo: SiloRound[];
+  bytes_transmitted: number | null;
+  tensor_shapes: TensorShape[];
+  weights_sha256: string | null;
+  /** Asserted zero by the aggregator before the row was written. */
+  raw_rows_transmitted: number;
+  silos_reporting: number | null;
+  completed_at: string;
+}
 
 /* --------------------------------------------------------- attendance --- */
 
@@ -551,6 +674,18 @@ export interface Plan {
   manual_review: Shortfall[];
 }
 
+export interface ReadingResult {
+  id: number;
+  facility_id: string;
+  sku_code: string;
+  qty_on_hand: number;
+  days_of_stock: number | null;
+  status_before: Status;
+  status_after: Status;
+  status_changed: boolean;
+  duplicate?: boolean;
+}
+
 export function submitReading(body: {
   facility_id: string;
   sku_code: string;
@@ -559,7 +694,7 @@ export function submitReading(body: {
   reporter_ref?: string;
   confidence?: number;
 }) {
-  return post<unknown>("/stock/readings", body);
+  return post<ReadingResult>("/stock/readings", body);
 }
 
 /* ------------------------------------------------------------ realtime --- */

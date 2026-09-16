@@ -80,6 +80,10 @@ def train(msg: Message, context: Context):
     model_record = ArrayRecord(model.state_dict())
     metrics = {
         "train_loss": train_loss,
+        # Which silo this is. A metric record carries numbers only — which is
+        # precisely the constraint the inspector enforces — so the state
+        # travels as its partition index and the server maps it back.
+        "partition-id": float(partition_id),
         # What the strategy weights by (trust-adjusted), and the true count.
         "num-examples": weight,
         "samples": samples,
@@ -108,13 +112,19 @@ def evaluate(msg: Message, context: Context):
         partition_id, num_partitions, batch_size
     )
 
-    eval_loss, eval_mae, baseline_mae = test_fn(model, valloader, device)
+    eval_loss, eval_mae, baseline_mae, last_value_mae, week_ago_mae = test_fn(
+        model, valloader, device
+    )
 
     metrics = {
         "eval_loss": eval_loss,
         "eval_mae": eval_mae,
+        "partition-id": float(partition_id),
         # The rule this model replaces: "next week looks like the last four".
         "baseline_mae": baseline_mae,
+        # The other two naive rules, on the same windows (spec 19.2).
+        "last_value_mae": last_value_mae,
+        "week_ago_mae": week_ago_mae,
         "num-examples": _contribution(len(valloader.dataset), trust),
         "samples": len(valloader.dataset),
     }

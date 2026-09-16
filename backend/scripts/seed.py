@@ -30,6 +30,7 @@ from sqlalchemy import insert, text
 
 from app.config import settings
 from app.db import SessionLocal, engine
+from app import ingest
 from app.geo import INDIA_STATES, TOTAL_SEEDED_FACILITIES, StateGeo
 from app.models import Facility, Sku
 from app.services import classify
@@ -504,6 +505,34 @@ def build_bed_reports(
     return codes, reports
 
 
+def build_contacts(facilities: list[dict]) -> list[tuple]:
+    """Register one reporting handset and one supervisor per facility — spec 13.
+
+    The numbers are never stored. Each is derived from the facility id, hashed
+    the same way an inbound message is hashed, and only the hash and a masked
+    form are written. The demo can therefore offer a number to type without the
+    platform ever having held one.
+    """
+    rows: list[tuple] = []
+    now = datetime.now(timezone.utc)
+    for fac in facilities:
+        for role in ("reporter", "supervisor"):
+            number = ingest.demo_number(fac["id"], role)
+            rows.append(
+                (
+                    ingest.hash_phone(number),
+                    fac["id"],
+                    ingest.mask_phone(number),
+                    role,
+                    "en",
+                    True,
+                    now,
+                    None,
+                )
+            )
+    return rows
+
+
 async def _copy(conn, table: str, columns: list[str], records: list[tuple]) -> None:
     """Bulk load via asyncpg COPY — orders of magnitude faster than INSERT."""
     if not records:
@@ -552,7 +581,9 @@ async def main() -> None:
                 "medicine_movements, verification_codes, bed_reports, "
                 "facility_trust, staff_checkins, approvals, transfers, trust_flags, "
                 "outbreak_events, route_matrix_cache, outbound_messages, "
-                "impact_ledger, federation_rounds, events, facilities, skus "
+                "impact_ledger, federation_rounds, events, facility_contacts, "
+                "forecasts, synthetic_ground_truth, eval_reports, "
+                "outbreak_demand, outbreak_events, facilities, skus "
                 "RESTART IDENTITY CASCADE"
             )
         )
@@ -652,6 +683,21 @@ async def main() -> None:
              "register_admissions", "model_confidence", "media_ref", "raw_payload",
              "verification"],
             bed_report_rows,
+        )
+        # Ground truth for the eval harness (spec 19.2). Written here because
+        # this is the only place that knows which facilities were deliberately
+        # made dishonest; nothing in the product reads it.
+        await _copy(
+            conn, "synthetic_ground_truth",
+            ["facility_id", "label", "seeded_at"],
+            [(fid, "gaming", datetime.now(timezone.utc)) for fid in sorted(gaming)]
+            + [(fid, "supply_failure", datetime.now(timezone.utc)) for fid in sorted(failing)],
+        )
+        await _copy(
+            conn, "facility_contacts",
+            ["phone_hash", "facility_id", "masked", "role", "language",
+             "is_active", "registered_at", "last_seen_at"],
+            build_contacts(facilities),
         )
         movement_rows = build_movements(facilities, rng, quality)
         await _copy(

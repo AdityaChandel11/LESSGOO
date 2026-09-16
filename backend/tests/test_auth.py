@@ -173,6 +173,7 @@ def test_lockout_ends_when_the_oldest_failure_leaves_the_window():
 GOOD_PROD = dict(
     environment="production",
     jwt_secret="x" * 48,
+    phone_hash_salt="y" * 32,
     demo_mode=False,
     database_url="postgresql+asyncpg://app:s3cret@/phc?host=/cloudsql/p:r:i",
 )
@@ -190,6 +191,11 @@ def test_valid_production_settings_start():
         (dict(demo_mode=True), "DEMO_MODE"),
         (dict(cookie_secure=False), "COOKIE_SECURE"),
         (dict(database_url="postgresql+asyncpg://postgres:postgres@localhost/phc"), "DATABASE_URL"),
+        # Without its own salt, phone hashing would fall back to something
+        # shared or default — and a handset registered under one salt silently
+        # stops being recognised under another.
+        (dict(phone_hash_salt=""), "PHONE_HASH_SALT"),
+        (dict(phone_hash_salt="dev-only-phone-salt-never-use-in-production"), "PHONE_HASH_SALT"),
     ],
 )
 def test_unsafe_production_settings_refuse_to_start(override, problem):

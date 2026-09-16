@@ -56,6 +56,14 @@ export interface RouteLine {
   label: string;
 }
 
+export interface OutbreakArea {
+  id: number;
+  lat: number | null;
+  lng: number | null;
+  radius_km: number | null;
+  label: string;
+}
+
 interface Props {
   sku: string | null;
   refreshKey: number;
@@ -64,6 +72,8 @@ interface Props {
   flyTarget: FlyTarget | null;
   routes?: RouteLine[];
   highlightRouteId?: string | null;
+  /** Declared outbreaks, drawn exactly as declared: a centre and a radius. */
+  outbreaks?: OutbreakArea[];
   /** Where the map opens, e.g. restored from a shared link. Read once. */
   initialView?: { lat: number; lng: number; zoom: number } | null;
   /** Null until runtime config has loaded. */
@@ -180,6 +190,7 @@ export default function NationalMap({
   flyTarget,
   routes = [],
   highlightRouteId = null,
+  outbreaks = [],
   initialView = null,
   basemap = null,
   onBasemapFallback,
@@ -191,9 +202,12 @@ export default function NationalMap({
   const mapRef = useRef<L.Map | null>(null);
   const layerRef = useRef<L.LayerGroup | null>(null);
   const routesLayerRef = useRef<L.LayerGroup | null>(null);
+  const outbreakLayerRef = useRef<L.LayerGroup | null>(null);
   const routesRendererRef = useRef<L.Canvas | null>(null);
 
   const statesRef = useRef<Bucket[]>([]);
+  const outbreaksRef = useRef<OutbreakArea[]>([]);
+  outbreaksRef.current = outbreaks;
   const districtsRef = useRef<Bucket[]>([]);
   const pinsRef = useRef<Pin[]>([]);
   const pinMarkersRef = useRef<Map<string, L.CircleMarker>>(new Map());
@@ -268,6 +282,34 @@ export default function NationalMap({
       pinMarkersRef.current.set(p.id, m);
     }
   };
+
+  // The declared area, drawn as declared. Not a heatmap and not a guess at
+  // where disease "is" — a circle an officer chose, so what the solver reacted
+  // to is visible on the map rather than implied by it.
+  useEffect(() => {
+    const layer = outbreakLayerRef.current;
+    if (!layer) return;
+    layer.clearLayers();
+    for (const o of outbreaks) {
+      if (o.lat == null || o.lng == null || !o.radius_km) continue;
+      L.circle([o.lat, o.lng], {
+        radius: o.radius_km * 1000,
+        color: "#d92d20",
+        weight: 1.5,
+        opacity: 0.85,
+        fillColor: "#d92d20",
+        fillOpacity: 0.07,
+        dashArray: "6 4",
+        interactive: false,
+      })
+        .bindTooltip(
+          `<div class="tt"><div class="tt-title">${esc(o.label)}</div>` +
+            `<div class="tt-sub">declared area · ${o.radius_km} km</div></div>`,
+          { sticky: true },
+        )
+        .addTo(layer);
+    }
+  }, [outbreaks]);
 
   const drawRoutes = () => {
     const map = mapRef.current;
@@ -441,6 +483,7 @@ export default function NationalMap({
     map.createPane("routeArrows").style.zIndex = "395";
     routesRendererRef.current = L.canvas({ pane: "routes", padding: 0.5 });
     routesLayerRef.current = L.layerGroup().addTo(map);
+    outbreakLayerRef.current = L.layerGroup().addTo(map);
 
     layerRef.current = L.layerGroup().addTo(map);
     mapRef.current = map;

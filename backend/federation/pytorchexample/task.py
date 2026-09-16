@@ -178,25 +178,37 @@ def train(
 
 def test(
     net: nn.Module, loader: DataLoader, device: torch.device
-) -> tuple[float, float, float]:
-    """Evaluate, against the method this model is meant to replace.
+) -> tuple[float, float, float, float, float]:
+    """Evaluate, against every method this model claims to beat.
 
-    Returns (mse, mae, baseline_mae). The baseline predicts 1.0 for every
-    window — "next week will look like the last four weeks" — which is the
-    burn-rate rule SwasthSetu uses today. The model is only worth deploying if
-    its MAE is below that number.
+    Returns (mse, mae, mean_28d_mae, last_value_mae, week_ago_mae). The three
+    baselines are computed on the very same windows, in the same pass, so no
+    comparison can drift:
+
+      mean_28d    predict 1.0 — "next week looks like the last four weeks",
+                  which is the burn-rate rule SwasthSetu uses today
+      last_value  predict yesterday's consumption
+      week_ago    predict the same day last week, the cheapest seasonal guess
+
+    A model that cannot beat all three has learned nothing worth deploying.
     """
     net.to(device)
     net.eval()
     criterion = nn.MSELoss(reduction="sum")
-    total_se, total_ae, baseline_ae, n = 0.0, 0.0, 0.0, 0
+    total_se = total_ae = mean_ae = last_ae = week_ae = 0.0
+    n = 0
     with torch.no_grad():
         for seq, cal, y in loader:
             seq, cal, y = seq.to(device), cal.to(device), y.to(device)
             pred = net(seq, cal)
             total_se += criterion(pred, y).item()
             total_ae += (pred - y).abs().sum().item()
-            baseline_ae += (y - 1.0).abs().sum().item()
+            # Every window is scaled by its own 28-day mean, so predicting 1.0
+            # *is* the burn-rate rule, and the other two read straight off the
+            # sequence the model just saw.
+            mean_ae += (y - 1.0).abs().sum().item()
+            last_ae += (y - seq[:, -1]).abs().sum().item()
+            week_ae += (y - seq[:, -7]).abs().sum().item()
             n += y.numel()
     n = max(n, 1)
-    return total_se / n, total_ae / n, baseline_ae / n
+    return total_se / n, total_ae / n, mean_ae / n, last_ae / n, week_ae / n

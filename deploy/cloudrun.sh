@@ -95,6 +95,12 @@ setup() {
   say "Session signing secret"
   create_secret "${SERVICE}-jwt-secret" "$(openssl rand -base64 48 | tr -d '\n')"
 
+  say "Phone-number hashing salt"
+  # Created once and never rotated casually: it is what keeps this database from
+  # being turned back into a list of health workers' phone numbers, and changing
+  # it orphans every handset already registered.
+  create_secret "${SERVICE}-phone-salt" "$(openssl rand -base64 32 | tr -d '\n')"
+
   say "Runtime service account (least privilege)"
   gc iam service-accounts describe "$RUNTIME_SA" >/dev/null 2>&1 ||
     gc iam service-accounts create "${SERVICE}-runtime" --display-name "SwasthSetu runtime"
@@ -108,7 +114,7 @@ setup() {
 
 common_flags=()
 set_common_flags() {
-  local secrets="DATABASE_URL=${SERVICE}-database-url:latest,JWT_SECRET=${SERVICE}-jwt-secret:latest"
+  local secrets="DATABASE_URL=${SERVICE}-database-url:latest,JWT_SECRET=${SERVICE}-jwt-secret:latest,PHONE_HASH_SALT=${SERVICE}-phone-salt:latest"
   local env="ENVIRONMENT=production,DEMO_MODE=${PUBLIC_DEMO},ALLOW_PUBLIC_DEMO=${PUBLIC_DEMO},DB_POOL_SIZE=${DB_POOL_SIZE},DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW}"
   # Google Maps turns on only when its server key has been stored as a secret:
   #   printf '%s' "$KEY" | gcloud secrets create swasthsetu-maps-server-key --data-file=-

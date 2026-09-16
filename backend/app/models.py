@@ -47,6 +47,9 @@ TRUST_BANDS = ("good", "watch", "audit")
 # What produced a location, recorded on every geofenced row so the UI can say
 # which check actually ran (spec 26.1).
 LOC_METHODS = ("gps", "cell_id", "none", "simulated")
+# A phone may report for its facility, or — for a supervisor's number —
+# also decide transfers. Never both by accident.
+CONTACT_ROLES = ("reporter", "supervisor")
 
 
 class Facility(Base):
@@ -453,15 +456,62 @@ class TrustFlag(Base):
 
 
 class OutbreakEvent(Base):
+    """A declared outbreak — spec 12.5.
+
+    Not a new subsystem: it raises expected demand for the commodities that
+    disease actually consumes, inside a radius, for a fixed window. Everything
+    downstream — days of cover, the map's colours, the redistribution solver —
+    reacts on its own, and every transfer it causes still passes the same
+    human-approval gate as any other.
+    """
+
     __tablename__ = "outbreak_events"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     district: Mapped[str | None] = mapped_column(Text)
+    state_silo: Mapped[str | None] = mapped_column(Text, index=True)
     disease_category: Mapped[str | None] = mapped_column(Text)
-    radius_km: Mapped[Decimal | None] = mapped_column(Numeric)
-    severity: Mapped[Decimal | None] = mapped_column(Numeric)
+    radius_km: Mapped[float | None] = mapped_column()
+    severity: Mapped[float | None] = mapped_column()
+    # The centre of the affected area, so the map can draw exactly what was
+    # declared rather than a district-shaped guess.
+    lat: Mapped[float | None] = mapped_column()
+    lng: Mapped[float | None] = mapped_column()
+    facilities_affected: Mapped[int | None] = mapped_column(Integer)
+    declared_by: Mapped[str | None] = mapped_column(Text)
+    note: Mapped[str | None] = mapped_column(Text)
     triggered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+    # An outbreak is a period, not a permanent state of the world.
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    cleared_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class OutbreakDemand(Base):
+    """Raised demand for one facility and one medicine, while an outbreak runs.
+
+    Kept separate from `forecasts` on purpose. A forecast is what the model
+    believes will happen; this is a clinical judgement that a district officer
+    declared and can withdraw. Merging them would make it impossible to say
+    afterwards which number came from where.
+    """
+
+    __tablename__ = "outbreak_demand"
+
+    outbreak_id: Mapped[int] = mapped_column(
+        ForeignKey("outbreak_events.id", ondelete="CASCADE"), primary_key=True
+    )
+    facility_id: Mapped[str] = mapped_column(
+        ForeignKey("facilities.id"), primary_key=True
+    )
+    sku_code: Mapped[str] = mapped_column(ForeignKey("skus.code"), primary_key=True)
+    # What normal consumption is multiplied by while this runs.
+    multiplier: Mapped[float] = mapped_column(nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index("ix_outbreak_demand_facility", "facility_id", "expires_at"),
     )
 
 
@@ -479,6 +529,37 @@ class RouteMatrixCache(Base):
     )
 
 
+class FacilityContact(Base):
+    """Who may report for a facility over a phone channel — spec 13, step 2.
+
+    The number itself is never stored. An inbound message is normalised and
+    hashed with the server's salt, and the hash is what is looked up here, so
+    this table cannot be turned back into a list of health workers' phone
+    numbers by anyone who obtains it. `masked` is what a screen may display.
+    """
+
+    __tablename__ = "facility_contacts"
+
+    phone_hash: Mapped[str] = mapped_column(Text, primary_key=True)
+    facility_id: Mapped[str] = mapped_column(ForeignKey("facilities.id"), index=True)
+    masked: Mapped[str] = mapped_column(Text, nullable=False)
+    # What this number may do. Reporting stock is not the same permission as
+    # approving a transfer, and a stolen handset must not become an approval.
+    role: Mapped[str] = mapped_column(Text, nullable=False, default="reporter")
+    language: Mapped[str] = mapped_column(Text, default="en")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    registered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            f"role IN {CONTACT_ROLES}", name="ck_facility_contacts_role"
+        ),
+    )
+
+
 class OutboundMessage(Base):
     __tablename__ = "outbound_messages"
 
@@ -491,6 +572,51 @@ class OutboundMessage(Base):
     sent_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class SyntheticGroundTruth(Base):
+    """What the generator deliberately made wrong — spec 19.2.
+
+    Evaluation only. The trust layer scores facilities from their own signals
+    and must never see this table; if it did, the precision figure it produced
+    would be a measurement of nothing. Nothing in `app/` outside
+    `evaluation.py` may read it, and `evaluation.py` only compares against it
+    after the scoring has already happened.
+
+    It exists because a trust score with no ground truth cannot be reported as
+    precision and recall, and "it flagged some facilities" is not a number.
+    """
+
+    __tablename__ = "synthetic_ground_truth"
+
+    facility_id: Mapped[str] = mapped_column(
+        ForeignKey("facilities.id"), primary_key=True
+    )
+    # 'gaming'         — reports implausibly smooth or contradictory numbers
+    # 'supply_failure' — genuinely short of stock, which is not dishonesty
+    label: Mapped[str] = mapped_column(Text, primary_key=True)
+    seeded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class EvalReport(Base):
+    """One run of the eval harness — spec 19.2.
+
+    These are the numbers quoted on stage, so they are stored with the moment
+    they were computed and the seed they were computed from. A number without a
+    date is a claim; a number with one is a measurement.
+    """
+
+    __tablename__ = "eval_reports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    dataset_seed: Mapped[int | None] = mapped_column(Integer)
+    sections: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
 
 
 class ImpactLedger(Base):
@@ -509,19 +635,44 @@ class ImpactLedger(Base):
 
 
 class FederationRound(Base):
+    """One round of federated training, and the evidence of what crossed the
+    wire — spec 12.2 and 27.
+
+    The claim this table has to survive is "no facility data leaves a state".
+    That is not a slide: the aggregator writes here, every round, exactly how
+    many bytes it received, the shape of every tensor, a hash of the weights,
+    and the number of raw rows transmitted — which the server asserts is zero
+    before the row is written, rather than simply storing a zero.
+    """
+
     __tablename__ = "federation_rounds"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    round_no: Mapped[int] = mapped_column(Integer)
-    global_val_mae: Mapped[Decimal | None] = mapped_column(Numeric)
-    per_silo_mae: Mapped[dict | None] = mapped_column(JSONB)
-    # The inspector's evidence (spec 12.2): what left each silo, and what did not.
+    run_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    round_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    strategy: Mapped[str | None] = mapped_column(Text)
+
+    global_val_mae: Mapped[float | None] = mapped_column()
+    # The rule this model replaces, scored on the same held-out weeks, so the
+    # chart can never flatter the model by changing what it is measured against.
+    baseline_mae: Mapped[float | None] = mapped_column()
+    # Per state: windows trained on, live trust, the weight that trust bought
+    # it, and its own validation error.
+    per_silo: Mapped[list | None] = mapped_column(JSONB)
+
+    # The inspector's evidence: what left each silo, and what did not.
     bytes_transmitted: Mapped[int | None] = mapped_column(BigInteger)
-    tensor_shapes: Mapped[dict | None] = mapped_column(JSONB)
+    tensor_shapes: Mapped[list | None] = mapped_column(JSONB)
     weights_sha256: Mapped[str | None] = mapped_column(Text)
     raw_rows_transmitted: Mapped[int] = mapped_column(Integer, default=0)
+    silos_reporting: Mapped[int | None] = mapped_column(Integer)
+
     completed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+    __table_args__ = (
+        Index("uq_federation_round", "run_id", "round_no", unique=True),
     )
 
 
