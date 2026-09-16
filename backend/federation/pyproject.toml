@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "quickstart-pytorch"
+version = "1.1.13"
+description = "SwasthSetu: federated medicine-demand forecasting across state health silos"
+license = {file = "LICENSE"}
+dependencies = [
+    "flwr[simulation]>=1.36.0",
+    "torch==2.10.0",
+    "numpy>=1.26",
+    # The silos are read live from the platform's database — there is one
+    # medicine-stock database in this system and no exported copy of it.
+    "psycopg[binary]>=3.2",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
+
+[tool.flwr.app]
+publisher = "flwrlabs"
+fab-format-version = 1
+flwr-version-target = "1.36.0"
+
+[tool.flwr.app.components]
+serverapp = "pytorchexample.server_app:app"
+clientapp = "pytorchexample.client_app:app"
+
+[tool.flwr.app.config]
+num-server-rounds = 8
+fraction-evaluate = 1.0
+local-epochs = 1
+# Adam on a small LSTM: 0.1 (the image-classifier default) diverges here.
+learning-rate = 0.005
+batch-size = 64
+# FedProx's proximal weight. Set to 0.0 to run exact FedAvg for comparison:
+#   flwr run . --run-config "proximal-mu=0.0"
+proximal-mu = 0.01
+save-model = true
+
+
+#######################################################################
+# CONFIGURATION MIGRATION NOTICE:
+#
+# What was previously called "federation config" for SuperLink
+# connections in pyproject.toml has been renamed and moved.
+#
+# These settings are now **SuperLink connection configuration**
+# and are defined in the Flower configuration file.
+#
+# The entries below are commented out intentionally and are kept
+# only as a migration reference.
+#
+# Docs: https://flower.ai/docs/framework/ref-flower-configuration.html
+#######################################################################
+
+# [tool.flwr.federations]
+# default = "local-simulation"
+
+# [tool.flwr.federations.local-simulation]
+# # One supernode per state silo: Maharashtra, Kerala, Bihar, Uttar Pradesh.
+# options.num-supernodes = 4
