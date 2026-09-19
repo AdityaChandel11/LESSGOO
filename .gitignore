@@ -37,3 +37,6 @@ backend/data/cache/
 backend/static/
 .env.production
 *.log
+
+# --- key inventory: local reference only, never committed ---
+KEYS.md
