@@ -8,7 +8,7 @@
 
 ## Revision Pass v3.1 — the capture layer moves to the front
 
-Two source documents arrived after v3 was written: `federated-health-brief.md` (the federated architecture in depth) and `data trust layer.md` (how data is actually captured from facilities with no internet and no biometric hardware, and how it is verified). They are not a bolt-on. They describe the **input layer this spec assumed already existed**, and they change the order of the build:
+Two source documents arrived after v3 was written: `federated-health-brief.md` (the federated architecture in depth) and `data-trust-layer.md` (how data is actually captured from facilities with no internet and no biometric hardware, and how it is verified). They are not a bolt-on. They describe the **input layer this spec assumed already existed**, and they change the order of the build:
 
 1. **Trust gates forecasting, not the other way round.** v3 scheduled the trust layer in Week 4, after federation. Wrong order: a handful of facilities reporting bad numbers pushes bad gradients into the shared model *every round*. Flag first, then forecast. The trust layer moves ahead of federated training — see the rebuilt Section 18.
 2. **Verification is a data-model concern, not a screen.** Rotating codes, dispatch↔receipt pairing, and geofence results have to exist as columns from the first synthetic row, so they are added to Section 9 (→ **9.1**) rather than retro-fitted.
@@ -398,7 +398,7 @@ CREATE TABLE federation_rounds (             -- NEW
 
 **Privacy note:** `reporter_ref` and `staff_ref` store a salted hash, never a raw phone number or name. The UI displays masked forms (`+91••••1234`). This system holds **no patient-level data at all** — that is a deliberate scope decision and a strong answer to any compliance question.
 
-### 9.1 Capture and verification tables *(v3.1 — from `data trust layer.md`)*
+### 9.1 Capture and verification tables *(v3.1 — from `data-trust-layer.md`)*
 
 These exist from the first synthetic row, not as a later migration. Every verified fact carries *how* it was verified.
 
@@ -661,7 +661,7 @@ The commodity table is clinician-reviewable and versioned. Its output still funn
 
 12.4 flags one signal against itself. This scores a facility across *independent* signals, which is the part that is genuinely hard to fake: keeping attendance, footfall, bed occupancy, consumption, and receipt confirmations mutually consistent takes far more effort than inflating any one of them.
 
-Kept rules-based on purpose — per `data trust layer.md`, a second trained model would compete with federated forecasting for build time and add an unexplainable number to a screen whose whole value is explainability.
+Kept rules-based on purpose — per `data-trust-layer.md`, a second trained model would compete with federated forecasting for build time and add an unexplainable number to a screen whose whole value is explainability.
 
 ```python
 # Window: trailing 14 days, per facility. Each rule returns 0.0 (clean) to 1.0
@@ -970,7 +970,7 @@ These consume calendar time rather than build time, and they block later phases 
 
 ---
 
-## 26. Data capture and verification *(v3.1 — from `data trust layer.md`)*
+## 26. Data capture and verification *(v3.1 — from `data-trust-layer.md`)*
 
 The layer v3 assumed existed. Three data types, each captured over whatever channel the facility actually has, each arriving with evidence of how it was verified.
 
@@ -1078,6 +1078,8 @@ Same weights, same rounds, same inspector output. The Flower claim is demonstrab
 ## 28. Build sequence v3.1 — live order of work
 
 Replaces Section 18. Every phase ends in something demonstrable.
+
+**Status note — 2026-09-20.** B3 and all of Phases C and D were built on 2026-09-16 and then deliberately removed, by resetting `main` to `542d8dc`, to restart that work with a different approach. The statuses below are current as of 2026-09-20: Phase A complete; Phase B at B1, B2 and B5 with **B3 not built**; Phases C, D and E not started. The removed code survives only in the local branch `backup-before-phase-c-removal`, and the database was rolled back to migration `3de61cc073d9` to match. `SPEC_DIGEST.md` §5 carries the same status — keep the two in step.
 
 ### Already built and verified
 
