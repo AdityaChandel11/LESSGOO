@@ -53,6 +53,14 @@ Trigger table. These files are big — do **not** `@`-import them. Load only the
 - Label synthetic data as synthetic — in the README, the deck and the demo. Impact numbers are either cited from a public source or labelled an estimate; never invented.
 - Google AI must do load-bearing work: if removing Gemini would not break or visibly weaken a core feature, say so and propose how to make it load-bearing.
 
+## AT THE END OF EVERY FINISHED STAGE
+In this order, no exceptions:
+1. Run the full check suite and every unit test. A stage with a failing test is not finished.
+2. Scan the diff and the tree for keys, tokens, passwords, DSNs and salts. If a real one is found, stop and say so — never print the value.
+3. Commit: one commit per feature, unrelated changes kept apart, nothing half-done included. Never `.env`, `KEYS.md`, database dumps or any real secret.
+4. Tag the stage (`phase-b-complete`, `phase-c-complete`, …) and push the commits and the tag. Normal push, never `--force`.
+5. `backup-before-phase-c-removal` stays local and is never pushed.
+
 ## AFTER EVERY STAGE, REPORT
 1. Status of each of the 5 submission items.
 2. Whether Google AI is live in the real end-to-end flow and demo-able (not decorative).
