@@ -28,6 +28,7 @@ from decimal import Decimal
 
 from sqlalchemy import insert, text
 
+from app import groundtruth
 from app.config import settings
 from app.db import SessionLocal, engine
 from app.geo import INDIA_STATES, TOTAL_SEEDED_FACILITIES, StateGeo
@@ -582,6 +583,14 @@ async def main() -> None:
     )
     failing = set(rng.sample(ids, k=max(1, int(len(ids) * args.supply_failure_pct))))
 
+    # The only place that knows which facilities were deliberately made
+    # dishonest records it for the evaluation harness. Written here rather than
+    # at the end so a half-finished run cannot leave a ground truth describing
+    # data that was never committed; every run rewrites it from scratch.
+    truth_path = groundtruth.write(
+        None, seed=args.seed, facility_ids=ids, gaming=gaming, supply_failure=failing
+    )
+
     async with SessionLocal() as session:
         await session.execute(
             insert(Sku),
@@ -683,6 +692,7 @@ async def main() -> None:
         f"  rng seed          : {args.seed}  (recorded for reproducible replay)\n"
         f"  history           : {args.days}d everywhere, {args.focus_days}d in {focus}\n"
         f"  gaming facilities : {len(gaming)} (trust-layer ground truth)\n"
+        f"  ground truth      : {truth_path.name} (read only by the eval harness)\n"
         f"  reporting quality : weakest {deep[0]}, strongest {deep[-1]} — drawn at\n"
         f"                      random this run; synthetic, and not a claim about\n"
         f"                      either state\n"

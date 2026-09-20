@@ -40,3 +40,6 @@ backend/static/
 
 # --- key inventory: local reference only, never committed ---
 KEYS.md
+
+# --- evaluation outputs: generated, never committed ---
+backend/eval_reports/
