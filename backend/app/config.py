@@ -10,11 +10,12 @@ Two ideas hold this file together.
    discovered after launch.
 """
 
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LlmMode = Literal["mock", "live"]
@@ -30,6 +31,50 @@ DEV_JWT_SECRET = "dev-only-signing-secret-never-use-in-production"
 # without anyone configuring anything. Production refuses to use it.
 DEV_PHONE_SALT = "dev-only-phone-salt-never-use-in-production"
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
+
+
+# A host hands out whatever DSN it likes. Render's is `postgresql://`; Heroku
+# and several older tools still emit `postgres://`. SQLAlchemy's async engine
+# refuses both, because neither names an async driver — and it refuses them at
+# import time, so the symptom is a container that crash-loops before it can log
+# anything useful. Rather than depending on whoever pastes the URL into a
+# dashboard getting the prefix right, the app corrects it on the way in.
+#
+# Drivers that cannot work asynchronously at all are corrected too. An
+# explicitly chosen async driver (`psycopg`, meaning v3) is left alone: that is
+# a real decision, not a mistake.
+SYNC_ONLY_DRIVERS = ("psycopg2", "pg8000")
+
+
+def normalise_database_url(raw: str) -> str:
+    """Return `raw` as a DSN this application's async engine can open.
+
+    Two corrections, both for the same reason — a copied connection string
+    should not be able to stop a deployment from booting:
+
+    1. the scheme gains `+asyncpg` when it names no async driver;
+    2. `sslmode` in the query becomes `ssl`. SQLAlchemy forwards unrecognised
+       query parameters to `asyncpg.connect()` as keyword arguments, and that
+       function has no `sslmode` argument at all; `ssl` accepts the same
+       values (`require`, `verify-full`, ...).
+
+    Anything that is not a Postgres URL is returned untouched.
+    """
+    url = raw.strip()
+    if "://" not in url:
+        return url
+    scheme, rest = url.split("://", 1)
+    name, _, driver = scheme.partition("+")
+    if name.lower() in ("postgres", "postgresql") and (
+        not driver or driver.lower() in SYNC_ONLY_DRIVERS
+    ):
+        scheme = "postgresql+asyncpg"
+    base, sep, query = rest.partition("?")
+    if query:
+        # Only the key is rewritten; values are left exactly as given, because
+        # a re-encoded value is a different connection string.
+        query = re.sub(r"(?i)(^|&)sslmode=", r"\1ssl=", query)
+    return scheme + "://" + base + sep + query
 
 
 class Settings(BaseSettings):
@@ -165,6 +210,11 @@ class Settings(BaseSettings):
     # Beyond this a published forecast is stale and is ignored in favour of the
     # burn rate. A week-ahead forecast is worthless once the week has passed.
     forecast_max_age_days: float = 8.0
+
+    @field_validator("database_url", mode="after")
+    @classmethod
+    def _name_the_async_driver(cls, value: str) -> str:
+        return normalise_database_url(value)
 
     @property
     def phone_salt(self) -> str:
