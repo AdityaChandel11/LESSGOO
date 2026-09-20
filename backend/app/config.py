@@ -82,8 +82,13 @@ class Settings(BaseSettings):
     # --- credentials: only read once the matching switch is flipped ---
     gemini_api_key: str = ""
     # Flash is the right size for reading a bed count and a four-character code
-    # off a photograph: cheap enough to run on every ward, every day.
-    gemini_model: str = "gemini-2.5-flash"
+    # off a photograph: cheap enough to run on every ward, every day, and free
+    # of the billing requirement a Pro model carries.
+    #
+    # Not 2.5: the API now answers 404 for gemini-2.5-flash and -flash-lite with
+    # "no longer available to new users", naming 3.6-flash as the replacement.
+    # Verified against a real key on 2026-09-20.
+    gemini_model: str = "gemini-3.6-flash"
     # Server key: Routes API only, restricted to this service. Never sent to a browser.
     google_maps_server_key: str = ""
     # Browser key: Map Tiles API only, restricted to the site's domains. It is

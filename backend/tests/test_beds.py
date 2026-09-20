@@ -174,10 +174,22 @@ def test_unreadable_model_output_raises_rather_than_inventing_numbers():
         vision._first_json_object("I counted about eight beds")
 
 
-def test_mock_mode_needs_no_photo_and_labels_itself():
+def test_mock_mode_needs_no_photo_and_labels_itself(monkeypatch):
+    # Pinned rather than inherited: this asserts what the mock path does, and it
+    # must keep asserting that on a machine where a real key is configured.
+    monkeypatch.setattr(vision.settings, "llm_mode", "mock")
     result = asyncio.run(vision.read_ward_photo(None, simulate={"beds_occupied": 9}))
     assert result.beds_occupied == 9
     assert result.is_mock and result.model == "mock"
+
+
+def test_live_mode_refuses_to_invent_a_photo(monkeypatch):
+    # The other half of the same rule: with a key configured, a caller cannot
+    # ask for a simulated reading and be handed one that looks real.
+    monkeypatch.setattr(vision.settings, "llm_mode", "live")
+    monkeypatch.setattr(vision.settings, "gemini_api_key", "not-a-real-key")
+    with pytest.raises(vision.VisionError):
+        asyncio.run(vision.read_ward_photo(None, simulate={"beds_occupied": 9}))
 
 
 # ------------------------------------------------------------- the code ---
