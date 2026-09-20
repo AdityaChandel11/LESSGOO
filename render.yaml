@@ -1,0 +1,70 @@
+# Render deployment — one service, one origin.
+#
+# The API and the built site are the same service on purpose: a single origin
+# means no CORS configuration and, more importantly, a first-party session
+# cookie. `__session` is SameSite=lax, so splitting the frontend onto another
+# host is precisely how sign-in would break.
+#
+# The database is NOT defined here. It was created by hand in the Render
+# dashboard, and a managed database is not something a config file should be
+# able to replace or destroy on a redeploy.
+#
+# Secrets carry `sync: false`: Render prompts for them once in the dashboard
+# and never stores them in this repository.
+
+services:
+  - type: web
+    name: swasthsetu
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    region: singapore
+    plan: free
+    # /api/health reports database reachability, not just process liveness, so
+    # a service that cannot reach Postgres is reported as unhealthy instead of
+    # answering with an empty map.
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      # Production refuses to start with DEMO_MODE on unless this is explicit.
+      # Both are deliberate here: this deployment is a public demo.
+      - key: DEMO_MODE
+        value: "true"
+      - key: ALLOW_PUBLIC_DEMO
+        value: "true"
+      # Gemini reads ward photographs; this is the Google AI the submission
+      # rests on, so it runs live rather than mocked.
+      - key: LLM_MODE
+        value: live
+      # Stays osm until Google's own attribution logo asset is in the build:
+      # rendering their imagery without it is a licensing problem nobody would
+      # notice. See frontend/public/google-attribution/README.md.
+      - key: MAPS_MODE
+        value: osm
+      # Stays simulator until the Twilio webhook URL exists, which needs this
+      # service's public URL — available only after the first deploy.
+      - key: COMMS_MODE
+        value: simulator
+      - key: FORECAST_MODE
+        value: federated
+      # One free instance, so the polling event log needs no shared bus and
+      # the connection budget stays within the free database's limit.
+      - key: DB_POOL_SIZE
+        value: "3"
+      - key: DB_MAX_OVERFLOW
+        value: "2"
+      # --- set in the dashboard, never in this file ---
+      # Render's Internal Database URL, with postgres:// rewritten to
+      # postgresql+asyncpg:// — SQLAlchemy needs the driver named.
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      # Generate once and never rotate casually: it is what stops this
+      # database becoming a list of health workers' phone numbers, and
+      # changing it orphans every registered handset.
+      - key: PHONE_HASH_SALT
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false

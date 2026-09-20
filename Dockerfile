@@ -40,6 +40,11 @@ USER app
 
 EXPOSE 8080
 
-# --proxy-headers: behind Cloud Run's front end, take the real client address
-# (used for sign-in rate limiting) and scheme from X-Forwarded-* headers.
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --proxy-headers --forwarded-allow-ips='*' --timeout-graceful-shutdown 20"]
+# Migrations run before the first request, not by hand afterwards: the free
+# tiers of most hosts have no pre-deploy hook and no shell, so a schema change
+# that only a human could apply would silently never be applied. One instance
+# serves this service, so there is no race between two of them migrating.
+#
+# --proxy-headers: behind a platform front end, take the real client address
+# (used for sign-in rate limiting) and the scheme from X-Forwarded-* headers.
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --proxy-headers --forwarded-allow-ips='*' --timeout-graceful-shutdown 20"]
