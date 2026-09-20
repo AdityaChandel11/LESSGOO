@@ -13,15 +13,49 @@ and the proximal term is what holds it near the model the server sent.
 value apart and the difference can be measured rather than argued about.
 """
 
+from datetime import datetime, timezone
+
 import torch
 from flwr.app import ArrayRecord, ConfigRecord, Context, MetricRecord
 from flwr.serverapp import Grid, ServerApp
 from flwr.serverapp.strategy import FedProx
 
+from flwr.serverapp.strategy.strategy_utils import aggregate_metricrecords
+
+from pytorchexample import inspector
 from pytorchexample.task import SILOS, DemandLSTM, load_centralized_dataset, test
 
 # Create ServerApp
 app = ServerApp()
+
+# What the current round has learned about itself, filled in as the replies
+# arrive and written out once the round is scored. Module state because
+# Flower's evaluate callback takes only a round number and the weights.
+_ROUND: dict = {"run_id": "", "strategy": "", "per_silo": {}, "raw_rows": 0}
+
+
+def _capture_train(records: list, weighting_metric_name: str):
+    """Inspect every reply, note who sent what, then aggregate as usual.
+
+    The inspection happens before aggregation on purpose: a reply carrying
+    anything but weights and scalars stops the round instead of being averaged
+    into the national model (spec 12.2).
+    """
+    _ROUND["raw_rows"] = inspector.assert_weights_only(records)
+    per_silo: dict[str, dict] = {}
+    for record in records:
+        metrics = next(iter(record.metric_records.values()))
+        index = int(metrics.get("partition-id", -1))
+        state = SILOS[index] if 0 <= index < len(SILOS) else "silo-{0}".format(index)
+        per_silo[state] = {
+            "windows": int(metrics.get("samples", 0)),
+            "counts_as": int(metrics.get("num-examples", 0)),
+            "trust": round(float(metrics.get("trust", 0.0)), 3),
+            "flagged_pct": round(float(metrics.get("flagged_pct", 0.0)), 1),
+            "train_loss": round(float(metrics.get("train_loss", 0.0)), 4),
+        }
+    _ROUND["per_silo"] = per_silo
+    return aggregate_metricrecords(records, weighting_metric_name)
 
 
 @app.main()
@@ -51,7 +85,13 @@ def main(grid: Grid, context: Context) -> None:
     # Flower's own FedProx. It weights each silo by the `num-examples` its
     # client reports, which those clients scale by their data-confidence score,
     # so the aggregation is trust-weighted without any custom averaging code.
-    strategy = FedProx(fraction_evaluate=fraction_evaluate, proximal_mu=proximal_mu)
+    strategy = FedProx(
+        fraction_evaluate=fraction_evaluate,
+        proximal_mu=proximal_mu,
+        train_metrics_aggr_fn=_capture_train,
+    )
+    _ROUND["run_id"] = str(getattr(context, "run_id", "") or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
+    _ROUND["strategy"] = "FedProx(mu={0})".format(proximal_mu)
 
     result = strategy.start(
         grid=grid,
@@ -85,6 +125,20 @@ def global_evaluate(server_round: int, arrays: ArrayRecord) -> MetricRecord:
     print(
         f"  [national] round {server_round:>2}  MAE {mae:.4f}  "
         f"burn-rate baseline {baseline_mae:.4f}  ({improvement:+.1f}%)"
+    )
+
+    # One row per round: the accuracy, and the evidence for what crossed the
+    # wire to produce it. Written here because this is the only place that has
+    # both the round number and the aggregated weights.
+    inspector.record_round(
+        run_id=_ROUND["run_id"],
+        round_no=server_round,
+        strategy=_ROUND["strategy"],
+        arrays=arrays,
+        global_val_mae=mae,
+        baseline_mae=baseline_mae,
+        per_silo=_ROUND["per_silo"],
+        raw_rows=_ROUND["raw_rows"],
     )
 
     return MetricRecord(

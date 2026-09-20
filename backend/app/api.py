@@ -41,7 +41,14 @@ from .auth import (
 )
 from .config import settings
 from .db import get_session, ping
-from .models import LOC_METHODS, Facility, MedicineMovement, Sku, StockReading
+from .models import (
+    LOC_METHODS,
+    Facility,
+    FederationRound,
+    MedicineMovement,
+    Sku,
+    StockReading,
+)
 
 WEB_SOURCES = frozenset({"form", "photo", "voice"})
 DEMO_CHANNEL_SOURCES = frozenset({"sms", "ivr", "whatsapp"})
@@ -1287,4 +1294,120 @@ async def facility_trust(
         components=[TrustComponentOut(**c) for c in score.as_rows()],
         computed_at=datetime.now(timezone.utc),
         warning_multiplier=trust.warning_multiplier(score.score),
+    )
+
+
+# ==================================================== the silo inspector ===
+# Spec 12.2 and 27. The Federation page shows two things beside each other:
+# the accuracy the shared model reached, and the evidence for what crossed the
+# wire to reach it. The second is the point — an accuracy chart alone asks to
+# be believed, while measured bytes, tensor shapes, a weight hash and an
+# asserted zero can be argued with.
+
+
+class FederationSiloOut(BaseModel):
+    state: str
+    windows: int
+    counts_as: int
+    trust: float
+    flagged_pct: float
+    train_loss: float
+
+
+class FederationRoundOut(BaseModel):
+    round_no: int
+    global_val_mae: float | None
+    baseline_mae: float | None
+    silos_reporting: int | None
+    bytes_transmitted: int | None
+    tensor_count: int
+    weights_sha256: str | None
+    raw_rows_transmitted: int
+    completed_at: datetime
+    per_silo: list[FederationSiloOut]
+
+
+class FederationOut(BaseModel):
+    available: bool
+    run_id: str | None = None
+    strategy: str | None = None
+    rounds: list[FederationRoundOut] = Field(default_factory=list)
+    first_mae: float | None = None
+    best_mae: float | None = None
+    baseline_mae: float | None = None
+    improvement_pct: float | None = None
+    bytes_per_round: int | None = None
+    total_bytes: int | None = None
+    raw_rows_transmitted: int = 0
+    tensor_shapes: dict[str, list[int]] = Field(default_factory=dict)
+    note: str | None = None
+
+
+@router.get("/federation/inspector", response_model=FederationOut, tags=["federation"])
+async def federation_inspector(
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> FederationOut:
+    latest = await session.scalar(
+        select(FederationRound.run_id).order_by(FederationRound.completed_at.desc()).limit(1)
+    )
+    if latest is None:
+        return FederationOut(
+            available=False,
+            note=(
+                "No federated run has been recorded. Start the SuperLink and the four "
+                "SuperNodes, then run `flwr run . local-deployment` in backend/federation."
+            ),
+        )
+
+    rows = list(
+        (
+            await session.execute(
+                select(FederationRound)
+                .where(FederationRound.run_id == latest)
+                .order_by(FederationRound.round_no)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    rounds = [
+        FederationRoundOut(
+            round_no=r.round_no,
+            global_val_mae=r.global_val_mae,
+            baseline_mae=r.baseline_mae,
+            silos_reporting=r.silos_reporting,
+            bytes_transmitted=r.bytes_transmitted,
+            tensor_count=len(r.tensor_shapes or {}),
+            weights_sha256=r.weights_sha256,
+            raw_rows_transmitted=r.raw_rows_transmitted,
+            completed_at=r.completed_at,
+            per_silo=[
+                FederationSiloOut(state=state, **values)
+                for state, values in sorted((r.per_silo or {}).items())
+            ],
+        )
+        for r in rows
+    ]
+    scored = [r.global_val_mae for r in rows if r.global_val_mae is not None]
+    baseline = next((r.baseline_mae for r in reversed(rows) if r.baseline_mae), None)
+    best = min(scored) if scored else None
+    return FederationOut(
+        available=True,
+        run_id=latest,
+        strategy=next((r.strategy for r in reversed(rows) if r.strategy), None),
+        rounds=rounds,
+        first_mae=scored[0] if scored else None,
+        best_mae=best,
+        baseline_mae=baseline,
+        improvement_pct=(
+            round((baseline - best) / baseline * 100, 1) if baseline and best else None
+        ),
+        bytes_per_round=max((r.bytes_transmitted or 0) for r in rows) if rows else None,
+        total_bytes=sum((r.bytes_transmitted or 0) for r in rows),
+        # Asserted by the aggregator before each round was written, not typed
+        # in here: see federation/pytorchexample/inspector.py.
+        raw_rows_transmitted=sum(r.raw_rows_transmitted for r in rows),
+        tensor_shapes=next((r.tensor_shapes for r in reversed(rows) if r.tensor_shapes), {}),
     )

@@ -32,11 +32,12 @@ import {
   useLiveUpdates,
 } from "./api";
 import { ActivityFeed, FacilityPanel, NationalPanel, StatePanel } from "./panels";
+import { FederationPanel } from "./federation";
 import { MovementsPanel } from "./movements";
 import { AuditQueuePanel } from "./trustpanel";
 import { RedistributionPanel, TransfersPrompt, type Trip, groupTrips } from "./transfers";
 
-type Mode = "stock" | "transfers" | "movements" | "trust";
+type Mode = "stock" | "transfers" | "movements" | "trust" | "federation";
 
 const INDIA_VIEW = { lat: 22.8, lng: 81.5, zoom: 5 };
 
@@ -70,6 +71,8 @@ function readUrl(): UrlState {
           ? "movements"
           : q.get("view") === "trust"
             ? "trust"
+            : q.get("view") === "federation"
+              ? "federation"
             : "stock",
     sku: q.get("sku"),
     facility: q.get("facility"),
@@ -523,6 +526,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
                 ["transfers", "Redistribution"],
                 ["movements", "Movements"],
                 ["trust", "Data trust"],
+                ["federation", "Federation"],
               ] as const
             ).map(([m, label]) => (
               <button
@@ -601,6 +605,8 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               }}
               onBack={() => setSelected(null)}
             />
+          ) : mode === "federation" ? (
+            <FederationPanel refreshKey={refreshKey} />
           ) : mode === "trust" ? (
             <AuditQueuePanel
               stateLabel={

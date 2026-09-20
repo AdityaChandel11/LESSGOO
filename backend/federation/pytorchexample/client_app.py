@@ -84,6 +84,10 @@ def train(msg: Message, context: Context):
         "num-examples": weight,
         "samples": samples,
         "trust": trust,
+        # Which silo this is. A MetricRecord may hold only numbers, so the
+        # state identifies itself by partition index and the aggregator maps
+        # it back through SILOS.
+        "partition-id": float(partition_id),
         # Carried back so the aggregator's log shows what each silo's weight
         # was actually based on this round, not a number taken on faith.
         "flagged_pct": float(evidence["flagged_pct"]),

@@ -245,8 +245,47 @@ export interface ClientConfig {
   demo_mode: boolean;
 }
 
+export interface FederationSilo {
+  state: string;
+  windows: number;
+  counts_as: number;
+  trust: number;
+  flagged_pct: number;
+  train_loss: number;
+}
+
+export interface FederationRound {
+  round_no: number;
+  global_val_mae: number | null;
+  baseline_mae: number | null;
+  silos_reporting: number | null;
+  bytes_transmitted: number | null;
+  tensor_count: number;
+  weights_sha256: string | null;
+  raw_rows_transmitted: number;
+  completed_at: string;
+  per_silo: FederationSilo[];
+}
+
+export interface FederationInspector {
+  available: boolean;
+  run_id: string | null;
+  strategy: string | null;
+  rounds: FederationRound[];
+  first_mae: number | null;
+  best_mae: number | null;
+  baseline_mae: number | null;
+  improvement_pct: number | null;
+  bytes_per_round: number | null;
+  total_bytes: number | null;
+  raw_rows_transmitted: number;
+  tensor_shapes: Record<string, number[]>;
+  note: string | null;
+}
+
 export const api = {
   health: () => get<Health>("/health"),
+  federationInspector: () => get<FederationInspector>("/federation/inspector"),
   clientConfig: () => get<ClientConfig>("/client-config"),
   skus: () => get<Sku[]>("/skus"),
   summary: (sku: string | null, state?: string | null) =>

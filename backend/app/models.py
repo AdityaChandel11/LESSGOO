@@ -19,6 +19,7 @@ from sqlalchemy import (
     CheckConstraint,
     Date,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -513,15 +514,30 @@ class FederationRound(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     round_no: Mapped[int] = mapped_column(Integer)
-    global_val_mae: Mapped[Decimal | None] = mapped_column(Numeric)
-    per_silo_mae: Mapped[dict | None] = mapped_column(JSONB)
+    # Which run this round belonged to, so a second run adds history rather
+    # than overwriting the rounds a published claim was computed from.
+    run_id: Mapped[str] = mapped_column(Text, index=True)
+    strategy: Mapped[str | None] = mapped_column(Text)
+    global_val_mae: Mapped[float | None] = mapped_column(Float)
+    # What the rule this model replaces scored on the very same windows.
+    baseline_mae: Mapped[float | None] = mapped_column(Float)
+    # One entry per silo: windows held, live trust, and the trust-weighted
+    # count it actually contributed (spec 27).
+    per_silo: Mapped[dict | None] = mapped_column(JSONB)
+    silos_reporting: Mapped[int | None] = mapped_column(Integer)
     # The inspector's evidence (spec 12.2): what left each silo, and what did not.
     bytes_transmitted: Mapped[int | None] = mapped_column(BigInteger)
     tensor_shapes: Mapped[dict | None] = mapped_column(JSONB)
     weights_sha256: Mapped[str | None] = mapped_column(Text)
     raw_rows_transmitted: Mapped[int] = mapped_column(Integer, default=0)
     completed_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+    __table_args__ = (
+        # A round belongs to exactly one run, so a re-run appends history
+        # instead of silently rewriting it.
+        Index("uq_federation_round", "run_id", "round_no", unique=True),
     )
 
 

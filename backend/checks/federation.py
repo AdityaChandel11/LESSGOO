@@ -163,4 +163,85 @@ async def run() -> Report:
             ),
         )
 
+    # ---- B3: the inspector's evidence, read back from the table -------------
+    from sqlalchemy import select
+
+    from app.models import FederationRound
+
+    from .harness import db
+
+    async with db() as session:
+        run = await session.scalar(
+            select(FederationRound.run_id).order_by(FederationRound.completed_at.desc()).limit(1)
+        )
+        if run is None:
+            c.ok(
+                "a federated run has been recorded",
+                False,
+                "federation_rounds is empty — run `flwr run . local-deployment`",
+            )
+            return c.report
+        rounds = list(
+            (
+                await session.execute(
+                    select(FederationRound)
+                    .where(FederationRound.run_id == run)
+                    .order_by(FederationRound.round_no)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    c.at_least("the inspector recorded a run", len(rounds), 2)
+    c.ok(
+        "every round asserts zero facility rows transmitted",
+        all(r.raw_rows_transmitted == 0 for r in rounds),
+        "max seen {0}".format(max(r.raw_rows_transmitted for r in rounds)),
+    )
+    c.ok(
+        "each round measured the weights that moved",
+        all((r.bytes_transmitted or 0) > 0 and r.weights_sha256 for r in rounds),
+        "{0} bytes per round, sha {1}".format(
+            rounds[-1].bytes_transmitted, (rounds[-1].weights_sha256 or "")[:12]
+        ),
+    )
+    c.ok(
+        "the payload is a model, not a dataset",
+        all(len(r.tensor_shapes or {}) >= 4 for r in rounds[1:]),
+        "{0} tensors".format(len(rounds[-1].tensor_shapes or {})),
+    )
+    c.ok(
+        "weights change between rounds",
+        len({r.weights_sha256 for r in rounds}) > 1,
+        "{0} distinct hashes across {1} rounds".format(
+            len({r.weights_sha256 for r in rounds}), len(rounds)
+        ),
+    )
+    scored = [r.global_val_mae for r in rounds if r.global_val_mae is not None]
+    c.ok(
+        "the shared model improved across the run",
+        len(scored) > 1 and min(scored) < scored[0],
+        "{0:.4f} -> {1:.4f}".format(scored[0], min(scored)) if scored else "nothing scored",
+    )
+    baseline = next((r.baseline_mae for r in reversed(rounds) if r.baseline_mae), None)
+    c.ok(
+        "and beat the burn rate it replaces",
+        baseline is not None and scored and min(scored) < baseline,
+        "model {0:.4f} vs burn rate {1:.4f}".format(min(scored), baseline or 0),
+    )
+    last_silos = rounds[-1].per_silo or {}
+    c.eq("every silo is accounted for in the last round", len(last_silos), 4)
+    c.ok(
+        "and each one's contribution is its windows scaled by its own trust",
+        all(
+            0 < v["counts_as"] <= v["windows"] and 0.0 <= v["trust"] <= 1.0
+            for v in last_silos.values()
+        ),
+        ", ".join(
+            "{0} {1:,}x{2}={3:,}".format(k, v["windows"], v["trust"], v["counts_as"])
+            for k, v in sorted(last_silos.items())
+        ),
+    )
+
     return c.report
