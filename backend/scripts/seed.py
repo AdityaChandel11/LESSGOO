@@ -515,6 +515,38 @@ async def _copy(conn, table: str, columns: list[str], records: list[tuple]) -> N
     )
 
 
+COLLATERAL = (
+    ("forecasts", "published forecasts — the map falls back to the burn rate until a "
+                  "training run and federation/publish_forecast.py replace them"),
+    ("federation_rounds", "recorded federated rounds"),
+)
+
+
+async def _warn_about_collateral(approved: bool) -> None:
+    """Refuse to silently destroy work that is expensive to recreate."""
+    losses: list[str] = []
+    async with engine.begin() as conn:
+        for table, description in COLLATERAL:
+            exists = await conn.scalar(text("SELECT to_regclass(:t)"), {"t": table})
+            if not exists:
+                continue
+            count = await conn.scalar(text(f"SELECT count(*) FROM {table}"))  # noqa: S608 - fixed names
+            if count:
+                losses.append(f"  {count:,} rows in {table}: {description}")
+    if not losses:
+        return
+    print("reseeding will also destroy:")
+    for line in losses:
+        print(line)
+    if approved:
+        print("  proceeding: --yes was given")
+        return
+    raise SystemExit(
+        "Refusing to reseed. Re-run with --yes if that is intended, or publish "
+        "forecasts again afterwards with federation/publish_forecast.py."
+    )
+
+
 async def main() -> None:
     p = argparse.ArgumentParser(description="Seed SwasthSetu at national scale")
     p.add_argument("--days", type=int, default=35, help="history for every facility")
@@ -522,6 +554,11 @@ async def main() -> None:
     p.add_argument("--seed", type=int, default=DEFAULT_SEED)
     p.add_argument("--gaming-pct", type=float, default=0.08)
     p.add_argument("--supply-failure-pct", type=float, default=0.18)
+    p.add_argument(
+        "--yes",
+        action="store_true",
+        help="proceed even though reseeding destroys published forecasts and federation rounds",
+    )
     p.add_argument(
         "--allow-production",
         action="store_true",
@@ -542,6 +579,12 @@ async def main() -> None:
         migrated = await conn.scalar(text("SELECT to_regclass('public.alembic_version') IS NOT NULL"))
     if not migrated:
         raise SystemExit("Database has no schema yet. Run `alembic upgrade head` first.")
+
+    # Reseeding takes more than facility data with it. forecasts has foreign
+    # keys into facilities and skus, so CASCADE empties it silently, and the
+    # dashboard then falls back to the burn rate with nothing on screen to say
+    # why. Say what is about to be lost, and make the caller agree to it.
+    await _warn_about_collateral(args.yes)
 
     # TRUNCATE, never DELETE: no per-row FK checks, and it resets sequences.
     # The users table is deliberately not listed and has no foreign keys into
