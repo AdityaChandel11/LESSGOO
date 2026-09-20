@@ -12,6 +12,7 @@ the adapter, where the fallback and the tests live.
 
 import base64
 import binascii
+from uuid import uuid4
 from dataclasses import asdict
 from datetime import date, datetime, timezone
 
@@ -22,6 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import (
+    ingest,
     aggregates,
     attendance,
     beds,
@@ -1410,4 +1412,69 @@ async def federation_inspector(
         # in here: see federation/pytorchexample/inspector.py.
         raw_rows_transmitted=sum(r.raw_rows_transmitted for r in rows),
         tensor_shapes=next((r.tensor_shapes for r in reversed(rows) if r.tensor_shapes), {}),
+    )
+
+
+# ==================================================== the ingestion spine ===
+# Spec 13. Every phone channel lands here, and this endpoint drives the same
+# pipeline with no Twilio account in existence — which is what keeps the
+# COMMS_MODE=simulator path a tested path rather than a claim.
+
+
+class SimulateIn(BaseModel):
+    channel: str = "sms"
+    sender: str
+    text: str | None = None
+    external_id: str | None = None
+
+
+class SimulatedReadingOut(BaseModel):
+    sku_code: str
+    qty: float
+    days_of_stock: float | None
+    status: str | None
+
+
+class SimulateOut(BaseModel):
+    accepted: bool
+    stage: str
+    reply: str
+    facility_id: str | None
+    masked_sender: str | None
+    duplicate: bool
+    readings: list[SimulatedReadingOut]
+    actions: list[str]
+
+
+@router.post("/ingest/simulate", response_model=SimulateOut, tags=["ingest"])
+async def ingest_simulate(
+    payload: SimulateIn,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> SimulateOut:
+    if not settings.demo_mode:
+        raise HTTPException(status_code=404, detail="Not found")
+    submission = ingest.RawSubmission(
+        channel=payload.channel,
+        sender_ref=payload.sender,
+        # A simulated send still needs an id, or the dedupe stage has nothing
+        # to work with; a real channel supplies the provider's message id.
+        external_id=payload.external_id or f"sim:{uuid4()}",
+        text=payload.text,
+    )
+    outcome = await ingest.process(session, submission)
+    return SimulateOut(
+        accepted=outcome.accepted,
+        stage=outcome.stage,
+        reply=outcome.reply,
+        facility_id=outcome.facility_id,
+        masked_sender=outcome.masked_sender,
+        duplicate=outcome.duplicate,
+        readings=[
+            SimulatedReadingOut(
+                sku_code=r.sku_code, qty=r.qty, days_of_stock=r.days_of_stock, status=r.status
+            )
+            for r in outcome.readings
+        ],
+        actions=outcome.actions,
     )

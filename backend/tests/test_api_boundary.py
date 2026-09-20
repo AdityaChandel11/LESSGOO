@@ -35,6 +35,10 @@ CREDENTIAL_OWNERS: dict[str, set[str]] = {
     # The browser key is not secret: it is sent to every visitor, restricted by
     # HTTP referrer, and the client-config endpoint is how it gets there.
     "google_maps_browser_key": {"maps.py", "api.py"},
+    # The phone salt belongs to the ingestion spine: it is the only thing that
+    # hashes an inbound number, and `phone_salt` is the property it reads.
+    "phone_hash_salt": {"ingest.py"},
+    "phone_salt": {"ingest.py"},
     "twilio_account_sid": set(),
     "twilio_auth_token": set(),
     "bhashini_api_key": set(),

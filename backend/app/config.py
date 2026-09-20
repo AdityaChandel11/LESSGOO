@@ -25,6 +25,10 @@ Environment = Literal["development", "production"]
 
 # Long enough for HS256, and refused by name in production.
 DEV_JWT_SECRET = "dev-only-signing-secret-never-use-in-production"
+
+# A fixed development salt, so a seeded handset and a running server agree
+# without anyone configuring anything. Production refuses to use it.
+DEV_PHONE_SALT = "dev-only-phone-salt-never-use-in-production"
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -140,6 +144,16 @@ class Settings(BaseSettings):
     # Below this the model is not sure enough to record a count unreviewed.
     bed_confidence_floor: float = 0.45
 
+    # --- phone channels (spec 13) ---
+    # Salt for hashing inbound phone numbers. Deliberately NOT derived from
+    # JWT_SECRET: rotating a session secret must never orphan every registered
+    # handset, and the only symptom of that would be staff being told their
+    # number is not registered.
+    phone_hash_salt: str = ""
+    # Below this, an extracted reading is held for confirmation rather than
+    # committed (spec 13, step 5).
+    channel_confidence_floor: float = 0.6
+
     # --- forecasting (spec 27, B5) ---
     # burn_rate: days of cover from the last 28 days of readings, the rule the
     #   platform has always used and the one that needs nothing but the data.
@@ -151,6 +165,11 @@ class Settings(BaseSettings):
     # Beyond this a published forecast is stale and is ignored in favour of the
     # burn rate. A week-ahead forecast is worthless once the week has passed.
     forecast_max_age_days: float = 8.0
+
+    @property
+    def phone_salt(self) -> str:
+        """The salt actually used to hash handsets."""
+        return self.phone_hash_salt or DEV_PHONE_SALT
 
     @property
     def is_production(self) -> bool:
@@ -181,6 +200,11 @@ class Settings(BaseSettings):
             problems.append(
                 "DEMO_MODE is on. Set DEMO_MODE=false, or ALLOW_PUBLIC_DEMO=true "
                 "if this is deliberately a public demo deployment"
+            )
+        if not self.phone_hash_salt or self.phone_hash_salt == DEV_PHONE_SALT:
+            problems.append(
+                "PHONE_HASH_SALT must be set to a random value: it is what stops this "
+                "database from being turned back into a list of health workers' phone numbers"
             )
         if "postgres:postgres@" in self.database_url:
             problems.append("DATABASE_URL is still using the development credentials")

@@ -28,7 +28,7 @@ from decimal import Decimal
 
 from sqlalchemy import insert, text
 
-from app import groundtruth
+from app import groundtruth, ingest
 from app.config import settings
 from app.db import SessionLocal, engine
 from app.geo import INDIA_STATES, TOTAL_SEEDED_FACILITIES, StateGeo
@@ -547,6 +547,34 @@ async def _warn_about_collateral(approved: bool) -> None:
     )
 
 
+def build_contacts(facilities: list[dict]) -> list[tuple]:
+    """One reporting handset and one supervisor per facility — spec 13.
+
+    The numbers are never stored. Each is derived from the facility id, hashed
+    exactly as an inbound message is hashed, and only the hash and a masked
+    form are written. The demo can therefore offer a number to type without
+    the platform ever having held one.
+    """
+    rows: list[tuple] = []
+    now = datetime.now(timezone.utc)
+    for fac in facilities:
+        for role in ("reporter", "supervisor"):
+            number = ingest.demo_number(fac["id"], role)
+            rows.append(
+                (
+                    ingest.hash_phone(number),
+                    fac["id"],
+                    ingest.mask_phone(number),
+                    role,
+                    "en",
+                    True,
+                    now,
+                    None,
+                )
+            )
+    return rows
+
+
 async def main() -> None:
     p = argparse.ArgumentParser(description="Seed SwasthSetu at national scale")
     p.add_argument("--days", type=int, default=35, help="history for every facility")
@@ -596,7 +624,7 @@ async def main() -> None:
                 "medicine_movements, verification_codes, bed_reports, "
                 "facility_trust, staff_checkins, approvals, transfers, trust_flags, "
                 "outbreak_events, route_matrix_cache, outbound_messages, "
-                "impact_ledger, federation_rounds, events, facilities, skus "
+                "impact_ledger, federation_rounds, events, facility_contacts, facilities, skus "
                 "RESTART IDENTITY CASCADE"
             )
         )
@@ -713,6 +741,12 @@ async def main() -> None:
              "qty_received", "received_at", "received_via", "received_by_ref",
              "note", "status"],
             movement_rows,
+        )
+        await _copy(
+            conn, "facility_contacts",
+            ["phone_hash", "facility_id", "masked", "role", "language",
+             "is_active", "registered_at", "last_seen_at"],
+            build_contacts(facilities),
         )
         await _copy(
             conn, "facility_sku_state",

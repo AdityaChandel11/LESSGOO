@@ -570,3 +570,30 @@ class Forecast(Base):
     computed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
     )
+
+
+class FacilityContact(Base):
+    """A handset that may report for a facility — spec 13, step 2.
+
+    The number itself is never stored. `phone_hash` is a salted HMAC used to
+    match an inbound sender, and `masked` is the only form any screen shows.
+    """
+
+    __tablename__ = "facility_contacts"
+
+    phone_hash: Mapped[str] = mapped_column(Text, primary_key=True)
+    facility_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("facilities.id", ondelete="CASCADE"), index=True
+    )
+    masked: Mapped[str] = mapped_column(Text)
+    role: Mapped[str] = mapped_column(Text)
+    language: Mapped[str] = mapped_column(Text, default="en")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    registered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("role IN ('reporter', 'supervisor')", name="ck_contacts_role"),
+    )
