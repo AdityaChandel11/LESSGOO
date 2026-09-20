@@ -40,8 +40,13 @@ body {
   filter: grayscale(0.9) brightness(1.04) contrast(0.92);
 }
 
-.google-attribution {
-  font-weight: 600;
+/* Google requires its own logo beside the copyright line, at its own
+   proportions and with clear space around it. */
+.google-logo {
+  display: inline-block;
+  height: 16px;
+  width: auto;
+  margin: 0 3px -3px 0;
 }
 
 .leaflet-control-zoom a {

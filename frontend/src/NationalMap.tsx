@@ -1,7 +1,15 @@
 import L from "leaflet";
 import { useEffect, useRef } from "react";
 
-import { createTileSession, tileUrl, viewportAttribution } from "./googleTiles";
+import {
+  GOOGLE_LOGO_SRC,
+  type TileSession,
+  createTileSession,
+  loadGoogleLogo,
+  sessionRenewDelay,
+  tileUrl,
+  viewportAttribution,
+} from "./googleTiles";
 
 import {
   type Bucket,
@@ -68,7 +76,7 @@ interface Props {
   initialView?: { lat: number; lng: number; zoom: number } | null;
   /** Null until runtime config has loaded. */
   basemap?: { mode: "osm" | "google"; key: string } | null;
-  onBasemapFallback?: () => void;
+  onBasemapFallback?: (reason: string) => void;
   onView: (v: ViewInfo) => void;
   onSelectFacility: (pin: Pin) => void;
   onSelectRoute?: (id: string) => void;
@@ -521,6 +529,7 @@ export default function NationalMap({
     let layer: L.TileLayer | null = null;
     let attribution = "";
     let onMove: (() => void) | null = null;
+    let stopTimers: (() => void) | null = null;
 
     const useOsm = () => {
       attribution =
@@ -534,39 +543,117 @@ export default function NationalMap({
 
     if (basemap.mode === "google" && basemap.key) {
       const key = basemap.key;
-      createTileSession(key)
-        .then((session) => {
-          if (cancelled) return;
-          layer = L.tileLayer(tileUrl(key, session), { maxZoom: 20, tileSize: 256 }).addTo(map);
-          const refresh = async () => {
-            const b = map.getBounds();
-            const text = await viewportAttribution(key, session, {
-              zoom: map.getZoom(),
-              north: b.getNorth(),
-              south: b.getSouth(),
-              east: b.getEast(),
-              west: b.getWest(),
-            });
-            if (cancelled) return;
-            if (attribution) map.attributionControl.removeAttribution(attribution);
-            attribution = `<span class="google-attribution">Google</span> ${esc(text)}`;
-            map.attributionControl.addAttribution(attribution);
-          };
-          onMove = () => void refresh();
-          map.on("moveend", onMove);
-          void refresh();
-        })
-        .catch(() => {
-          if (cancelled) return;
-          props.current.onBasemapFallback?.();
-          useOsm();
+      // Tiles fail one at a time for ordinary reasons (a dropped request, a
+      // gap at the edge of a pan). Only a run of them means the session or the
+      // key has gone.
+      const TILE_ERROR_LIMIT = 4;
+      let current: { session: TileSession; logo: string } | null = null;
+      let renewTimer: number | null = null;
+      let tileErrors = 0;
+      let renewAttempted = false;
+      let settled = false;
+
+      const clearRenew = () => {
+        if (renewTimer !== null) window.clearTimeout(renewTimer);
+        renewTimer = null;
+      };
+      stopTimers = clearRenew;
+
+      // Every Google failure ends the same way: OpenStreetMap, with the reason
+      // said out loud. A blank grid is never an acceptable outcome.
+      const fallBack = (reason: string) => {
+        if (cancelled || settled) return;
+        settled = true;
+        clearRenew();
+        if (onMove) {
+          map.off("moveend", onMove);
+          onMove = null;
+        }
+        if (layer) {
+          layer.remove();
+          layer = null;
+        }
+        if (attribution) {
+          map.attributionControl.removeAttribution(attribution);
+          attribution = "";
+        }
+        props.current.onBasemapFallback?.(reason);
+        useOsm();
+      };
+
+      const refreshAttribution = async () => {
+        const held = current;
+        if (!held) return;
+        const b = map.getBounds();
+        const text = await viewportAttribution(key, held.session, {
+          zoom: map.getZoom(),
+          north: b.getNorth(),
+          south: b.getSouth(),
+          east: b.getEast(),
+          west: b.getWest(),
         });
+        if (cancelled || settled || current !== held) return;
+        if (attribution) map.attributionControl.removeAttribution(attribution);
+        attribution = `<img src="${held.logo}" alt="Google" class="google-logo" /> ${esc(text)}`;
+        map.attributionControl.addAttribution(attribution);
+      };
+
+      const renew = (reasonIfItFails: string) => {
+        void start(current?.logo ?? GOOGLE_LOGO_SRC).catch(() => fallBack(reasonIfItFails));
+      };
+
+      const start = async (logo: string) => {
+        const session = await createTileSession(key);
+        if (cancelled || settled) return;
+        const next = L.tileLayer(tileUrl(key, session), {
+          maxZoom: 20,
+          tileSize: 256,
+          className: "basemap",
+        });
+        next.on("tileerror", () => {
+          if (cancelled || settled) return;
+          tileErrors += 1;
+          if (tileErrors < TILE_ERROR_LIMIT) return;
+          // One fresh session covers an expiry we somehow missed; a second
+          // run of errors means the key itself is being refused.
+          if (renewAttempted) {
+            fallBack("Google tiles stopped loading");
+            return;
+          }
+          renewAttempted = true;
+          renew("Google tiles stopped loading");
+        });
+        next.addTo(map);
+        const previous = layer;
+        layer = next;
+        previous?.remove();
+        current = { session, logo };
+        tileErrors = 0;
+        // The expiry the API hands back is the whole point of capturing it:
+        // renew ahead of it rather than discovering it through failed tiles.
+        clearRenew();
+        renewTimer = window.setTimeout(
+          () => renew("the Google session could not be renewed"),
+          sessionRenewDelay(session.expiry),
+        );
+        if (!onMove) {
+          onMove = () => void refreshAttribution();
+          map.on("moveend", onMove);
+        }
+        await refreshAttribution();
+      };
+
+      loadGoogleLogo().then(
+        (logo) => void start(logo).catch(() => fallBack("the Google basemap could not start")),
+        () => fallBack("the Google attribution logo is missing from this build"),
+      );
     } else {
       useOsm();
     }
 
     return () => {
       cancelled = true;
+      stopTimers?.();
       if (onMove) map.off("moveend", onMove);
       if (layer) layer.remove();
       if (attribution) map.attributionControl.removeAttribution(attribution);

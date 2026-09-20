@@ -181,7 +181,9 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
   // shows exactly the rows that score was computed from — same filter, same
   // query, so the two can never disagree.
   const [evidenceFor, setEvidenceFor] = useState<{ id: string; name: string } | null>(null);
-  const [basemapFallback, setBasemapFallback] = useState(false);
+  // Holds why Google's basemap was refused or dropped, so the banner can say
+  // it rather than leaving the map quietly different from what was configured.
+  const [basemapFallback, setBasemapFallback] = useState<string | null>(null);
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   // A plan's shortfall and manual-review lists only come back from the solve,
   // so keep the latest one per state for as long as the page is open.
@@ -715,7 +717,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
             flyTarget={flyTarget}
             initialView={initialUrl.at}
             basemap={basemap}
-            onBasemapFallback={() => setBasemapFallback(true)}
+            onBasemapFallback={(reason) => setBasemapFallback(reason)}
             routes={routes}
             highlightRouteId={highlightTrip}
             onView={onView}
@@ -828,7 +830,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               role="status"
               className="absolute bottom-6 left-1/2 z-[900] -translate-x-1/2 rounded-md border border-line bg-panel px-3 py-1.5 text-[11.5px] text-ink-2 shadow-sm"
             >
-              Google map unavailable — showing OpenStreetMap instead
+              Showing OpenStreetMap — {basemapFallback}
             </div>
           )}
 

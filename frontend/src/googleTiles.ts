@@ -59,3 +59,40 @@ export async function viewportAttribution(
   const body = (await res.json()) as { copyright?: string };
   return body.copyright || "Map data ©Google";
 }
+
+/**
+ * Google's terms require its own logo beside the copyright line, not the word
+ * "Google" set in bold. The file is Google's asset from the Maps Platform
+ * attribution guidelines and is not ours to redistribute, so it is loaded from
+ * `public/google-attribution/` at runtime — see the README beside it.
+ *
+ * If the asset is absent the Google basemap must not render at all. Showing
+ * Google's imagery without the attribution it requires is a worse outcome than
+ * showing OpenStreetMap, so a missing logo is treated as a basemap failure.
+ */
+export const GOOGLE_LOGO_SRC = "/google-attribution/google_on_white.png";
+
+export function loadGoogleLogo(src: string = GOOGLE_LOGO_SRC): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () =>
+      img.naturalWidth > 0 ? resolve(src) : reject(new Error(`empty logo asset at ${src}`));
+    img.onerror = () => reject(new Error(`missing logo asset at ${src}`));
+    img.src = src;
+  });
+}
+
+/** Renew this long before the session lapses, so tiles never fail first. */
+export const SESSION_RENEW_MARGIN_MS = 5 * 60 * 1000;
+const MIN_RENEW_DELAY_MS = 30 * 1000;
+const MAX_TIMEOUT_MS = 2 ** 31 - 1;
+
+/**
+ * When to fetch a fresh session token, from the expiry the API already gave us.
+ * Clamped at both ends: `setTimeout` silently fires immediately past its 32-bit
+ * limit, and a zero delay would spin.
+ */
+export function sessionRenewDelay(expiry: number, now: number = Date.now()): number {
+  const remaining = expiry - now - SESSION_RENEW_MARGIN_MS;
+  return Math.min(Math.max(remaining, MIN_RENEW_DELAY_MS), MAX_TIMEOUT_MS);
+}
