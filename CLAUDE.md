@@ -60,7 +60,15 @@ only through `python -m scripts.remote`, which prints the target host, refuses
 a local one, and needs `--confirm` to write. `--show`, `--counts` and
 `--diagnose` are read-only and need no confirmation.
 
-- **Render's dashboard percentage is the authority. Stop at 85%.**
+- **Render's dashboard percentage is the authority. Stop at 90%.**
+- **Bulk writes to Render are forbidden.** No seed, no backfill, no batch
+  insert, no reindex, without Aditya asking for that specific run. The
+  2026-09-21 reseed was the last one; it hit 90% and a suspension warning.
+- **Never run an unbounded read path against Render.** A query with no
+  facility, district or date bound can spill tens of megabytes of temp
+  files for as long as it runs, on a volume that has ~100 MB free. Full
+  measurements in docs/STORAGE_NOTES.md.
+- Conversion, when only one number is in hand: `dashboard ≈ measured × 1.29`.
 - **`pg_database_size` is not the number.** It measured 667 MB on 2026-09-21
   while the dashboard read 83.87%. It counts one database's relations; the
   gauge counts a filesystem, which also carries the other databases on the
@@ -70,7 +78,7 @@ a local one, and needs `--confirm` to write. `--show`, `--counts` and
   Treat `--counts` as a floor, never as the reading.
 - **You cannot see the dashboard. Ask Aditya for the percentage** before any
   remote write and again after it, and record both. Never infer it.
-- **Stop and ask** if a step would take it over 85%, and say which option you
+- **Stop and ask** if a step would take it over 90%, and say which option you
   would take and what it frees.
 - **Never reseed Render without asking first.** The seed truncates.
 - Nothing on the deployed app writes continuously: no background task, no

@@ -182,3 +182,52 @@ def test_the_dockerfile_refuses_to_build_without_the_website():
         (line for line in dockerfile.splitlines() if line.startswith("RUN test -f")), ""
     )
     assert "/app/static/index.html" in guard and "exit 1" in guard
+
+
+# ------------------------------------------------- runaway query guard ---
+# A web request that has run for half a minute has already failed for the
+# person waiting. On a small volume it is worse than slow: a sort too large
+# for work_mem spills to a temporary file that keeps growing for as long as
+# the query lives, and the deployed instance has work_mem at 1.7 MB and
+# temp_file_limit unset. One unbounded read path measured there ran past 300
+# seconds and left about 70 MB of temp behind on each attempt.
+
+
+def test_the_engine_asks_postgres_to_cancel_a_runaway_statement():
+    from app.db import _server_settings
+
+    assert _server_settings().get("statement_timeout") == str(
+        settings.db_statement_timeout_ms
+    ), "the timeout must reach the server; a client-side one abandons the request while the query keeps its temp files"
+
+
+def test_the_timeout_is_a_sane_length():
+    assert 5_000 <= settings.db_statement_timeout_ms <= 60_000, (
+        "under 5s would cancel legitimate reads; over a minute is longer than "
+        "any hosting proxy will hold the request open anyway"
+    )
+
+
+def test_zero_disables_the_timeout_rather_than_setting_it_to_zero(monkeypatch):
+    """Postgres reads statement_timeout=0 as 'no limit'. Sending the string
+    '0' would be correct by accident; leaving the key out says it plainly."""
+    from app import db
+
+    monkeypatch.setattr(db.settings, "db_statement_timeout_ms", 0)
+    assert "statement_timeout" not in db._server_settings()
+
+
+def test_the_timeout_survives_into_a_real_connect_argument():
+    """The setting is worthless if SQLAlchemy drops it on the way to asyncpg."""
+    url = make_url(normalise_database_url("postgresql://app:s3cret@db.internal/phc"))
+    dialect = sa_asyncpg.dialect()
+    _, kwargs = dialect.create_connect_args(url)
+    kwargs.setdefault("server_settings", {})
+    kwargs["server_settings"]["statement_timeout"] = "30000"
+    # asyncpg accepts server_settings as a plain mapping of strings; anything
+    # else raises when the connection is made, not when it is configured.
+    assert all(
+        isinstance(k, str) and isinstance(v, str)
+        for k, v in kwargs["server_settings"].items()
+    )
+    assert inspect.signature(asyncpg.connect).parameters.get("server_settings") is not None

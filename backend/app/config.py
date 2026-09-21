@@ -94,6 +94,14 @@ class Settings(BaseSettings):
     # small Cloud SQL tier allows (instances x (pool + overflow) < max_connections).
     db_pool_size: int = 5
     db_max_overflow: int = 5
+    # Cancel any statement that runs longer than this. A web request that has
+    # taken half a minute has already failed as far as the person waiting is
+    # concerned, and on a small volume a long query is not merely slow: a sort
+    # it cannot hold in work_mem spills to a temp file that grows for as long
+    # as the query lives. Measured on the deployed database, one unbounded read
+    # path ran past 300 seconds and left roughly 70 MB of temp behind each time.
+    # 0 disables it, which is Postgres's own meaning for the setting.
+    db_statement_timeout_ms: int = 30_000
 
     # --- auth ---
     jwt_secret: str = DEV_JWT_SECRET

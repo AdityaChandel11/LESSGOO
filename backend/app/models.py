@@ -159,7 +159,11 @@ class StockReading(Base):
     __tablename__ = "stock_readings"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    facility_id: Mapped[str] = mapped_column(ForeignKey("facilities.id"), index=True)
+    # Deliberately not indexed on its own: ix_readings_facility_sku_time below
+    # leads with facility_id, so a standalone index on it is a strict prefix —
+    # 25 MB that Postgres had chosen 6 times against the composite's 293.
+    # See migration e4d7a9c31b52.
+    facility_id: Mapped[str] = mapped_column(ForeignKey("facilities.id"))
     sku_code: Mapped[str] = mapped_column(ForeignKey("skus.code"), index=True)
     qty_on_hand: Mapped[Decimal] = mapped_column(Numeric, nullable=False)
     reported_at: Mapped[datetime] = mapped_column(
