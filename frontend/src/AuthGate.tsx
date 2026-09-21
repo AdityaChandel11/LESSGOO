@@ -1,6 +1,7 @@
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 
 import App from "./App";
+import DataNotice from "./DataNotice";
 import {
   ApiError,
   type DemoAccount,
@@ -249,6 +250,8 @@ function SignIn({ onSignedIn }: { onSignedIn: (s: Session) => void }) {
               Accounts are issued by your state or district administrator.
             </p>
           </form>
+
+          <DataNotice className="mt-8 border-t border-line pt-4" />
         </div>
       </main>
     </div>

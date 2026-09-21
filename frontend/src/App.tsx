@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import DataNotice from "./DataNotice";
 import NationalMap, {
   DISTRICT_ZOOM,
   FACILITY_ZOOM,
@@ -847,6 +848,11 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
           )}
         </section>
       </main>
+
+      {/* ------------------------------------------------- data notice --- */}
+      <footer className="z-[1100] shrink-0 border-t border-line bg-panel px-4 py-1.5">
+        <DataNotice />
+      </footer>
     </div>
   );
 }
