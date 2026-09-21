@@ -74,6 +74,10 @@ interface Props {
   highlightRouteId?: string | null;
   /** Where the map opens, e.g. restored from a shared link. Read once. */
   initialView?: { lat: number; lng: number; zoom: number } | null;
+  /** State codes that train the federated model, ringed while the federation
+   *  tab is open so the four silos are visible on the country, not only in a
+   *  table beside it. */
+  siloStates?: string[];
   /** Null until runtime config has loaded. */
   basemap?: { mode: "osm" | "google"; key: string } | null;
   onBasemapFallback?: (reason: string) => void;
@@ -83,6 +87,9 @@ interface Props {
 }
 
 const ROUTE_COLOR = { proposed: "#0b3d5c", approved: "#1b9150", mixed: "#0b3d5c" } as const;
+/** The ring marking a state that trains the shared model. Brand navy, so it
+ *  reads as chrome rather than joining the three status colours. */
+const SILO_RING = "#0b3d5c";
 // Past this many trips, per-route arrowheads become noise; only the highlighted
 // route keeps one.
 const MAX_ARROWS = 120;
@@ -110,14 +117,19 @@ function esc(s: string): string {
 /** A donut showing the share of facilities in each condition, with the
  *  critical count at its centre. Proportions read at a glance; a single flat
  *  colour would hide how much of a state is actually in trouble. */
-function donutIcon(b: Bucket, kind: "state" | "district"): L.DivIcon {
+function donutIcon(b: Bucket, kind: "state" | "district", silo = false): L.DivIcon {
   const isState = kind === "state";
   const size = Math.round(
     Math.min(isState ? 76 : 56, (isState ? 30 : 22) + Math.sqrt(b.total) * (isState ? 2.2 : 3)),
   );
-  const cx = size / 2;
+  // A silo gets a ring in a margin of its own, rather than a thicker donut:
+  // the arcs carry stock condition and must not change meaning because a
+  // state also happens to train the model.
+  const pad = silo ? 7 : 0;
+  const box = size + pad * 2;
+  const cx = pad + size / 2;
   const stroke = isState ? 7 : 5.5;
-  const r = cx - stroke / 2 - 1;
+  const r = size / 2 - stroke / 2 - 1;
   const circ = 2 * Math.PI * r;
 
   let offset = 0;
@@ -140,9 +152,14 @@ function donutIcon(b: Bucket, kind: "state" | "district"): L.DivIcon {
     .join("");
 
   const sev = bucketSeverity(b);
+  const ring = silo
+    ? `<circle cx="${cx}" cy="${cx}" r="${r + stroke / 2 + 3.5}" fill="none"
+        stroke="${SILO_RING}" stroke-width="2.5" stroke-dasharray="4 3"/>`
+    : "";
   const html = `
-    <div class="donut donut-${kind}" data-sev="${sev}">
-      <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}" aria-hidden="true">
+    <div class="donut donut-${kind}" data-sev="${sev}"${silo ? ' data-silo="true"' : ""}>
+      <svg width="${box}" height="${box}" viewBox="0 0 ${box} ${box}" aria-hidden="true">
+        ${ring}
         <circle cx="${cx}" cy="${cx}" r="${r}" fill="#ffffff"/>
         ${arcs}
         <text x="${cx}" y="${cx}" text-anchor="middle" dominant-baseline="central"
@@ -154,7 +171,7 @@ function donutIcon(b: Bucket, kind: "state" | "district"): L.DivIcon {
   return L.divIcon({
     html,
     className: "donut-host",
-    iconSize: [size, size],
+    iconSize: [box, box],
     iconAnchor: [cx, cx],
   });
 }
@@ -189,6 +206,7 @@ export default function NationalMap({
   routes = [],
   highlightRouteId = null,
   initialView = null,
+  siloStates,
   basemap = null,
   onBasemapFallback,
   onView,
@@ -216,11 +234,11 @@ export default function NationalMap({
   // rather than capturing stale ones.
   const props = useRef({
     sku, selectedFacilityId, onView, onSelectFacility, routes, highlightRouteId, onSelectRoute,
-    onBasemapFallback,
+    onBasemapFallback, siloStates,
   });
   props.current = {
     sku, selectedFacilityId, onView, onSelectFacility, routes, highlightRouteId, onSelectRoute,
-    onBasemapFallback,
+    onBasemapFallback, siloStates,
   };
 
   const skuLabel = () => props.current.sku ?? "all medicines";
@@ -237,8 +255,12 @@ export default function NationalMap({
     const tier = tierFor(map.getZoom());
 
     if (tier === "state") {
+      const silos = new Set(props.current.siloStates ?? []);
       for (const b of statesRef.current) {
-        L.marker([b.lat, b.lng], { icon: donutIcon(b, "state"), riseOnHover: true })
+        L.marker([b.lat, b.lng], {
+          icon: donutIcon(b, "state", silos.has(b.key)),
+          riseOnHover: true,
+        })
           .bindTooltip(bucketTooltip(b, skuLabel()), { direction: "top", offset: [0, -30] })
           .on("click", () => goTo(map, b.lat, b.lng, Math.max(b.zoom, DISTRICT_ZOOM + 0.5)))
           .addTo(layer);
@@ -669,6 +691,12 @@ export default function NationalMap({
   useEffect(() => {
     if (mapRef.current && tierFor(mapRef.current.getZoom()) === "facility") draw();
   }, [selectedFacilityId]);
+
+  // Opening or leaving the federation tab adds or removes the silo rings.
+  // Redraw only, never refetch: the rollups themselves have not changed.
+  useEffect(() => {
+    if (mapRef.current && tierFor(mapRef.current.getZoom()) === "state") draw();
+  }, [siloStates]);
 
   useEffect(() => {
     if (flyTarget && mapRef.current) {

@@ -192,6 +192,9 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
   // The judge-driven loop takes the panel over while it runs; the map stays
   // visible beside it, which is the half they are meant to be watching.
   const [loopFor, setLoopFor] = useState<FacilityDetail | null>(null);
+  // Which states train the shared model, reported by the federation panel so
+  // the map can ring them while that tab is open.
+  const [siloStates, setSiloStates] = useState<string[]>([]);
   // Holds why Google's basemap was refused or dropped, so the banner can say
   // it rather than leaving the map quietly different from what was configured.
   const [basemapFallback, setBasemapFallback] = useState<string | null>(null);
@@ -631,7 +634,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               onBack={() => setSelected(null)}
             />
           ) : mode === "federation" ? (
-            <FederationPanel refreshKey={refreshKey} />
+            <FederationPanel refreshKey={refreshKey} onSilos={setSiloStates} stateName={stateName} />
           ) : mode === "trust" ? (
             <AuditQueuePanel
               // One value decides both the request and the heading. An
@@ -751,6 +754,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
           <NationalMap
             sku={sku}
             refreshKey={refreshKey}
+            siloStates={siloStates}
             selectedFacilityId={selected?.id ?? null}
             pulse={pulse}
             flyTarget={flyTarget}

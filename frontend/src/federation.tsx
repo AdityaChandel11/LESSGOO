@@ -13,7 +13,7 @@
  * stopped instead of arriving here.
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api, type FederationInspector, type FederationRound } from "./api";
 
 function mae(value: number | null | undefined): string {
@@ -25,8 +25,23 @@ function bytes(value: number | null | undefined): string {
   return value < 1024 ? `${value} B` : `${(value / 1024).toFixed(1)} KB`;
 }
 
-/** The accuracy curve, drawn against the rule it has to beat. */
-function Curve({ rounds, baseline }: { rounds: FederationRound[]; baseline: number | null }) {
+/**
+ * The accuracy curve, drawn against the rule it has to beat.
+ *
+ * `upTo` stops the line at a round so a replay can draw it one round at a
+ * time. The axes never move while it does: the scale comes from the whole run,
+ * so the curve falls through a fixed frame instead of the frame rescaling
+ * under it and making every round look like the same improvement.
+ */
+function Curve({
+  rounds,
+  baseline,
+  upTo,
+}: {
+  rounds: FederationRound[];
+  baseline: number | null;
+  upTo?: number | null;
+}) {
   const scored = rounds.filter((r) => r.global_val_mae != null);
   if (scored.length < 2) return null;
   const values = scored.map((r) => r.global_val_mae as number);
@@ -35,17 +50,25 @@ function Curve({ rounds, baseline }: { rounds: FederationRound[]; baseline: numb
   const h = 44;
   const x = (i: number) => (i / (scored.length - 1)) * w;
   const y = (v: number) => h - (v / top) * h;
-  const path = values.map((v, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(2)},${y(v).toFixed(2)}`).join(" ");
+  const shown = upTo == null ? values : values.slice(0, Math.max(1, upTo + 1));
+  const path = shown
+    .map((v, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(2)},${y(v).toFixed(2)}`)
+    .join(" ");
+  const head = shown.length - 1;
 
   return (
     <svg viewBox={`0 0 ${w} ${h}`} className="mt-2 h-24 w-full" preserveAspectRatio="none" role="img"
-      aria-label={`Model error across ${scored.length} rounds, ending at ${mae(values[values.length - 1])}`}>
+      aria-label={`Model error across ${shown.length} of ${scored.length} rounds, at ${mae(shown[head])}`}>
       {baseline != null && (
         <line x1="0" x2={w} y1={y(baseline)} y2={y(baseline)} stroke="currentColor"
           className="text-warn" strokeWidth="0.6" strokeDasharray="2 2" />
       )}
       <path d={path} fill="none" stroke="currentColor" className="text-ok" strokeWidth="1.2"
         vectorEffect="non-scaling-stroke" />
+      {upTo != null && shown.length > 0 && (
+        <circle cx={x(head)} cy={y(shown[head])} r="1.6" className="fill-ok"
+          vectorEffect="non-scaling-stroke" />
+      )}
     </svg>
   );
 }
@@ -61,10 +84,48 @@ function Row({ label, value, strong }: { label: string; value: string; strong?: 
   );
 }
 
-export function FederationPanel({ refreshKey }: { refreshKey: number }) {
+/** One round every this long. Slow enough to read a row, short enough that
+ *  nine rounds do not outlast anybody's patience. */
+const REPLAY_STEP_MS = 850;
+
+/** Shared, because `?? []` would hand the silo effect a new array on every
+ *  render and that effect sets state in the parent: a fresh reference each
+ *  time is a render loop, not a no-op. */
+const NO_ROUNDS: FederationRound[] = [];
+
+/**
+ * Which silo the trust weighting cost the most, stated from the row rather
+ * than written in. A silo contributes its window count scaled by its own data
+ * confidence, so the gap between the two is the weighting made visible.
+ */
+function mostDownWeighted(silos: FederationRound["per_silo"]) {
+  const scored = silos.filter((s) => s.windows > 0);
+  if (scored.length < 2) return null;
+  const worst = scored.reduce((a, b) => (a.trust <= b.trust ? a : b));
+  const best = scored.reduce((a, b) => (a.trust >= b.trust ? a : b));
+  if (worst.state === best.state || worst.trust >= best.trust) return null;
+  return { worst, best, lostPct: Math.round((1 - worst.counts_as / worst.windows) * 100) };
+}
+
+export function FederationPanel({
+  refreshKey,
+  onSilos,
+  stateName,
+}: {
+  refreshKey: number;
+  /** Reports the silo states upward so the map can ring them. */
+  onSilos?: (states: string[]) => void;
+  /** The rounds store two-letter codes; a reader wants the state. */
+  stateName?: (code: string) => string;
+}) {
+  const named = (code: string) => stateName?.(code) ?? code;
   const [data, setData] = useState<FederationInspector | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // null: the finished run, as recorded. A number: the round a replay has
+  // reached. Nothing here re-trains anything — the rows are already written.
+  const [replayAt, setReplayAt] = useState<number | null>(null);
+  const timer = useRef<number | null>(null);
 
   useEffect(() => {
     setLoading(true);
@@ -75,8 +136,54 @@ export function FederationPanel({ refreshKey }: { refreshKey: number }) {
       .finally(() => setLoading(false));
   }, [refreshKey]);
 
-  const last = data?.rounds?.[data.rounds.length - 1];
+  const rounds = data?.rounds ?? NO_ROUNDS;
+
+  // Tell the map which states train the model, and un-tell it on the way out.
+  useEffect(() => {
+    if (!onSilos) return;
+    const states = rounds[rounds.length - 1]?.per_silo.map((s) => s.state) ?? [];
+    onSilos(states);
+    return () => onSilos([]);
+  }, [onSilos, rounds]);
+
+  useEffect(() => () => {
+    if (timer.current) window.clearInterval(timer.current);
+  }, []);
+
+  const replay = useCallback(() => {
+    if (rounds.length < 2) return;
+    if (timer.current) window.clearInterval(timer.current);
+    // Somebody who has asked for less motion still wants the answer, so they
+    // get the finished curve rather than a slower version of the animation.
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setReplayAt(rounds.length - 1);
+      return;
+    }
+    setReplayAt(0);
+    timer.current = window.setInterval(() => {
+      setReplayAt((at) => {
+        const next = (at ?? 0) + 1;
+        if (next >= rounds.length - 1) {
+          if (timer.current) window.clearInterval(timer.current);
+          timer.current = null;
+          return rounds.length - 1;
+        }
+        return next;
+      });
+    }, REPLAY_STEP_MS);
+  }, [rounds.length]);
+
+  const replaying = replayAt != null && replayAt < rounds.length - 1;
+  // Everything below reads this round, so the table, the counter and the curve
+  // can never disagree about where the replay has got to.
+  const shown = replayAt == null ? rounds[rounds.length - 1] : rounds[replayAt];
+  const last = shown;
   const shapes = Object.entries(data?.tensor_shapes ?? {});
+  const rowsSoFar =
+    replayAt == null
+      ? data?.raw_rows_transmitted ?? 0
+      : rounds.slice(0, replayAt + 1).reduce((n, r) => n + r.raw_rows_transmitted, 0);
+  const weighting = shown ? mostDownWeighted(shown.per_silo) : null;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -87,9 +194,36 @@ export function FederationPanel({ refreshKey }: { refreshKey: number }) {
           move, and what moved is measured below rather than asserted.
         </p>
         {data?.available && (
-          <p className="mt-1 font-mono text-[11px] text-ink-3">
-            {data.strategy} · run {data.run_id?.slice(0, 12)} · {data.rounds.length} rounds
-          </p>
+          <>
+            <p className="mt-1 font-mono text-[11px] text-ink-3">
+              {data.strategy} · run {data.run_id?.slice(0, 12)} · {data.rounds.length} rounds
+            </p>
+            <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+              <button
+                onClick={replay}
+                disabled={replaying || rounds.length < 2}
+                className="h-8 rounded-md border border-brand bg-brand/[0.04] px-3 text-[12.5px] font-medium text-brand hover:bg-brand/10 focus:ring-2 focus:ring-brand/30 focus:outline-none disabled:opacity-55"
+              >
+                {replaying
+                  ? `Round ${shown?.round_no ?? 0} of ${rounds[rounds.length - 1]?.round_no ?? 0}`
+                  : replayAt != null
+                    ? "Replay again"
+                    : "Replay the run"}
+              </button>
+              {replayAt != null && !replaying && (
+                <button
+                  onClick={() => setReplayAt(null)}
+                  className="text-[12px] font-medium text-ink-3 hover:text-ink"
+                >
+                  Show the finished run
+                </button>
+              )}
+            </div>
+            <p className="mt-1.5 text-[11px] leading-snug text-ink-3">
+              Replay of the recorded run, not a new training. The rounds below were written by the
+              aggregator when the run happened; pressing this re-reads them in order.
+            </p>
+          </>
         )}
       </div>
 
@@ -108,8 +242,12 @@ export function FederationPanel({ refreshKey }: { refreshKey: number }) {
               <div className="text-[10.5px] font-semibold tracking-[0.09em] text-ink-3 uppercase">
                 Accuracy, against the rule it replaces
               </div>
-              <Curve rounds={data.rounds} baseline={data.baseline_mae} />
-              <Row label="Model error now (MAE)" value={mae(data.best_mae)} strong />
+              <Curve rounds={data.rounds} baseline={data.baseline_mae} upTo={replayAt} />
+              <Row
+                label={replayAt == null ? "Model error now (MAE)" : `Model error at round ${shown?.round_no}`}
+                value={mae(replayAt == null ? data.best_mae : shown?.global_val_mae)}
+                strong
+              />
               <Row label="Burn rate, same held-out weeks" value={mae(data.baseline_mae)} />
               <Row label="Error at round one" value={mae(data.first_mae)} />
               <Row
@@ -127,7 +265,7 @@ export function FederationPanel({ refreshKey }: { refreshKey: number }) {
                 <div className="flex items-baseline justify-between">
                   <span className="text-[11.5px] font-medium text-ink">Facility rows transmitted</span>
                   <span className="font-mono text-[15px] font-semibold tabular-nums text-ok">
-                    {data.raw_rows_transmitted}
+                    {rowsSoFar}
                   </span>
                 </div>
                 <p className="mt-0.5 text-[11px] leading-snug text-ink-3">
@@ -166,12 +304,23 @@ export function FederationPanel({ refreshKey }: { refreshKey: number }) {
 
             <div className="border-b border-line px-3 py-2.5">
               <div className="text-[10.5px] font-semibold tracking-[0.09em] text-ink-3 uppercase">
-                Per silo, last round
+                Per silo, {replayAt == null ? "last round" : `round ${shown?.round_no}`}
               </div>
               <p className="mt-1 text-[11px] leading-snug text-ink-3">
                 A silo is weighted by its window count scaled by its own data confidence, so
                 facilities whose numbers disagree with each other carry less of the national model.
               </p>
+              {weighting && (
+                <p className="mt-1 text-[11px] leading-snug text-ink-2">
+                  {named(weighting.worst.state)} is the clearest case: confidence{" "}
+                  {weighting.worst.trust.toFixed(3)} against {named(weighting.best.state)}&rsquo;s{" "}
+                  {weighting.best.trust.toFixed(3)}, with{" "}
+                  {weighting.worst.flagged_pct.toFixed(1)}% of its facilities flagged — so its{" "}
+                  {weighting.worst.windows.toLocaleString("en-IN")} windows count as{" "}
+                  {weighting.worst.counts_as.toLocaleString("en-IN")}, {weighting.lostPct}% less
+                  weight in the shared model.
+                </p>
+              )}
               <table className="mt-1.5 w-full text-[11.5px]">
                 <thead>
                   <tr className="text-ink-3">
@@ -184,7 +333,7 @@ export function FederationPanel({ refreshKey }: { refreshKey: number }) {
                 <tbody>
                   {(last?.per_silo ?? []).map((s) => (
                     <tr key={s.state} className="border-t border-line">
-                      <td className="py-1 font-medium text-ink">{s.state}</td>
+                      <td className="py-1 font-medium text-ink">{named(s.state)}</td>
                       <td className="py-1 text-right font-mono tabular-nums text-ink-2">
                         {s.windows.toLocaleString("en-IN")}
                       </td>
@@ -205,8 +354,13 @@ export function FederationPanel({ refreshKey }: { refreshKey: number }) {
                 Round by round
               </div>
               <div className="mt-1.5 space-y-0.5">
-                {data.rounds.map((r) => (
-                  <div key={r.round_no} className="flex items-baseline justify-between gap-2 border-t border-line py-1 first:border-t-0">
+                {data.rounds.map((r, i) => (
+                  <div
+                    key={r.round_no}
+                    className={`flex items-baseline justify-between gap-2 border-t border-line py-1 first:border-t-0 ${
+                      replayAt != null && i > replayAt ? "opacity-35" : ""
+                    }`}
+                  >
                     <span className="text-[11.5px] text-ink-2">Round {r.round_no}</span>
                     <span className="font-mono text-[11.5px] tabular-nums text-ink-2">
                       MAE {mae(r.global_val_mae)} · {bytes(r.bytes_transmitted)} · {r.raw_rows_transmitted} rows
