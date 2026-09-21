@@ -303,6 +303,14 @@ export const api = {
   ) => get<Pin[]>("/map/facilities", { ...bounds, sku, limit: 2500 }, signal),
   pinsInState: (state: string, sku: string | null, limit = 400) =>
     get<Pin[]>("/map/facilities", { state, sku, limit }),
+  workspace: (facilityId: string) =>
+    get<WorkspaceView>(`/facilities/${encodeURIComponent(facilityId)}/workspace`),
+  supply: (facilityId: string, sku: string) =>
+    get<Supply>(`/facilities/${encodeURIComponent(facilityId)}/supply`, { sku }),
+  requestStock: (
+    facilityId: string,
+    body: { sku_code: string; from_facility: string; qty: number },
+  ) => post<StockRequest>(`/facilities/${encodeURIComponent(facilityId)}/requests`, body),
   facility: (id: string) => get<FacilityDetail>(`/facilities/${encodeURIComponent(id)}`),
   transfers: (state: string) =>
     get<Transfer[]>("/transfers", {
@@ -450,6 +458,86 @@ export interface BedReport {
   /** "mock" when no photograph was analysed — shown, never hidden. */
   model: string | null;
   reasons: string[];
+}
+
+/* ------------------------------------------------- pharmacist workspace --- */
+
+/** How a stock figure was last checked. `system` means nobody checked it:
+ *  a seeded opening balance or an automatic transfer adjustment. */
+export type ProvenanceKind = "counted" | "delivery" | "phone" | "system" | "none";
+
+export interface LastReceipt {
+  batch_id: string;
+  qty_received: number;
+  received_at: string;
+  received_via: string;
+}
+
+export interface Provenance {
+  kind: ProvenanceKind;
+  at: string | null;
+  days_ago: number | null;
+  detail: string;
+}
+
+export interface WorkspaceSku extends SkuStock {
+  /** Sachets, ampoules, blisters — a quantity on a phone needs its unit beside it. */
+  unit: string;
+  last_receipt: LastReceipt | null;
+  provenance: Provenance;
+  /** Absent when there is no burn rate: the system does not guess a date. */
+  stockout_on: string | null;
+}
+
+export interface WorkspaceView {
+  facility: FacilityDetail;
+  skus: WorkspaceSku[];
+  open_requests: number;
+  max_open_requests: number;
+}
+
+export interface Donor {
+  facility_id: string;
+  name: string;
+  district: string;
+  lat: number;
+  lng: number;
+  km: number;
+  /** Always "straight_line_x1.3" while MAPS_MODE is osm. Never call it a road
+   *  route on screen unless this says otherwise. */
+  distance_basis: string;
+  spare_units: number;
+  days_kept: number;
+}
+
+export interface Supply {
+  sku_code: string;
+  sku_name: string;
+  unit: string;
+  units_needed: number;
+  donors: Donor[];
+  manual_only: boolean;
+  reason: string | null;
+}
+
+export interface StockRequest {
+  transfer_id: number;
+  reference: string;
+  status: string;
+  sku_code: string;
+  sku_name: string;
+  unit: string;
+  qty: number;
+  from_facility: string;
+  from_name: string;
+  to_facility: string;
+  approver_role: Role;
+  km: number;
+  distance_basis: string;
+  eta_hours: number;
+  estimated_delivery: string;
+  estimate_label: string;
+  assumptions: Record<string, number>;
 }
 
 /* --------------------------------------------------------- movements --- */

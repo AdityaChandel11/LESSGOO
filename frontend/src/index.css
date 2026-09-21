@@ -185,3 +185,16 @@ body {
     transition: none;
   }
 }
+
+/* The pharmacist's receipt is printed in district offices that file paper.
+   The palette is already flat and high-contrast, so nothing needs overriding
+   for paper except hiding the controls and forcing a white ground — a tinted
+   canvas costs toner and buys nothing. */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background: #ffffff;
+  }
+}

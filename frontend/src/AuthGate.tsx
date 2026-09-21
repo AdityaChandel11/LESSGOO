@@ -4,6 +4,7 @@ import App from "./App";
 import BrandMark from "./Brand";
 import DataNotice from "./DataNotice";
 import Landing from "./Landing";
+import Workspace from "./workspace/Shell";
 import {
   ApiError,
   type DemoAccount,
@@ -359,6 +360,13 @@ export default function AuthGate() {
         />
       </>
     );
+  }
+
+  // Facility staff get the workspace for their own centre, not the national
+  // console. The two are different shapes for different desks: App is a
+  // fixed two-column map console, this is a phone app for one shelf.
+  if (session.user.role === "facility_user" && session.user.facility_id) {
+    return <Workspace session={session} onSignOut={signOut} />;
   }
 
   return <App session={session} onSignOut={signOut} />;
