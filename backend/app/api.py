@@ -596,22 +596,47 @@ async def reject_transfer(
 # --------------------------------------------------------------------------
 # Facilities
 # --------------------------------------------------------------------------
+# Bounded on purpose. This endpoint reads each facility's recent readings to
+# score it, so the cost is set by how many facilities come back, not by how
+# many the caller wanted.
+FACILITY_PAGE_DEFAULT = 200
+FACILITY_PAGE_MAX = 500
+
+
 @router.get("/facilities", response_model=list[FacilityOut], tags=["facilities"])
 async def list_facilities(
     session: AsyncSession = Depends(get_session),
     district: str | None = Query(default=None),
     state_silo: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    limit: int = Query(default=FACILITY_PAGE_DEFAULT, ge=1, le=FACILITY_PAGE_MAX),
 ) -> list[FacilityOut]:
-    snaps = await services.get_snapshots(session)
-    if district:
-        snaps = [s for s in snaps if s.district == district]
-    if state_silo:
-        snaps = [s for s in snaps if s.state_silo == state_silo]
-    if status:
-        snaps = [s for s in snaps if s.status == status]
-    # Worst first: an officer opening this should see the fires at the top.
-    snaps.sort(key=lambda s: (-services.STATUS_ORDER.index(s.status), s.name))
+    """Facilities matching the filter, worst first.
+
+    The filter is resolved to a bounded set of facility ids in SQL *before*
+    anything reads a stock reading. It used to be the other way round: every
+    facility was scored and the district, state and status filters were applied
+    to the result in Python. Scoring every facility means reading every
+    reading in the burn-rate window — about 1.18M rows on the deployed database
+    — so asking for one district cost the same as asking for the country, and
+    on a 1 GB volume the sort behind it spilled roughly 70 MB of temporary
+    files and never finished.
+
+    `aggregates.find_facilities` already does this selection in one query,
+    against the materialised snapshot the map reads, and it is the same
+    ordering and the same status rule the map uses. Reusing it keeps the two
+    from drifting apart.
+    """
+    pins = await aggregates.find_facilities(
+        session, state=state_silo, district=district, status=status, limit=limit
+    )
+    if not pins:
+        return []
+    # Already worst-first from the query; keep that order rather than re-deriving
+    # it, so the list and the map agree about which facility is most urgent.
+    order = {p.id: i for i, p in enumerate(pins)}
+    snaps = await services.get_snapshots(session, list(order))
+    snaps.sort(key=lambda s: order.get(s.id, len(order)))
     return [_to_out(s) for s in snaps]
 
 
