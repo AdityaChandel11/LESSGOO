@@ -2,6 +2,15 @@
 
 Stage 1 (README, cold-start gate, synthetic label): `4e9b29c`, `1813056`.
 Stage 2 (public landing at `/`): `f4b0d1f`.
+Stage 3 (live loop, bed photo, federation replay, two bugs): `84d682a`,
+`06a85b8`, `eb67323`, `5855b41`, `c23ebe9`.
+
+**Open on Aditya: the Gemini free tier allows 20 requests per day per model**
+(`GenerateRequestsPerDayPerProjectPerModel-FreeTier`, limit 20, confirmed from
+Google's own 429 body). Rehearsals, the demo recording and judges clicking the
+deployed link all draw on the same 20. Either enable billing on the AI Studio
+project, or run the deployed link on `LLM_MODE=mock` and show the live path
+only in the video.
 Branch `feature/judge-journey`. Nothing merges to `main` without "ship it".
 
 ## Decisions (Aditya, 2026-09-21)
