@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { AttendancePanel } from "./attendancepanel";
 import { BedPanel } from "./bedpanel";
+import { inSandbox } from "./liveloop";
 import { TrustBlock } from "./trustpanel";
 import {
   type Bucket,
@@ -387,6 +388,7 @@ export function FacilityPanel({
   demoMode,
   onBack,
   onOpenEvidence,
+  onSimulateStockOut,
 }: {
   id: string;
   sku: string | null;
@@ -396,6 +398,8 @@ export function FacilityPanel({
   user: User;
   demoMode: boolean;
   onBack: () => void;
+  /** Offered only inside the sandbox district: see liveloop.tsx. */
+  onSimulateStockOut?: (detail: FacilityDetail) => void;
   /** Follow a trust score's evidence to the rows it was computed from. */
   onOpenEvidence?: (
     evidence: { tab: string },
@@ -470,6 +474,14 @@ export function FacilityPanel({
               <StatusPill status={detail.status} />
               <span className="font-mono text-[11px] text-ink-3">{detail.id}</span>
             </div>
+            {onSimulateStockOut && demoMode && inSandbox(detail) && (
+              <button
+                onClick={() => onSimulateStockOut(detail)}
+                className="mt-3 h-9 w-full rounded-md border border-brand bg-brand/[0.04] text-[13px] font-medium text-brand hover:bg-brand/10 focus:ring-2 focus:ring-brand/30 focus:outline-none"
+              >
+                Simulate a stock-out →
+              </button>
+            )}
             <div className="mt-3.5 grid grid-cols-3 gap-2 text-center">
               {(["critical", "at_risk", "healthy"] as Status[]).map((st) => (
                 <div key={st} className="rounded-md border border-line px-2 py-1.5">

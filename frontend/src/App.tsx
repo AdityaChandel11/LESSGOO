@@ -32,6 +32,7 @@ import {
   POLL_VISIBLE_MS,
   useLiveUpdates,
 } from "./api";
+import { LiveLoopPanel } from "./liveloop";
 import { ActivityFeed, FacilityPanel, NationalPanel, StatePanel } from "./panels";
 import { FederationPanel } from "./federation";
 import { MovementsPanel } from "./movements";
@@ -185,6 +186,9 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
   // shows exactly the rows that score was computed from — same filter, same
   // query, so the two can never disagree.
   const [evidenceFor, setEvidenceFor] = useState<{ id: string; name: string } | null>(null);
+  // The judge-driven loop takes the panel over while it runs; the map stays
+  // visible beside it, which is the half they are meant to be watching.
+  const [loopFor, setLoopFor] = useState<FacilityDetail | null>(null);
   // Holds why Google's basemap was refused or dropped, so the banner can say
   // it rather than leaving the map quietly different from what was configured.
   const [basemapFallback, setBasemapFallback] = useState<string | null>(null);
@@ -589,7 +593,19 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
       <main className="flex min-h-0 flex-1">
         {/* ---------------------------------------------------- panel --- */}
         <aside className="z-[1000] flex w-[400px] shrink-0 flex-col border-r border-line bg-panel">
-          {selected ? (
+          {loopFor ? (
+            <LiveLoopPanel
+              facility={loopFor}
+              user={user}
+              events={events}
+              onClose={() => setLoopFor(null)}
+              onChanged={() => {
+                setRefreshKey((k) => k + 1);
+                pollNow();
+              }}
+              onFocus={(lat, lng) => fly(lat, lng, Math.max(view.zoom, FACILITY_ZOOM + 2))}
+            />
+          ) : selected ? (
             <FacilityPanel
               id={selected.id}
               sku={sku}
@@ -598,6 +614,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               stateName={stateName(selected.state_silo)}
               user={user}
               demoMode={session.demo_mode}
+              onSimulateStockOut={setLoopFor}
               onOpenEvidence={(e, facility) => {
                 if (e.tab !== "movements") return;
                 setEvidenceFor(facility);

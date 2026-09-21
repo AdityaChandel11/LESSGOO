@@ -597,6 +597,21 @@ export interface Plan {
   manual_review: Shortfall[];
 }
 
+/** What the spine reports back once a reading is committed and the facility's
+ *  snapshot has been recomputed from it. `status_*` is the facility's overall
+ *  condition — its worst medicine — not this one SKU's. */
+export interface StockReadingResult {
+  id: number;
+  facility_id: string;
+  sku_code: string;
+  qty_on_hand: number;
+  days_of_stock: number | null;
+  status_before: Status;
+  status_after: Status;
+  status_changed: boolean;
+  duplicate?: boolean;
+}
+
 export function submitReading(body: {
   facility_id: string;
   sku_code: string;
@@ -605,7 +620,7 @@ export function submitReading(body: {
   reporter_ref?: string;
   confidence?: number;
 }) {
-  return post<unknown>("/stock/readings", body);
+  return post<StockReadingResult>("/stock/readings", body);
 }
 
 /* ------------------------------------------------------------ realtime --- */
