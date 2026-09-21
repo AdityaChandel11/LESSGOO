@@ -16,6 +16,7 @@ never presented as real inference.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import logging
@@ -30,6 +31,15 @@ log = logging.getLogger(__name__)
 API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models"
 REQUEST_TIMEOUT_S = 30.0
 MAX_IMAGE_BYTES = 6 * 1024 * 1024
+
+# A shared flash model answers 503 when its capacity is tight, and 429 when the
+# key is being rate-limited. Neither says anything about the photograph — the
+# same image sent a second later is read fine — so a single attempt turns a
+# working feature into one that fails in front of whoever is watching.
+# Bounded deliberately: three tries inside the existing 30-second timeout, so a
+# genuine outage still fails fast rather than hanging the request.
+RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+RETRY_BACKOFF_S = (0.6, 1.6)
 
 PROMPT = (
     "This is a photograph of a ward in an Indian primary health centre. "
@@ -174,20 +184,39 @@ async def _call_gemini(
     own = client is None
     http = client or httpx.AsyncClient(timeout=REQUEST_TIMEOUT_S)
     try:
-        response = await http.post(
-            f"{API_ROOT}/{model}:generateContent",
-            # The key travels in a header, never in the URL where it would be logged.
-            headers={"x-goog-api-key": settings.gemini_api_key},
-            json=body,
-        )
-        response.raise_for_status()
-        data = response.json()
-    except httpx.HTTPStatusError as exc:
-        log.error("Gemini refused the request (HTTP %s)", exc.response.status_code)
-        raise VisionError("The photo service rejected the request") from exc
-    except httpx.HTTPError as exc:
-        log.warning("Gemini call failed: %s", type(exc).__name__)
-        raise VisionError("The photo service could not be reached") from exc
+        for attempt in range(len(RETRY_BACKOFF_S) + 1):
+            try:
+                response = await http.post(
+                    f"{API_ROOT}/{model}:generateContent",
+                    # The key travels in a header, never in the URL where it
+                    # would be logged.
+                    headers={"x-goog-api-key": settings.gemini_api_key},
+                    json=body,
+                )
+                response.raise_for_status()
+                data = response.json()
+                break
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status in RETRY_STATUSES and attempt < len(RETRY_BACKOFF_S):
+                    log.warning(
+                        "Gemini answered HTTP %s; retrying in %.1fs",
+                        status, RETRY_BACKOFF_S[attempt],
+                    )
+                    await asyncio.sleep(RETRY_BACKOFF_S[attempt])
+                    continue
+                log.error("Gemini refused the request (HTTP %s)", status)
+                # Worth separating: a busy model says nothing about the photo,
+                # and telling somebody their photograph was rejected when the
+                # service was merely overloaded sends them to re-take it.
+                raise VisionError(
+                    "The model is busy right now — send the photo again in a moment"
+                    if status in RETRY_STATUSES
+                    else "The photo service rejected the request"
+                ) from exc
+            except httpx.HTTPError as exc:
+                log.warning("Gemini call failed: %s", type(exc).__name__)
+                raise VisionError("The photo service could not be reached") from exc
     finally:
         if own:
             await http.aclose()

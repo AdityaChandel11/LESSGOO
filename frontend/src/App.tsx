@@ -182,6 +182,9 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
 
   const [mode, setMode] = useState<Mode>(initialUrl.mode);
   const [basemap, setBasemap] = useState<{ mode: "osm" | "google"; key: string } | null>(null);
+  // Assume the mock extractor until the server says otherwise: offering the
+  // live photo path against a mock backend would fail on submit.
+  const [llmMode, setLlmMode] = useState<"live" | "mock">("mock");
   // Set when a trust score's evidence link is followed: the movement tab then
   // shows exactly the rows that score was computed from — same filter, same
   // query, so the two can never disagree.
@@ -216,7 +219,10 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
     api.skus().then(setSkus).catch((e) => setLoadError(String(e)));
     api
       .clientConfig()
-      .then((c) => setBasemap({ mode: c.maps_mode, key: c.maps_browser_key }))
+      .then((c) => {
+        setBasemap({ mode: c.maps_mode, key: c.maps_browser_key });
+        setLlmMode(c.llm_mode);
+      })
       .catch(() => setBasemap({ mode: "osm", key: "" }));
   }, []);
 
@@ -614,6 +620,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               stateName={stateName(selected.state_silo)}
               user={user}
               demoMode={session.demo_mode}
+              llmMode={llmMode}
               onSimulateStockOut={setLoopFor}
               onOpenEvidence={(e, facility) => {
                 if (e.tab !== "movements") return;

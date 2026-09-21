@@ -386,6 +386,7 @@ export function FacilityPanel({
   stateName,
   user,
   demoMode,
+  llmMode,
   onBack,
   onOpenEvidence,
   onSimulateStockOut,
@@ -397,6 +398,7 @@ export function FacilityPanel({
   stateName: string;
   user: User;
   demoMode: boolean;
+  llmMode: "live" | "mock";
   onBack: () => void;
   /** Offered only inside the sandbox district: see liveloop.tsx. */
   onSimulateStockOut?: (detail: FacilityDetail) => void;
@@ -515,6 +517,7 @@ export function FacilityPanel({
               user={user}
               refreshKey={refreshKey}
               demoMode={demoMode}
+              llmMode={llmMode}
             />
             <AttendancePanel
               facilityId={detail.id}

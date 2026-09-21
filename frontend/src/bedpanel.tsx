@@ -10,6 +10,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, api, type BedCode, type BedReport, type User, can } from "./api";
+import { drawWardBoard, plausibleOccupancy } from "./wardboard";
 
 const VERIFICATION_TONE: Record<string, { label: string; className: string }> = {
   verified: { label: "Verified", className: "text-ok bg-ok/10 border-ok/30" },
@@ -37,12 +38,25 @@ function when(iso: string): string {
   return days === 1 ? "yesterday" : `${days} days ago`;
 }
 
-/** Demo submissions, one per path the verification logic can take. */
-const SIMULATIONS: { key: string; label: string; hint: string }[] = [
-  { key: "good", label: "Today's photo", hint: "Correct code, taken at the facility" },
-  { key: "stale", label: "Yesterday's photo", hint: "An old code — should be rejected" },
-  { key: "elsewhere", label: "Photo from elsewhere", hint: "Right code, wrong place" },
-  { key: "ivr", label: "Reported by phone call", hint: "No location available on this channel" },
+/**
+ * Demo submissions, one per path the verification logic can take.
+ *
+ * Both columns exercise the same three checks; what differs is what reaches
+ * the model. Under the mock extractor nothing is analysed and `simulate`
+ * carries what a camera would have seen. Under a live model the browser draws
+ * the ward board (see wardboard.ts) and sends it as a real image, so the
+ * counts and the code come back from Gemini rather than from us — which is
+ * also the only path the server will accept while a model is configured.
+ */
+const SIMULATIONS: { key: string; label: string; hint: string; needsPhoto: boolean }[] = [
+  { key: "good", label: "Today's photo", hint: "Correct code, taken at the facility", needsPhoto: true },
+  { key: "stale", label: "Yesterday's photo", hint: "An old code — should be rejected", needsPhoto: true },
+  { key: "elsewhere", label: "Photo from elsewhere", hint: "Right code, wrong place", needsPhoto: true },
+  // A voice call carries no image, so there is nothing for a live model to
+  // read. Offered only against the mock extractor, where the whole submission
+  // is simulated anyway — sending a drawn board under a "phone call" label
+  // would be claiming a channel did something it cannot do.
+  { key: "ivr", label: "Reported by phone call", hint: "No location available on this channel", needsPhoto: false },
 ];
 
 export function BedPanel({
@@ -51,6 +65,7 @@ export function BedPanel({
   user,
   refreshKey,
   demoMode,
+  llmMode,
 }: {
   facilityId: string;
   facility: {
@@ -65,6 +80,7 @@ export function BedPanel({
   user: User;
   refreshKey: number;
   demoMode: boolean;
+  llmMode: "live" | "mock";
 }) {
   const [reports, setReports] = useState<BedReport[]>([]);
   const [code, setCode] = useState<BedCode | null>(null);
@@ -101,21 +117,42 @@ export function BedPanel({
     if (!code) return;
     setBusy(kind);
     setError(null);
-    // What the camera would have captured. Accepted only in demo mode with the
-    // mock model, and the stored row is labelled as a mock extraction.
+    // A code from an earlier day. Reversing today's gives a well-formed code
+    // that is not today's, which is exactly the condition the check tests.
     const yesterday = code.code.split("").reverse().join("");
     // Count against the beds this facility actually has on the register, so a
     // demo never manufactures a capacity mismatch that is not the point.
     const beds_total = facility.beds_total;
-    const beds_occupied = Math.max(1, Math.round(beds_total * (0.4 + Math.random() * 0.5)));
-    const body =
-      kind === "stale"
-        ? { simulate: { code_read: yesterday, beds_occupied, beds_total }, location: { lat: facility.lat, lng: facility.lng, accuracy_m: 12, method: "gps" } }
-        : kind === "elsewhere"
-          ? { simulate: { code_read: code.code, beds_occupied, beds_total }, location: { lat: facility.lat + 0.12, lng: facility.lng + 0.09, accuracy_m: 14, method: "gps" } }
-          : kind === "ivr"
-            ? { source: "ivr", simulate: { code_read: code.code, beds_occupied, beds_total }, location: { method: "none" } }
-            : { simulate: { code_read: code.code, beds_occupied, beds_total }, location: { lat: facility.lat, lng: facility.lng, accuracy_m: 11, method: "gps" } };
+    const beds_occupied = plausibleOccupancy(beds_total);
+
+    // Where the report claims to have been taken from. Identical either way:
+    // the geofence is checked server-side against the facility's registered
+    // coordinates and has nothing to do with which model read the image.
+    const location =
+      kind === "elsewhere"
+        ? { lat: facility.lat + 0.12, lng: facility.lng + 0.09, accuracy_m: 14, method: "gps" }
+        : kind === "ivr"
+          ? { method: "none" }
+          : { lat: facility.lat, lng: facility.lng, accuracy_m: 12, method: "gps" };
+
+    let body: Record<string, unknown>;
+    if (llmMode === "live") {
+      // A real image, drawn here and read by the model. Nothing tells Gemini
+      // what is written on the board; the counts and the code in the response
+      // are what it saw.
+      const image_base64 = drawWardBoard({
+        beds_total,
+        beds_occupied,
+        code: kind === "stale" ? yesterday : code.code,
+        ward: "general",
+      });
+      body = { image_base64, image_mime: "image/jpeg", location };
+      if (kind === "ivr") body.source = "ivr";
+    } else {
+      // No photograph is analysed; the stored row records model="mock".
+      body = { simulate: { code_read: kind === "stale" ? yesterday : code.code, beds_occupied, beds_total }, location };
+      if (kind === "ivr") body.source = "ivr";
+    }
     try {
       await api.submitBedReport(facilityId, body);
       load();
@@ -226,10 +263,18 @@ export function BedPanel({
                 counts the beds and reads the code back out of the same image — so an old photo
                 fails, because yesterday's code cannot appear in it.
               </p>
-              {latest.model === "mock" && (
+              {latest.model === "mock" ? (
                 <p className="mt-1.5 text-[11px] text-ink-3">
                   This deployment is running the mock extractor: no photograph was analysed, and
                   these counts are simulated.
+                </p>
+              ) : (
+                <p className="mt-1.5 text-[11px] text-ink-3">
+                  Read by <span className="font-mono text-ink-2">{latest.model}</span>
+                  {latest.model_confidence != null &&
+                    ` · the model put its own confidence in the counts at ${Math.round(latest.model_confidence * 100)}%`}
+                  . It returned {latest.beds_occupied ?? "—"} of {latest.beds_total ?? "—"} beds and
+                  read the code as “{latest.code_read ?? "—"}”.
                 </p>
               )}
               <ul className="mt-1.5 space-y-0.5">
@@ -266,8 +311,13 @@ export function BedPanel({
               <span className="font-mono font-semibold text-ink-2">{code.code}</span> · {code.delivery}
             </p>
           )}
+          <p className="mt-1 text-[11px] leading-snug text-ink-3">
+            {llmMode === "live"
+              ? "The board below is drawn in this browser with that code and sent to Gemini as an image. The counts and the code in the result are what the model read, not what was drawn."
+              : "This deployment runs the mock extractor: no image is produced and no model is called."}
+          </p>
           <div className="mt-1.5 flex flex-wrap gap-1.5">
-            {SIMULATIONS.map((s) => (
+            {SIMULATIONS.filter((s) => llmMode === "mock" || s.needsPhoto).map((s) => (
               <button
                 key={s.key}
                 title={s.hint}

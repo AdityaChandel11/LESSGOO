@@ -247,6 +247,10 @@ class ClientConfigOut(BaseModel):
     maps_mode: str
     maps_browser_key: str
     demo_mode: bool
+    # Which vision path the bed capture is on. The two are not interchangeable
+    # from the browser's side: a live model needs a real image, and the
+    # submit endpoint refuses a simulated extraction while one is configured.
+    llm_mode: str
 
 
 @public_router.get("/client-config", response_model=ClientConfigOut, tags=["meta"])
@@ -258,6 +262,7 @@ async def client_config() -> ClientConfigOut:
         maps_mode="google" if google else "osm",
         maps_browser_key=settings.google_maps_browser_key if google else "",
         demo_mode=settings.demo_mode,
+        llm_mode="live" if settings.llm_mode == "live" else "mock",
     )
 
 

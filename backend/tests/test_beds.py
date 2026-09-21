@@ -7,6 +7,7 @@ never accuses a facility of anything.
 
 import asyncio
 
+import httpx
 import pytest
 
 from app import beds, vision
@@ -203,3 +204,72 @@ def test_generated_codes_avoid_ambiguous_characters():
     assert not set("".join(codes)) & set("O0I1S5")
     # Unpredictable: 200 draws from a 30^4 space should not repeat much.
     assert len(codes) > 190
+
+
+# ------------------------------------------------- a model under load ---
+# A shared flash model answers 503 when its capacity is tight. That says
+# nothing about the photograph, so one attempt is not enough: the feature that
+# makes a ward photo trustworthy would fail intermittently, and it would fail
+# exactly when a lot of people are using the service.
+
+
+def _gemini_ok() -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "candidates": [
+                {"content": {"parts": [{"text": '{"beds_total": 12, "beds_occupied": 7, '
+                                                '"code_read": "AB12", "confidence": 0.9}'}]}}
+            ]
+        },
+    )
+
+
+def _live(monkeypatch) -> None:
+    monkeypatch.setattr(vision.settings, "llm_mode", "live")
+    monkeypatch.setattr(vision.settings, "gemini_api_key", "not-a-real-key")
+    # Backoff is real time; the behaviour under test is the retry, not the wait.
+    monkeypatch.setattr(vision, "RETRY_BACKOFF_S", (0.0, 0.0))
+
+
+def test_an_overloaded_model_is_retried_rather_than_failed(monkeypatch):
+    _live(monkeypatch)
+    seen: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(1)
+        return _gemini_ok() if len(seen) > 2 else httpx.Response(503)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    result = asyncio.run(vision.read_ward_photo(b"jpeg-bytes", client=client))
+    assert len(seen) == 3, "the 503s should have been retried"
+    assert result.beds_occupied == 7 and result.code_read == "AB12"
+
+
+def test_retries_are_bounded_so_a_real_outage_still_fails(monkeypatch):
+    _live(monkeypatch)
+    seen: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(1)
+        return httpx.Response(503)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(vision.VisionError):
+        asyncio.run(vision.read_ward_photo(b"jpeg-bytes", client=client))
+    assert len(seen) == len(vision.RETRY_BACKOFF_S) + 1
+
+
+def test_a_refusal_is_not_retried(monkeypatch):
+    """400 means this request is wrong. Sending it again is only slower."""
+    _live(monkeypatch)
+    seen: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(1)
+        return httpx.Response(400, json={"error": {"message": "bad image"}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    with pytest.raises(vision.VisionError):
+        asyncio.run(vision.read_ward_photo(b"jpeg-bytes", client=client))
+    assert len(seen) == 1

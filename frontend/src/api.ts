@@ -243,6 +243,9 @@ export interface ClientConfig {
   maps_mode: "osm" | "google";
   maps_browser_key: string;
   demo_mode: boolean;
+  /** Which vision path bed capture is on. A live model needs a real image;
+   *  the submit endpoint refuses a simulated extraction while one is set. */
+  llm_mode: "live" | "mock";
 }
 
 export interface FederationSilo {
