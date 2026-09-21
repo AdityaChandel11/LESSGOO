@@ -307,6 +307,10 @@ export const api = {
     get<WorkspaceView>(`/facilities/${encodeURIComponent(facilityId)}/workspace`),
   supply: (facilityId: string, sku: string) =>
     get<Supply>(`/facilities/${encodeURIComponent(facilityId)}/supply`, { sku }),
+  briefing: (facilityId: string, lang: "en" | "hi") =>
+    post<Briefing>(
+      `/facilities/${encodeURIComponent(facilityId)}/briefing?lang=${lang}`,
+    ),
   requestStock: (
     facilityId: string,
     body: { sku_code: string; from_facility: string; qty: number },
@@ -494,6 +498,22 @@ export interface WorkspaceView {
   skus: WorkspaceSku[];
   open_requests: number;
   max_open_requests: number;
+  /** Both languages of the computed line. Always present, needs no key, and is
+   *  what the screen shows until somebody asks the model for its version. */
+  briefing: Record<string, string>;
+}
+
+export interface Briefing {
+  body: string;
+  lang: string;
+  /** "rules" = computed here. "gemini" = written by the model. */
+  source: "rules" | "gemini";
+  /** The only thing that may put a model's name on screen. */
+  ai: boolean;
+  model: string | null;
+  generated_at: string | null;
+  cached: boolean;
+  note: string | null;
 }
 
 export interface Donor {

@@ -36,6 +36,53 @@ CONTROLLED_SKU = "MORPH"
 BY_REF = "chk:workspace"
 
 
+async def _briefing_assertions(c, http, facility_id: str, other_id: str) -> None:
+    """The briefing, on the path that has to work when there is no model.
+
+    Forced onto the deterministic branch by the caller, whatever LLM_MODE says.
+    These checks are a release gate and run constantly; the free tier allows
+    twenty generate requests a day per model, so a check that spent one on
+    every run would exhaust the quota by lunchtime and then start failing for a
+    reason that has nothing to do with the code.
+
+    The live path is proved in the browser and by scripts/check_gemini, where a
+    person is choosing to spend the call. What matters here is the branch that
+    must hold when the model cannot answer: a line that is still useful,
+    carrying no AI label and naming no model.
+    """
+    view = (
+        await http.get("/api/facilities/{0}/workspace".format(facility_id))
+    ).json()
+    c.ok(
+        "the workspace carries a computed line in both languages",
+        set(view.get("briefing", {})) == {"en", "hi"}
+        and all(view["briefing"].values()),
+        "keys: {0}".format(sorted(view.get("briefing", {}))),
+    )
+    c.ok(
+        "and the two languages are not the same string",
+        view["briefing"]["en"] != view["briefing"]["hi"],
+    )
+
+    for lang in ("en", "hi"):
+        r = await http.post(
+            "/api/facilities/{0}/briefing?lang={1}".format(facility_id, lang)
+        )
+        c.eq("a briefing answers for {0}".format(lang), r.status_code, 200)
+        got = r.json()
+        c.eq("and in the language asked for", got["lang"], lang)
+        c.ok("it is never empty", bool(got["body"]))
+        c.eq("computed text claims no model", got["model"], None)
+        c.eq("and reports its source honestly", got["source"], "rules")
+        c.ok("and carries no AI label", got["ai"] is False)
+
+    r = await http.post("/api/facilities/{0}/briefing?lang=fr".format(facility_id))
+    c.eq("an unsupported language is refused", r.status_code, 422)
+
+    r = await http.post("/api/facilities/{0}/briefing?lang=en".format(other_id))
+    c.eq("another centre's briefing is refused", r.status_code, 403)
+
+
 async def run() -> Report:
     c = Checker("workspace")
     transfer_ids: list[int] = []
@@ -109,6 +156,14 @@ async def run() -> Report:
                 other_name not in r.text,
                 "review focus 2",
             )
+
+            # --- the briefing, on the path that works without a model -------
+            was_live = settings.llm_mode
+            settings.llm_mode = "mock"
+            try:
+                await _briefing_assertions(c, http, facility_id, other_id)
+            finally:
+                settings.llm_mode = was_live
 
             # --- find supply -------------------------------------------------
             r = await http.get(

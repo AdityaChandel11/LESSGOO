@@ -24,6 +24,7 @@ import {
   api,
   formatDays,
 } from "../api";
+import Briefing from "./Briefing";
 import FindSupply from "./FindSupply";
 import { both } from "./labels";
 
@@ -198,6 +199,8 @@ export default function Medicines({
 
   return (
     <>
+      <Briefing facilityId={facilityId} computed={view.briefing} />
+
       <section
         aria-label="Data confidence"
         className="mb-3 rounded-lg border border-line bg-panel px-3.5 py-3"

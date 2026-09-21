@@ -3,6 +3,8 @@
     python -m scripts.remote --show
     python -m scripts.remote --counts
     python -m scripts.remote --diagnose
+    python -m scripts.remote --connections
+    python -m scripts.remote --terminate 12345 --confirm
     python -m scripts.remote --confirm -- -m scripts.seed --days 35 --focus-days 120
 
 The deployed database is reached only through RENDER_DATABASE_URL_EXTERNAL, and
@@ -276,6 +278,179 @@ async def diagnose(dsn: str) -> None:
         await conn.close()
 
 
+# ------------------------------------------------------------ connections ---
+# Read-only, on this side of the --confirm gate: it reads pg_stat_activity and
+# pg_locks and nothing else. It exists because an old transaction is invisible
+# in every size measurement and yet changes what those measurements mean —
+# vacuum cannot reclaim a dead tuple younger than the oldest running
+# transaction, so a connection somebody left open a day ago quietly pins bloat
+# in place while `--counts` reports a number that looks fine.
+
+
+async def connections(dsn: str) -> None:
+    import asyncpg
+
+    conn = await asyncpg.connect(dsn, timeout=30)
+    try:
+        me = await conn.fetchval("SELECT pg_backend_pid()")
+        rows = await conn.fetch(
+            """
+            SELECT pid, usename, state, backend_type, xact_start,
+                   now() - xact_start   AS xact_age,
+                   now() - state_change AS idle_for,
+                   wait_event_type,
+                   left(query, 70)      AS query
+            FROM pg_stat_activity
+            WHERE datname = current_database()
+            ORDER BY xact_start NULLS LAST, query_start
+            """
+        )
+        print("")
+        print("  backends on this database")
+        print("  " + "-" * 70)
+        for r in rows:
+            mine = "  (this session)" if r["pid"] == me else ""
+            print("    pid={0}{1}".format(r["pid"], mine))
+            print(
+                "      state={0}  type={1}  wait={2}".format(
+                    r["state"], r["backend_type"], r["wait_event_type"]
+                )
+            )
+            print(
+                "      xact_start={0}  age={1}".format(r["xact_start"], r["xact_age"])
+            )
+            print("      idle_for={0}".format(r["idle_for"]))
+            print("      query={0}".format(r["query"]))
+
+        print("")
+        print("  locks held by other backends (is anything live behind them?)")
+        print("  " + "-" * 70)
+        locks = await conn.fetch(
+            """
+            SELECT l.pid, l.locktype, l.mode, l.granted,
+                   coalesce(c.relname, '-') AS relation
+            FROM pg_locks l
+            LEFT JOIN pg_class c ON c.oid = l.relation
+            WHERE l.pid <> pg_backend_pid()
+            ORDER BY l.pid
+            """
+        )
+        if not locks:
+            print("    (none)")
+        for r in locks:
+            print(
+                "    pid={0}  {1} {2} on {3}  granted={4}".format(
+                    r["pid"], r["locktype"], r["mode"], r["relation"], r["granted"]
+                )
+            )
+    finally:
+        await conn.close()
+
+
+async def terminate(dsn: str, pid: int) -> None:
+    """End one backend. Behind --confirm, because it ends whatever it was doing.
+
+    Everything that can be learned about the victim is printed before the kill,
+    and a backend that is actually executing a statement is refused rather than
+    killed: an idle-in-transaction connection is safe to end, a query in flight
+    is a decision for a person and not for this script.
+    """
+    import asyncpg
+
+    conn = await asyncpg.connect(dsn, timeout=30)
+    try:
+        row = await conn.fetchrow(
+            """
+            SELECT pid, usename, state, backend_type, xact_start, query_start,
+                   now() - xact_start   AS xact_age,
+                   now() - state_change AS idle_for,
+                   left(query, 200)     AS query
+            FROM pg_stat_activity
+            WHERE pid = $1 AND datname = current_database()
+            """,
+            pid,
+        )
+        if row is None:
+            print("")
+            print("  pid {0} is not connected to this database.".format(pid))
+            print("  Nothing to terminate.")
+            return
+
+        held = await conn.fetch(
+            """
+            SELECT l.locktype, l.mode, coalesce(c.relname, '-') AS relation, l.granted
+            FROM pg_locks l
+            LEFT JOIN pg_class c ON c.oid = l.relation
+            WHERE l.pid = $1
+            """,
+            pid,
+        )
+        blocking = await conn.fetchval(
+            "SELECT count(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid))",
+            pid,
+        )
+
+        print("")
+        print("  about to terminate")
+        print("    pid        : {0}".format(row["pid"]))
+        print("    user       : {0}".format(row["usename"]))
+        print("    state      : {0}".format(row["state"]))
+        print("    type       : {0}".format(row["backend_type"]))
+        print(
+            "    xact_start : {0}   (age {1})".format(row["xact_start"], row["xact_age"])
+        )
+        print("    idle_for   : {0}".format(row["idle_for"]))
+        print("    query      : {0}".format(row["query"]))
+        print("    locks      : {0}".format(len(held)))
+        for h in held:
+            print(
+                "      {0} {1} on {2}  granted={3}".format(
+                    h["locktype"], h["mode"], h["relation"], h["granted"]
+                )
+            )
+        print("    blocking   : {0} other backend(s)".format(blocking))
+
+        # A live statement is not this script's to cancel. "active" here means
+        # a query is executing right now, not merely that a transaction is open.
+        if row["state"] == "active":
+            print("")
+            print("  REFUSING: pid {0} is running a statement right now.".format(pid))
+            print("  Terminating it would abort work in flight. Re-check with")
+            print("  --connections, and kill it by hand if that is really meant.")
+            return
+
+        killed = await conn.fetchval("SELECT pg_terminate_backend($1)", pid)
+        print("")
+        print("  pg_terminate_backend returned {0}".format(killed))
+
+        still = await conn.fetchval(
+            "SELECT count(*) FROM pg_stat_activity WHERE pid = $1", pid
+        )
+        print("  pid {0} still present : {1}".format(pid, bool(still)))
+
+        oldest = await conn.fetchrow(
+            """
+            SELECT pid, now() - xact_start AS age, state
+            FROM pg_stat_activity
+            WHERE datname = current_database()
+              AND xact_start IS NOT NULL
+              AND pid <> pg_backend_pid()
+            ORDER BY xact_start
+            LIMIT 1
+            """
+        )
+        if oldest is None:
+            print("  oldest remaining transaction : none, other than this session")
+        else:
+            print(
+                "  oldest remaining transaction : pid {0}, state {1}, age {2}".format(
+                    oldest["pid"], oldest["state"], oldest["age"]
+                )
+            )
+    finally:
+        await conn.close()
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--show", action="store_true", help="print the target and stop")
@@ -284,6 +459,17 @@ def main() -> None:
         "--diagnose",
         action="store_true",
         help="read-only: where the disk went (sizes, bloat, WAL, temp files)",
+    )
+    p.add_argument(
+        "--connections",
+        action="store_true",
+        help="read-only: backends, transaction ages and locks",
+    )
+    p.add_argument(
+        "--terminate",
+        type=int,
+        metavar="PID",
+        help="end one backend (needs --confirm); prints it first, refuses a live query",
     )
     p.add_argument("--confirm", action="store_true", help="required for anything that writes")
     p.add_argument("--python", default=sys.executable, help="interpreter to run (the Flower env has torch)")
@@ -305,6 +491,17 @@ def main() -> None:
         return
     if args.diagnose:
         asyncio.run(diagnose(dsn))
+        return
+    if args.connections:
+        asyncio.run(connections(dsn))
+        return
+    if args.terminate is not None:
+        if not args.confirm:
+            raise SystemExit(
+                "REFUSING: terminating a backend ends whatever it was doing. "
+                "Re-run with --confirm once the host above is the one you meant."
+            )
+        asyncio.run(terminate(dsn, args.terminate))
         return
 
     command = [a for a in args.rest if a != "--"]

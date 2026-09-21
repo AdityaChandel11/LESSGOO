@@ -14,6 +14,7 @@ Two rules every check follows:
 from __future__ import annotations
 
 import contextlib
+import sys
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
@@ -56,6 +57,23 @@ class Checker:
     def __init__(self, name: str) -> None:
         self.report = Report(name)
 
+    @staticmethod
+    def _safe(text: str) -> str:
+        """Printable on this console, whatever its encoding.
+
+        The checks are a release gate and run on Windows, where stdout is
+        often cp1252. A Hindi briefing or a Devanagari facility name in a
+        detail string would raise UnicodeEncodeError mid-run and take the
+        whole check to ERROR after its assertions had already passed — which
+        is a reporting bug masquerading as a failure.
+        """
+        encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+        try:
+            text.encode(encoding)
+            return text
+        except UnicodeEncodeError:
+            return text.encode(encoding, "backslashreplace").decode(encoding)
+
     def ok(self, label: str, condition: Any, detail: str = "") -> bool:
         passed = bool(condition)
         self.report.outcomes.append(Outcome(label, passed, detail))
@@ -65,7 +83,7 @@ class Checker:
             suffix = "  <- " + detail
         elif detail:
             suffix = "  (" + detail + ")"
-        print("    {0}  {1}{2}".format(mark, label, suffix))
+        print(self._safe("    {0}  {1}{2}".format(mark, label, suffix)))
         return passed
 
     def eq(self, label: str, got: Any, want: Any) -> bool:
@@ -79,7 +97,7 @@ class Checker:
         return self.ok(label, got is not None and got >= floor, "got {0!r}, need >= {1}".format(got, floor))
 
     def note(self, text: str) -> None:
-        print("          " + text)
+        print(self._safe("          " + text))
 
     def skip(self, reason: str) -> None:
         self.report.skipped = reason
