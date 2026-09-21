@@ -1,59 +1,83 @@
 # Judge journey — remaining plan
 
-Stage 1 (README, cold-start gate, synthetic label) is done: `4e9b29c`, `1813056`.
+Stage 1 (README, cold-start gate, synthetic label): `4e9b29c`, `1813056`.
+Stage 2 (public landing at `/`): `f4b0d1f`.
 Branch `feature/judge-journey`. Nothing merges to `main` without "ship it".
 
 ## Decisions (Aditya, 2026-09-21)
 
-- **Tour writes are scoped to a Nashik sandbox.** Every action the tour takes
-  touches Maharashtra / Nashik only, so drift stays in one district.
-- **Transfers are pre-created as intra-Nashik plans.** `can_plan_state` refuses
-  `block_mo`, so `nashik.ddlo` cannot generate a plan — but `can_decide_transfer`
-  lets it approve one where donor and recipient are both in Nashik. The tour
-  therefore approves a plan prepared in advance rather than solving one live.
-- **No limited tour role.** `nashik.ddlo@demo.swasthsetu.in` is enough.
-- **A reset script restores the sandbox** in one command (Stage 3).
-- **D2 outbreak is skipped.** Tour step 5 shows the real early stock-out
-  warning instead. Docs say "emergency surge = roadmap".
-- **Hindi is the briefing toggle only.** No full-UI i18n: there is no i18n
-  layer and 121 Devanagari strings are hardcoded inline.
+- **Tour writes stay in the Nashik sandbox** (32 facilities, MH/Nashik), with a
+  one-command reset. Drift is confined to one district.
+- **No limited tour role**; **D2 outbreak skipped**; **Hindi is the briefing
+  toggle only** — there is no i18n layer and 121 Devanagari strings are inline.
+- **Do not reseed the local database.** It predates `1ddbedd` and reports 34
+  states; the demo is recorded on Render, which is seeded correctly.
+- Government palette is fixed: navy/gray, flat, one type family, no gradients.
 
-## Stage 2 — landing at `/` (~4h)
+## Stage 3 — the live loop (replaces the guided tour)
 
-Unauthenticated route. Live map hero pulling real `/api/map/summary`, so the
-headline number is never hardcoded. Three numbered steps (report → forecast →
-approve) — numbering earns its place because it is a real sequence. "Try the
-demo" uses the existing `/auth/demo`, which already works. Sign-in demoted to a
-secondary link. Palette stays fixed: navy/gray, flat, one type family.
+A judge picks a Nashik facility, clicks **Simulate a stock-out**, and watches
+the whole chain run. Every step carries a timestamp, the HTTP method and path
+actually called, and the value that came back. No step is staged or hard-coded;
+the quantity that triggers the stock-out is computed from that facility's own
+burn rate so it lands under the 3-day line rather than being a magic number.
 
-## Stage 3 — guided tour (~6h)
+| # | Step | Endpoint (all existing) |
+|---|---|---|
+| 1 | Reading committed | `POST /api/stock/readings` |
+| 2 | Days of stock recomputed | same response: `days_of_stock` |
+| 3 | Map dot flips to critical | `status_before → status_after`, map re-reads `GET /api/map/facilities` |
+| 4 | Optimiser proposes a transfer | `POST /api/transfers/plan` → donor, `route_km`, ETA, solver, rationale |
+| 5 | Judge approves | `POST /api/transfers/{id}/approve` |
+| 6 | Stock moves | `GET /api/facilities/{id}` — donor debited, batch dispatched |
+| 7 | Activity feed logs each step | `GET /api/events` (already polled) |
 
-Dismissible rail, five steps, each firing a real request and naming the
-endpoint it called. No fake or hard-coded results.
+`backend/scripts/reset_nashik.py` — refuses any scope but MH/Nashik, deletes
+the readings, bed reports, transfers, approvals and movements the demo created,
+recomputes `facility_sku_states` through `services.refresh_facility_state`, and
+re-runs the MH plan. Prints what it removed.
 
-1. SMS ingest — `POST /api/ingest/simulate`
-2. Ward photo through Gemini — `POST /api/facilities/{id}/bed-reports`, needs
-   today's rotating code from `/api/facilities/{id}/bed-code`
-3. Early stock-out warning — the real 653 critical facilities
-4. Approve a pre-created intra-Nashik transfer — `POST /api/transfers/{id}/approve`
-5. Federation inspector — `GET /api/federation/inspector`, read-only
+## Stage 3b — bed photo through live Gemini
 
-Plus `scripts/reset_tour.py`: one command, Nashik only, restores stock, removes
-tour readings and bed reports, and re-creates the pending transfers.
+`LLM_MODE=live` currently **rejects** the bed panel's `simulate` payload (422),
+so the panel is dead in live mode. The browser will instead draw the ward
+whiteboard on a canvas — the same board `scripts/ward_photo.py` already draws,
+carrying today's real rotating code — and post it as `image_base64` to the
+existing `POST /api/facilities/{id}/bed-reports`. Gemini reads the bed counts
+*and* the code back out of the image; the panel shows exactly what the model
+returned: model name, counts, `code_read`, confidence, notes, and which checks
+passed. Labelled as a synthetic board, never as a photograph. `/client-config`
+gains `llm_mode` so the UI knows which path it is on; the mock buttons stay for
+`LLM_MODE=mock`, per the both-paths-tested rule (§1.4).
+
+## Stage 3c — federation replay
+
+"Replay the run" steps through the 9 recorded rounds of run
+`5699775115329553857` (FedProx, mu=0.01): the error curve draws round by round,
+the per-silo table updates, and facility rows transmitted stays 0 throughout.
+Labelled **"Replay of the recorded run, not a new training."** Reduced-motion
+jumps straight to the end. The four silos are highlighted on the map (BR, KL,
+MH, UP), and the down-weighting note is derived, not written in: Bihar's trust
+is 0.389 against Kerala's 0.863, so its 33,918 windows count as 13,194.
+
+## Stage 3d — two bugs
+
+- **Audit queue scope.** `api.trustQueue()` sends no `state`, so an admin gets a
+  national list while the heading names whatever state the map is over — hence
+  "Gujarat" above Patna, Coimbatore and Berhampur. Pass the active state and
+  title it from the same value; "India" when there is no active state.
+- **Sticky Field-reports footer.** `ActivityFeed`'s root has no `shrink-0`, so
+  the flex column crushes it and its content overlaps the bed panel's
+  "Reported by phone call" button. Confirm in the browser before fixing.
 
 ## Stage 4 — Gemini district briefings (~5h)
 
-New text path in `vision.py` — the only file allowed to reach Gemini (spec
-§1.3). One call returns `{"en": …, "hi": …}`, halving the calls to ~157 for a
-full precompute; ~6 for the demo districts. New `district_briefings` table plus
-migration, keyed by district and a hash of the inputs, so a cached briefing
-expires exactly when the numbers behind it change. Deterministic non-LLM
-fallback when Gemini fails, per the §1.4 both-paths-tested rule. Precompute the
-demo districts so the tour never waits on a model.
+One call returns `{"en": …, "hi": …}`, cached in a `district_briefings` table
+keyed by district and a hash of the inputs, lazily generated, precomputed for
+the demo districts, with a deterministic fallback. Text call lives in
+`vision.py`, the only file allowed to reach Gemini.
 
 ## Stage 5 — activity feed and "last updated" (~3h)
 
-Read-only over the existing `events` table, which already self-prunes
-(`RETENTION = 2 days`, sweeping every 500 rows). No background writer. Adds a
-couple of event kinds on tour actions. Growth is about 6 KB per judge session,
-so a thousand sessions cost ~6 MB against 333 MB of headroom.
+Read-only over the existing `events` table, which self-prunes (2 days, swept
+every 500 rows). No background writer. ~6 KB per judge session.
