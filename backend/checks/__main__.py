@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
+import traceback
 
 from app.config import settings
 
@@ -28,8 +29,12 @@ async def run_named(names: list[str]) -> list[Report]:
         try:
             report = await CHECKS[name]()
         except Exception as exc:  # a check that breaks is a failure, not a crash
+            # The traceback is printed, not just the message. A check that fails
+            # once and then passes is the hardest kind to explain, and the type
+            # and message alone do not say which line gave way.
             report = Report(name=name, error="{0}: {1}".format(type(exc).__name__, exc))
             print("    ERROR  {0}".format(report.error))
+            traceback.print_exc()
         report.seconds = round(time.monotonic() - started, 1)  # type: ignore[attr-defined]
         reports.append(report)
     return reports

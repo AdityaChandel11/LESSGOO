@@ -9,10 +9,21 @@ import pytest
 from sqlalchemy.dialects.postgresql import asyncpg as sa_asyncpg
 from sqlalchemy.engine import make_url
 
+from app.api import HealthOut
 from app.config import Settings, normalise_database_url, settings
 from app.main import CSP
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# The smallest settings that production will actually accept, so a test about
+# production behaviour is not really a test about the refusal rules.
+PROD_MINIMUM = dict(
+    environment="production",
+    jwt_secret="x" * 48,
+    phone_hash_salt="y" * 40,
+    demo_mode=False,
+    database_url="postgresql+asyncpg://app:s3cret@db.internal/phc",
+)
 
 
 def _firebase_headers() -> dict[str, str]:
@@ -107,3 +118,67 @@ def test_the_corrected_url_produces_arguments_asyncpg_will_actually_accept():
 
 def test_the_committed_default_names_the_async_driver():
     assert Settings.model_fields["database_url"].default.startswith("postgresql+asyncpg://")
+
+
+# --- a deployment that serves the API but no website ---------------------
+#
+# This is the one deployment fault that looks healthy from every other angle:
+# /api/health answers, the host's health check passes, and every page 404s.
+# It cost a live demo once, so it is reported rather than logged.
+
+def test_a_built_site_is_detected_and_diagnosed(tmp_path):
+    site = tmp_path / "static"
+    absent = Settings(static_dir=site)
+    assert absent.serves_built_site is False
+    assert absent.site_diagnosis == "the static directory does not exist"
+
+    site.mkdir()
+    empty = Settings(static_dir=site)
+    assert empty.serves_built_site is False
+    assert empty.site_diagnosis == "the static directory exists but is empty"
+
+    (site / "assets").mkdir()
+    partial = Settings(static_dir=site)
+    assert partial.serves_built_site is False
+    assert "no index.html" in partial.site_diagnosis
+
+    (site / "index.html").write_text("<!doctype html>", encoding="utf-8")
+    built = Settings(static_dir=site)
+    assert built.serves_built_site is True
+    assert built.site_diagnosis is None
+
+
+def test_health_reports_whether_the_website_is_being_served():
+    fields = HealthOut.model_fields
+    assert "site_served" in fields and fields["site_served"].annotation is bool
+    assert "site_detail" in fields
+
+
+def test_health_does_not_hand_a_filesystem_path_to_the_public_in_production():
+    # /api/health needs no credentials, so the resolved path is development-only.
+    prod = Settings(**PROD_MINIMUM, static_dir="/app/static")
+    assert prod.is_production
+    payload = HealthOut(
+        status="ok",
+        app="x",
+        version="0",
+        environment=prod.environment,
+        demo_mode=prod.demo_mode,
+        database=True,
+        modes={},
+        external_services_in_use=False,
+        site_served=prod.serves_built_site,
+        site_detail=prod.site_diagnosis,
+        site_root=None if prod.is_production else str(prod.site_root),
+    )
+    assert payload.site_root is None
+
+
+def test_the_dockerfile_refuses_to_build_without_the_website():
+    # The guard is what turns a silent 404 into a failed build.
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "COPY --from=web /web/dist ./static" in dockerfile
+    guard = next(
+        (line for line in dockerfile.splitlines() if line.startswith("RUN test -f")), ""
+    )
+    assert "/app/static/index.html" in guard and "exit 1" in guard

@@ -129,6 +129,16 @@ class HealthOut(BaseModel):
     database: bool
     modes: dict[str, str]
     external_services_in_use: bool
+    # Whether the built website is being served from this same origin. A
+    # deployment answering the API while serving no site looks healthy from
+    # every other angle, so it is reported here rather than left to a log.
+    site_served: bool
+    # Why not, when not — a phrase, never the path, because this endpoint is
+    # public. Distinguishes a wrong path from an empty copy from a bad build.
+    site_detail: str | None = None
+    # Only outside production: a filesystem path is a detail a public endpoint
+    # has no reason to hand out, but it is the first thing you want locally.
+    site_root: str | None = None
 
 
 class SkuStockOut(BaseModel):
@@ -260,6 +270,9 @@ async def health() -> HealthOut:
             "comms": settings.comms_mode,
         },
         external_services_in_use=settings.uses_external_services,
+        site_served=settings.serves_built_site,
+        site_detail=settings.site_diagnosis,
+        site_root=None if settings.is_production else str(settings.site_root),
     )
 
 

@@ -35,6 +35,11 @@ COPY backend/alembic.ini ./
 COPY backend/scripts ./scripts
 COPY --from=web /web/dist ./static
 
+# A missing website is the one deployment fault this image could otherwise hide:
+# the API would answer, the health check would pass, and every page would 404.
+# Fail the build instead, where somebody is watching the output.
+RUN test -f /app/static/index.html || { echo "BUILD FAILED: the frontend did not reach /app/static/index.html. The web stage built, but its dist/ did not land in the runtime layer. If a cached layer is to blame, redeploy with the build cache cleared."; ls -la /app/static; exit 1; }
+
 RUN useradd --system --uid 10001 --home /app app && chown -R app:app /app
 USER app
 

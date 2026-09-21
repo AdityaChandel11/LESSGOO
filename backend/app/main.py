@@ -202,9 +202,9 @@ app.include_router(router, prefix="/api")
 
 # ============================================================ website ===
 
-static_dir: Path = settings.static_dir.resolve()
+static_dir: Path = settings.site_root
 
-if (static_dir / "index.html").is_file():
+if settings.serves_built_site:
     if (static_dir / "assets").is_dir():
         app.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="assets")
 
@@ -221,5 +221,14 @@ if (static_dir / "index.html").is_file():
         # Every other path is a page of the single-page app; the browser-side
         # router decides what to show, so deep links survive a refresh.
         return FileResponse(static_dir / "index.html", headers={"Cache-Control": "no-cache"})
+elif settings.is_production:
+    # In production this is not a mode, it is a broken image: the frontend
+    # stage did not land in the runtime layer. The API will answer and every
+    # page will 404, so say so at a level that shows up in a host's log filter.
+    log.error(
+        "No built site at %s. The API is answering but the website is not being "
+        "served — this container was built without the frontend.",
+        static_dir,
+    )
 else:
     log.info("No built site at %s; the API only is served (development)", static_dir)

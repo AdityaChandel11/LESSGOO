@@ -222,6 +222,41 @@ class Settings(BaseSettings):
         return self.phone_hash_salt or DEV_PHONE_SALT
 
     @property
+    def site_root(self) -> Path:
+        """Where the built website is expected to be."""
+        return self.static_dir.resolve()
+
+    @property
+    def serves_built_site(self) -> bool:
+        """Whether a built website is actually present to serve.
+
+        In development its absence is normal — Vite serves the site and this
+        process serves only the API. In a container it means the image was
+        built without the frontend, and every page request will 404 while the
+        API keeps answering, which is exactly the shape of failure that hides
+        itself. `/api/health` reports this so it cannot hide.
+        """
+        return (self.site_root / "index.html").is_file()
+
+    @property
+    def site_diagnosis(self) -> str | None:
+        """Why the website is not being served, when it is not.
+
+        None when it is. Otherwise a short phrase that distinguishes the three
+        different faults — wrong path, empty copy, missing entry file — without
+        printing the path itself, because this is reported on a public endpoint.
+        """
+        if self.serves_built_site:
+            return None
+        root = self.site_root
+        if not root.is_dir():
+            return "the static directory does not exist"
+        entries = sum(1 for _ in root.iterdir())
+        if entries == 0:
+            return "the static directory exists but is empty"
+        return "the static directory holds {0} entries but no index.html".format(entries)
+
+    @property
     def is_production(self) -> bool:
         return self.environment == "production"
 
