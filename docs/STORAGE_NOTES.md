@@ -84,3 +84,48 @@ same reason.
 Never `DELETE` and hope: it does not shrink a Postgres file. Never reload the
 deployed database from the local one: local predates `1ddbedd` at 34 regions
 and 3,496 facilities, against Render's correct 36 and 3,510.
+
+## What a judge's pass through the pharmacist workspace costs
+
+Measured locally on 2026-09-22, on `feature/judge-journey`, with
+`python -m scripts.storage_receipt --runs 25`. One "loop" is the whole chain a
+judge walks: raise a request, approve it, dispatch the batch, confirm receipt.
+
+| Table | rows/loop | bytes/loop |
+|---|---|---|
+| `transfers` | 1.0 | 328 |
+| `approvals` | 1.0 | 0 |
+| `medicine_movements` | 1.0 | 328 |
+| `stock_readings` | 2.0 | 0 |
+| `events` | 5.0 | 1,638 |
+| `facility_sku_state` | 0.0 | 983 |
+| **one full loop** | **10.0** | **≈3,277** |
+
+**At the 100-request global cap that is about 0.31 MB** — the whole ceiling on
+judge-driven growth, against roughly 190 MB of headroom at 81%.
+
+Reading the table:
+
+- **Rows are exact, bytes are not.** Postgres writes into pages it already
+  holds, so a table showing 0 bytes had room; the per-loop figures are 25 loops
+  divided by 25, which is what makes them usable at all. Dividing a table's
+  total size by its row count does *not* work: on a fresh database `approvals`
+  holds one row in a 48 KB relation, which reports one approval as costing
+  48 KB.
+- **`facility_sku_state` adds no rows** — it is updated in place, never
+  appended to. The bytes against it are dead tuples from those in-place
+  updates, which autovacuum reclaims.
+- **`events` self-prunes after 2 days** (`app/events.py`), so half the
+  per-loop cost is not permanent.
+- **The caps are the guard, not the row size.** Three open requests per
+  facility and 100 across the platform (`max_open_requests_per_facility`,
+  `max_open_facility_requests_global`). Without them a judge clicking "Request
+  stock" is an unbounded writer, which is the one thing this document exists to
+  prevent.
+
+Both cleanup paths delete on *two* keys, and must keep doing so: approval
+writes the donor's debit reading keyed by `transfer_id`, while confirming the
+receipt writes the recipient's credit keyed by `batch_id` with no transfer id
+on it. Deleting on `transfer_id` alone removes half the movement and leaves the
+recipient holding units that came from nowhere. `checks/workspace.py` asserts
+both shelves return to their starting quantity, which is what catches it.
