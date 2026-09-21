@@ -146,6 +146,21 @@ class Settings(BaseSettings):
     # "no longer available to new users", naming 3.6-flash as the replacement.
     # Verified against a real key on 2026-09-20.
     gemini_model: str = "gemini-3.6-flash"
+    # A *different* model from the vision one, on purpose. The free tier limits
+    # GenerateRequestsPerDayPerProjectPerModel to 20 — per model — so putting
+    # the briefing on its own id means a day of ward photos cannot exhaust the
+    # briefings, or the reverse. Confirmed reachable and returning strict
+    # {en, hi} JSON on 2026-09-22; a lite model is right for one sentence.
+    # Not an alias like `gemini-flash-lite-latest`: a model that silently
+    # changes under a demo is a model that can silently break one.
+    gemini_text_model: str = "gemini-3.5-flash-lite"
+    # How long a generated briefing stays good. It also expires early whenever
+    # the stock position it describes changes — see workspace.briefing_hash.
+    briefing_ttl_hours: float = 24.0
+    # The whole table's ceiling. Two rows per facility is already bounded by
+    # the composite primary key, but 3,510 facilities x 2 languages is 4 MB,
+    # and this table is a cache: the oldest rows are evicted rather than kept.
+    max_briefing_rows: int = 500
     # Server key: Routes API only, restricted to this service. Never sent to a browser.
     google_maps_server_key: str = ""
     # Browser key: Map Tiles API only, restricted to the site's domains. It is

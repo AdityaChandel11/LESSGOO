@@ -28,15 +28,17 @@ this module produces carries `straight_line_x1.3` and the UI says so.
 
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
+from .models import FacilityBriefing
 from .redistribution import EARTH_RADIUS_KM, PlanRules, StockNode, split_roles
 
 # The one string this module uses to mark a transfer as a pharmacist's own
@@ -441,6 +443,130 @@ def delivery_estimate(*, km: float, raised_at: datetime) -> DeliveryEstimate:
     )
 
 
+# =========================================================== briefing ===
+# "What should I do today?", answered from this centre's own position.
+#
+# The deterministic answer below is the default on every screen and needs no
+# credential. It is written and tested before the model path exists, so the
+# fallback is never the untested branch — when Gemini is unavailable, out of
+# quota, or switched off, this is what renders, with no AI label on it.
+#
+# Nothing here invents a figure. Every number in the output came in through
+# `BriefingRow`, and a medicine with no cover figure is described without one
+# rather than given a fabricated day count.
+
+
+@dataclass(frozen=True)
+class BriefingRow:
+    """One medicine, reduced to what a briefing may talk about."""
+
+    sku_name: str
+    unit: str
+    qty: float
+    days_of_stock: float | None
+    status: str
+
+
+def _worst(rows: list[BriefingRow]) -> BriefingRow | None:
+    """The medicine that runs out first. Rows with no cover figure cannot be
+    ranked and are never chosen as the headline."""
+    measured = [r for r in rows if r.days_of_stock is not None]
+    if not measured:
+        return None
+    return min(measured, key=lambda r: r.days_of_stock)
+
+
+def _days(value: float) -> str:
+    """One decimal place, matching what the medicine cards already show."""
+    return "{0:.1f}".format(value)
+
+
+def rules_briefing(rows: list[BriefingRow]) -> dict[str, str]:
+    """One line of guidance in English and Hindi, computed, not generated.
+
+    Deliberately blunt about ordering rather than clinical: this is a stock
+    screen, and a sentence about medicine that strayed into treatment would be
+    both wrong and outside what this system is allowed to say.
+    """
+    if not rows:
+        return {
+            "en": "No stock has been reported for this centre yet, so there is "
+                  "nothing to act on. Report today's counts to start.",
+            "hi": "इस केंद्र के लिए अभी तक कोई स्टॉक दर्ज नहीं हुआ है। आज की "
+                  "गिनती दर्ज करें।",
+        }
+
+    worst = _worst(rows)
+    if worst is None:
+        return {
+            "en": "None of this centre's medicines has enough reporting history "
+                  "to estimate cover. Report today's counts to start.",
+            "hi": "इस केंद्र की किसी दवा का पर्याप्त रिकॉर्ड नहीं है, इसलिए "
+                  "अनुमान नहीं लगाया जा सकता। आज की गिनती दर्ज करें।",
+        }
+
+    days = _days(worst.days_of_stock)
+    critical = [r for r in rows if r.status == "critical"]
+    at_risk = [r for r in rows if r.status == "at_risk"]
+
+    if critical:
+        others = len(critical) - 1
+        tail_en = (
+            " {0} other medicine{1} also needs ordering.".format(
+                others, "" if others == 1 else "s"
+            )
+            if others > 0
+            else ""
+        )
+        tail_hi = (
+            " {0} और दवाओं का ऑर्डर भी ज़रूरी है।".format(others) if others > 0 else ""
+        )
+        return {
+            "en": "Order {0} today — about {1} days of cover left.{2}".format(
+                worst.sku_name, days, tail_en
+            ),
+            "hi": "{0} का ऑर्डर आज ही दें — लगभग {1} दिन का स्टॉक बचा है।{2}".format(
+                worst.sku_name, days, tail_hi
+            ),
+        }
+
+    if at_risk:
+        return {
+            "en": "Raise a request for {0} this week — about {1} days of cover "
+                  "left.".format(worst.sku_name, days),
+            "hi": "{0} के लिए इस सप्ताह अनुरोध करें — लगभग {1} दिन का स्टॉक "
+                  "बचा है।".format(worst.sku_name, days),
+        }
+
+    return {
+        "en": "Nothing needs ordering today. {0} is the tightest at about {1} "
+              "days of cover.".format(worst.sku_name, days),
+        "hi": "आज कुछ भी ऑर्डर करने की ज़रूरत नहीं। सबसे कम {0} है, लगभग {1} "
+              "दिन का स्टॉक।".format(worst.sku_name, days),
+    }
+
+
+def briefing_hash(rows: list[BriefingRow]) -> str:
+    """A fingerprint of the position a briefing describes.
+
+    The cache is keyed on this as well as on the day, so advice expires when
+    the thing it describes changes rather than only when the clock says so.
+
+    Sorted by name, and cover rounded to a tenth of a day: a burn rate that
+    drifts in the sixth decimal is not a new situation, and treating it as one
+    would spend a model call every time somebody opened the tab.
+    """
+    parts = sorted(
+        "{0}|{1}|{2}".format(
+            r.sku_name,
+            "none" if r.days_of_stock is None else "{0:.1f}".format(r.days_of_stock),
+            r.status,
+        )
+        for r in rows
+    )
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
 # ====================================================== bounded reads ===
 # Everything below touches the database. Each query is bounded by one facility
 # or by one (state, sku) pair; none of them may grow into a national scan.
@@ -495,3 +621,104 @@ async def open_request_counts(session: AsyncSession, facility_id: str) -> tuple[
         )
     ).first()
     return (int(row[0]), int(row[1])) if row else (0, 0)
+
+
+def briefing_rows_from_skus(skus: list[BriefingRow]) -> list[str]:
+    """The stock position as lines a model may read.
+
+    Built here so the prompt can only ever contain figures that are already on
+    the pharmacist's screen. Worst first, and capped: a model given twelve
+    medicines writes about the wrong one, and the tail of a healthy list adds
+    tokens without adding advice.
+    """
+    ranked = sorted(
+        skus,
+        key=lambda r: (
+            STATUS_ORDER_FOR_BRIEFING.get(r.status, 9),
+            r.days_of_stock if r.days_of_stock is not None else 1e9,
+        ),
+    )
+    lines = []
+    for r in ranked[:BRIEFING_MAX_ROWS]:
+        cover = (
+            "no cover estimate yet"
+            if r.days_of_stock is None
+            else "{0} days of cover".format(_days(r.days_of_stock))
+        )
+        lines.append(
+            "- {0}: {1:,.0f} {2}, {3}, {4}".format(
+                r.sku_name, r.qty, r.unit, cover, r.status.replace("_", " ")
+            )
+        )
+    return lines
+
+
+STATUS_ORDER_FOR_BRIEFING = {"critical": 0, "at_risk": 1, "healthy": 2}
+BRIEFING_MAX_ROWS = 6
+
+
+async def cached_briefing(
+    session: AsyncSession, facility_id: str, lang: str, inputs_hash: str
+) -> FacilityBriefing | None:
+    """A stored line, if it is still good.
+
+    Two conditions, and both matter. The clock one stops a day-old line being
+    shown forever; the hash one stops a line surviving the delivery that made
+    it wrong. Without the second, "order ORS today" would still be on screen
+    after the ORS arrived.
+    """
+    row = await session.get(FacilityBriefing, (facility_id, lang))
+    if row is None or row.inputs_hash != inputs_hash:
+        return None
+    age = datetime.now(timezone.utc) - row.generated_at
+    if age > timedelta(hours=settings.briefing_ttl_hours):
+        return None
+    return row
+
+
+async def store_briefing(
+    session: AsyncSession,
+    facility_id: str,
+    texts: dict[str, str],
+    *,
+    inputs_hash: str,
+    model: str,
+) -> None:
+    """Write both languages and hold the table to its ceiling.
+
+    One model call produces both languages, so they are written together and
+    expire together — a screen that showed a fresh English line beside a stale
+    Hindi one would be worse than showing neither.
+
+    The composite primary key already caps a facility at two rows; this evicts
+    across facilities once `max_briefing_rows` is reached, oldest first,
+    because this is a cache and the oldest line is the one nobody is reading.
+    """
+    now = datetime.now(timezone.utc)
+    for lang, body in texts.items():
+        await session.merge(
+            FacilityBriefing(
+                facility_id=facility_id,
+                lang=lang,
+                body=body,
+                inputs_hash=inputs_hash,
+                model=model,
+                generated_at=now,
+            )
+        )
+    await session.flush()
+
+    total = await session.scalar(select(func.count()).select_from(FacilityBriefing))
+    excess = int(total or 0) - settings.max_briefing_rows
+    if excess > 0:
+        doomed = (
+            select(FacilityBriefing.facility_id, FacilityBriefing.lang)
+            .order_by(FacilityBriefing.generated_at)
+            .limit(excess)
+        )
+        keys = [(r[0], r[1]) for r in (await session.execute(doomed)).all()]
+        for facility, lang in keys:
+            row = await session.get(FacilityBriefing, (facility, lang))
+            if row is not None:
+                await session.delete(row)
+        await session.flush()

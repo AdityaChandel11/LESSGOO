@@ -263,3 +263,160 @@ async def read_ward_photo(
     if not image:
         raise VisionError("A photograph is required")
     return await _call_gemini(image, mime_type, client=client)
+
+
+# =============================================================== briefing ===
+# The second thing this file does, and the only other place a key is read.
+#
+# It runs on a *different* model from the ward photos on purpose. The free tier
+# caps GenerateRequestsPerDayPerProjectPerModel at 20 — per model — so a day of
+# bed photos cannot exhaust the briefings, or the reverse. `gemini_text_model`
+# is a lite model because the job is one sentence in two languages.
+#
+# What this never does is invent a figure. Every number the model may use is
+# handed to it in the prompt, and the prompt says so; the deterministic line in
+# `workspace.rules_briefing` is what renders when this is unavailable, out of
+# quota, or switched off, and it renders without an AI label.
+
+BRIEFING_PROMPT = (
+    "You write one short line of guidance for a pharmacist at a rural Indian "
+    "primary health centre, from their own stock position.\n"
+    "Rules:\n"
+    "- Use ONLY the figures given below. Never invent a number, a date or a "
+    "medicine name.\n"
+    "- One sentence in English, one in Hindi. Plain words a busy person can "
+    "act on.\n"
+    "- Say what to do first, not what the data says.\n"
+    "- No clinical, dosing or treatment advice. This is about stock.\n"
+    "Centre: {facility}\n"
+    "Stock position today:\n"
+    "{rows}\n"
+)
+
+BRIEFING_SCHEMA = {
+    "type": "object",
+    "properties": {"en": {"type": "string"}, "hi": {"type": "string"}},
+    "required": ["en", "hi"],
+}
+
+# One sentence each. Generous enough for Devanagari, which costs more tokens
+# per character than Latin script.
+BRIEFING_MAX_TOKENS = 400
+
+
+@dataclass(frozen=True)
+class Briefing:
+    en: str
+    hi: str
+    model: str
+
+
+def parse_briefing(payload: dict, *, model: str) -> Briefing:
+    """Validate what came back before any of it reaches a screen."""
+    en = (payload.get("en") or "").strip()
+    hi = (payload.get("hi") or "").strip()
+    if not en or not hi:
+        raise VisionError("The model did not return both languages")
+    return Briefing(en=en, hi=hi, model=model)
+
+
+def briefing_available() -> bool:
+    """Whether the live briefing path can run at all.
+
+    Exists so that callers can ask without reading the credential themselves.
+    `gemini_api_key` belongs to this module and nowhere else (pinned by
+    tests/test_api_boundary.py), and an endpoint that checked the key inline
+    would quietly make api.py a second owner of it.
+    """
+    return settings.llm_mode == "live" and bool(settings.gemini_api_key)
+
+
+async def write_briefing(
+    *,
+    facility_name: str,
+    rows: list[str],
+    client: httpx.AsyncClient | None = None,
+) -> Briefing:
+    """One line of guidance, in English and Hindi, from a live model.
+
+    `rows` are pre-formatted lines built by the caller from figures already on
+    screen — this function never reads the database, so there is no path by
+    which it can describe something the pharmacist is not also looking at.
+
+    Raises VisionError for every failure, including a spent quota. The caller
+    is expected to fall back to the deterministic line rather than retry.
+    """
+    if settings.llm_mode != "live" or not settings.gemini_api_key:
+        raise VisionError("The briefing model is not configured")
+    if not rows:
+        raise VisionError("There is no stock position to describe")
+
+    model = settings.gemini_text_model
+    body = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": BRIEFING_PROMPT.format(
+                            facility=facility_name, rows="\n".join(rows)
+                        )
+                    }
+                ]
+            }
+        ],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": BRIEFING_SCHEMA,
+            # Low, not zero: one sentence of advice reads better with a little
+            # freedom than a temperature-zero template, and the figures it may
+            # use are fixed by the prompt either way.
+            "temperature": 0.2,
+            "maxOutputTokens": BRIEFING_MAX_TOKENS,
+        },
+    }
+
+    own = client is None
+    http = client or httpx.AsyncClient(timeout=REQUEST_TIMEOUT_S)
+    try:
+        for attempt in range(len(RETRY_BACKOFF_S) + 1):
+            try:
+                response = await http.post(
+                    f"{API_ROOT}/{model}:generateContent",
+                    headers={"x-goog-api-key": settings.gemini_api_key},
+                    json=body,
+                )
+                response.raise_for_status()
+                data = response.json()
+                break
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status in RETRY_STATUSES and attempt < len(RETRY_BACKOFF_S):
+                    log.warning(
+                        "Briefing model answered HTTP %s; retrying in %.1fs",
+                        status, RETRY_BACKOFF_S[attempt],
+                    )
+                    await asyncio.sleep(RETRY_BACKOFF_S[attempt])
+                    continue
+                log.error(
+                    "Briefing model refused the request (HTTP %s)%s",
+                    status, _quota_note(exc.response),
+                )
+                # Deliberately not distinguished for the caller: every one of
+                # these ends in the same place, which is the deterministic line.
+                raise VisionError(
+                    "today's quota is used up"
+                    if status == 429
+                    else f"the briefing model refused the request (HTTP {status})"
+                ) from exc
+            except httpx.HTTPError as exc:
+                log.warning("Briefing call failed: %s", type(exc).__name__)
+                raise VisionError("the briefing model could not be reached") from exc
+    finally:
+        if own:
+            await http.aclose()
+
+    try:
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise VisionError("the model returned no readable answer") from exc
+    return parse_briefing(_first_json_object(text), model=model)

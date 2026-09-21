@@ -691,6 +691,9 @@ class WorkspaceOut(BaseModel):
     skus: list[WorkspaceSkuOut]
     open_requests: int
     max_open_requests: int
+    # Both languages of the computed line, always present and needing no key.
+    # The screen renders this on load; the model is an overlay on top of it.
+    briefing: dict[str, str]
 
 
 async def _facility_in_scope(
@@ -763,6 +766,114 @@ async def facility_workspace(
         skus=rows,
         open_requests=open_here,
         max_open_requests=settings.max_open_requests_per_facility,
+        briefing=workspace.rules_briefing(_briefing_rows(snap.skus, units)),
+    )
+
+
+class BriefingOut(BaseModel):
+    """One line of "what to do today".
+
+    `ai` is the only thing the screen may use to decide whether to put a model's
+    name on it. When the model is unavailable, out of quota or switched off,
+    this comes back with the deterministic line, `source="rules"` and
+    `ai=False` — the app never presents computed text as a model's work.
+    """
+
+    body: str
+    lang: str
+    source: str            # "rules" | "gemini"
+    ai: bool
+    model: str | None
+    generated_at: datetime | None
+    cached: bool
+    # Why the live path did not run, when it did not. Shown quietly, because a
+    # pharmacist is entitled to know the difference between "nothing to add"
+    # and "the model is out of quota".
+    note: str | None = None
+
+
+def _briefing_rows(skus: list[services.SkuStock], units: dict[str, str]) -> list[workspace.BriefingRow]:
+    return [
+        workspace.BriefingRow(
+            sku_name=s.sku_name,
+            unit=units.get(s.sku_code, "unit"),
+            qty=s.qty_on_hand,
+            days_of_stock=s.days_of_stock,
+            status=s.status,
+        )
+        for s in skus
+    ]
+
+
+@router.post(
+    "/facilities/{facility_id}/briefing",
+    response_model=BriefingOut,
+    tags=["workspace"],
+)
+async def facility_briefing(
+    facility_id: str,
+    lang: str = Query(default="en", pattern="^(en|hi)$"),
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> BriefingOut:
+    """Ask the model for today's line. POST, and only ever from a click.
+
+    Never called on page load: the free tier allows 20 generate requests a day
+    per model, and a screen that spent one on every render would be out of
+    quota before the first demo finished. The deterministic line already
+    travels with the workspace payload, so this endpoint is an overlay on
+    something that is already on screen, not the thing that fills it.
+    """
+    facility = await _facility_in_scope(session, facility_id, user)
+    snaps = await services.get_snapshots(session, facility_ids=[facility.id])
+    if not snaps:
+        raise HTTPException(status_code=404, detail="Facility not found")
+
+    units = {
+        row.code: row.unit for row in (await session.execute(select(Sku))).scalars().all()
+    }
+    rows = _briefing_rows(snaps[0].skus, units)
+    fallback = workspace.rules_briefing(rows)
+    inputs_hash = workspace.briefing_hash(rows)
+
+    def rules_answer(note: str | None) -> BriefingOut:
+        return BriefingOut(
+            body=fallback[lang], lang=lang, source="rules", ai=False,
+            model=None, generated_at=None, cached=False, note=note,
+        )
+
+    if not vision.briefing_available():
+        return rules_answer(None)
+
+    cached = await workspace.cached_briefing(session, facility.id, lang, inputs_hash)
+    if cached is not None:
+        return BriefingOut(
+            body=cached.body, lang=lang, source="gemini", ai=True,
+            model=cached.model, generated_at=cached.generated_at, cached=True,
+        )
+
+    try:
+        written = await vision.write_briefing(
+            facility_name=facility.name,
+            rows=workspace.briefing_rows_from_skus(rows),
+        )
+    except vision.VisionError as exc:
+        # One attempt, then the computed line. No retry loop: the caller is a
+        # person clicking a button, and a spent quota does not recover in the
+        # time it takes to try again.
+        return rules_answer("Showing the computed line — {0}.".format(exc))
+
+    await workspace.store_briefing(
+        session, facility.id,
+        {"en": written.en, "hi": written.hi},
+        inputs_hash=inputs_hash, model=written.model,
+    )
+    await session.commit()
+
+    return BriefingOut(
+        body=written.en if lang == "en" else written.hi,
+        lang=lang, source="gemini", ai=True, model=written.model,
+        generated_at=datetime.now(timezone.utc), cached=False,
     )
 
 

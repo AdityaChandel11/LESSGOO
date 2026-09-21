@@ -331,3 +331,108 @@ def test_the_estimate_is_never_presented_as_a_promise():
 def test_a_reference_number_is_stable_and_readable():
     assert workspace.reference(412) == "SS-000412"
     assert workspace.reference(1) == "SS-000001"
+
+# ========================================================== briefing ===
+# The line every pharmacist sees on load. It is deterministic, it needs no
+# key, and it is what the screen falls back to when the model is unavailable
+# or out of quota — so it is written and tested before the model exists.
+
+
+def brief(**kw):
+    return workspace.BriefingRow(
+        sku_name=kw.get("sku_name", "Oral Rehydration Salts"),
+        unit=kw.get("unit", "sachet"),
+        qty=kw.get("qty", 120.0),
+        days_of_stock=kw.get("days_of_stock", 2.1),
+        status=kw.get("status", "critical"),
+    )
+
+
+def test_a_critical_medicine_is_named_with_its_own_figure():
+    out = workspace.rules_briefing([brief()])
+    assert "Oral Rehydration Salts" in out["en"]
+    assert "2.1" in out["en"]
+    assert out["hi"]
+
+
+def test_the_worst_medicine_leads_not_the_first_one():
+    out = workspace.rules_briefing([
+        brief(sku_name="Paracetamol 500mg", days_of_stock=6.0, status="at_risk"),
+        brief(sku_name="Oral Rehydration Salts", days_of_stock=1.2, status="critical"),
+    ])
+    assert "Oral Rehydration Salts" in out["en"]
+    assert "Paracetamol" not in out["en"]
+
+
+def test_at_risk_is_advised_less_urgently_than_critical():
+    urgent = workspace.rules_briefing([brief(days_of_stock=1.0, status="critical")])
+    soon = workspace.rules_briefing([brief(days_of_stock=6.0, status="at_risk")])
+    assert urgent["en"] != soon["en"]
+    assert "today" in urgent["en"].lower()
+
+
+def test_a_healthy_centre_is_told_there_is_nothing_to_order():
+    out = workspace.rules_briefing([brief(days_of_stock=31.0, status="healthy")])
+    assert "nothing" in out["en"].lower() or "no medicine" in out["en"].lower()
+    assert out["hi"]
+
+
+def test_no_data_reads_differently_from_a_healthy_centre():
+    """The dangerous confusion is "nothing to order" versus "nothing reported".
+    A centre that has told us nothing must not read like a centre that is fine."""
+    silent = workspace.rules_briefing([])
+    healthy = workspace.rules_briefing([brief(days_of_stock=31.0, status="healthy")])
+    assert silent["en"] != healthy["en"]
+    assert silent["hi"] != healthy["hi"]
+    assert "report" in silent["en"].lower()
+
+
+@pytest.mark.parametrize("status", ["healthy", "at_risk", "critical"])
+def test_a_medicine_with_no_cover_figure_is_never_given_one(status):
+    """No Python value may leak into a numeric slot. The words are allowed to
+    say "none"; the output is not allowed to print a None where a day count
+    belongs, in either language."""
+    out = workspace.rules_briefing([brief(days_of_stock=None, status=status)])
+    for text in out.values():
+        assert "None days" not in text
+        assert "None " not in text.replace("None of", "")
+        assert "nan" not in text.lower()
+        assert "inf" not in text.lower()
+
+
+def test_both_languages_are_always_present_and_different():
+    for rows in ([], [brief()], [brief(days_of_stock=40.0, status="healthy")]):
+        out = workspace.rules_briefing(rows)
+        assert set(out) == {"en", "hi"}
+        assert out["en"] and out["hi"]
+        assert out["en"] != out["hi"]
+
+
+# ---- the cache key -------------------------------------------------------
+# A briefing is cached for a day. It must expire when the position it
+# describes changes, or a pharmacist acts on yesterday's advice.
+
+
+def test_the_same_position_hashes_the_same():
+    rows = [brief(), brief(sku_name="Amoxicillin 250mg", days_of_stock=6.0)]
+    assert workspace.briefing_hash(rows) == workspace.briefing_hash(list(rows))
+
+
+def test_a_changed_days_figure_changes_the_hash():
+    before = workspace.briefing_hash([brief(days_of_stock=6.0)])
+    after = workspace.briefing_hash([brief(days_of_stock=2.0)])
+    assert before != after
+
+
+def test_reordering_the_same_medicines_does_not_change_the_hash():
+    a = brief(sku_name="A", days_of_stock=3.0)
+    b = brief(sku_name="B", days_of_stock=9.0)
+    assert workspace.briefing_hash([a, b]) == workspace.briefing_hash([b, a])
+
+
+def test_a_trivial_movement_does_not_invalidate_the_cache():
+    """Rounded to a tenth of a day on purpose: a burn rate that drifts in the
+    sixth decimal must not spend a model call every time someone opens the tab."""
+    a = workspace.briefing_hash([brief(days_of_stock=6.00001)])
+    b = workspace.briefing_hash([brief(days_of_stock=6.00002)])
+    assert a == b
