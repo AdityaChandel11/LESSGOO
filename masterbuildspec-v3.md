@@ -1086,7 +1086,7 @@ Replaces Section 18. Every phase ends in something demonstrable.
 | | Status |
 |---|---|
 | Scaffold, Postgres schema, async Alembic migrations | done |
-| National synthetic seed — 3,496 facilities, 34 states, 35 days (400 for the focus state) | done |
+| National synthetic seed — 3,510 facilities across all 28 states and 8 union territories, 35 days (400 for the focus states) | done |
 | Status engine, days-of-stock, reorder floor (12.1) | done |
 | Zoomable national map: state to district to facility tiers, viewport-fetched dots | done |
 | Command dashboard, facility drawer, activity feed | done |

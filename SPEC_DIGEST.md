@@ -87,7 +87,7 @@ v3: Google Maps JS API primary, Leaflet/OSM demoted to `MAPS\_MODE=osm` fallback
 
 *Verified against the working tree on 2026-09-20 at commit `542d8dc`. B3 and all of Phases C and D were built on 2026-09-16, then deliberately removed by resetting `main` to `542d8dc` to restart that work differently; the removed code survives only in the local branch `backup-before-phase-c-removal`, and the database was rolled back to migration `3de61cc073d9` to match. This section, not memory, is the status of record.*
 
-**Done (core):** scaffold, schema, migrations, national synthetic seed (3,496 facilities/34 states), reorder floor, zoomable map, dashboard, redistribution solver (both fallbacks + rationale), approve/reject with row locking, real auth (4 roles), live updates, Routes caching with honest fallback, production security posture. `\[v3, §28 "Already built"]`
+**Done (core):** scaffold, schema, migrations, national synthetic seed (3,510 facilities across all 28 states and 8 union territories), reorder floor, zoomable map, dashboard, redistribution solver (both fallbacks + rationale), approve/reject with row locking, real auth (4 roles), live updates, Routes caching with honest fallback, production security posture. `\[v3, §28 "Already built"]`
 
 **Phase A — Capture \& trust: done.** Ledger, movement tab, bed capture (code + Gemini Vision), attendance geofence, trust score + audit queue, trust wired into early-warning. `\[v3, §28 Phase A]`
 

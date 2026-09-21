@@ -135,7 +135,8 @@ INDIA_STATES: list[StateGeo] = [
     StateGeo("JK", "Jammu & Kashmir", 33.78, 76.58, 91, [
         ("Srinagar", 34.0837, 74.7973), ("Jammu", 32.7266, 74.8570),
         ("Anantnag", 33.7311, 75.1487), ("Baramulla", 34.2090, 74.3428),
-    ], monsoon_months=(7, 8), monsoon_boost=0.25, seasonal_phase=5.0, zoom=8),
+    ], monsoon_months=(7, 8), monsoon_boost=0.25, seasonal_phase=5.0, zoom=8,
+       tags=("ut",)),
 
     StateGeo("HP", "Himachal Pradesh", 31.10, 77.17, 76, [
         ("Shimla", 31.1048, 77.1734), ("Kangra", 32.0998, 76.2691),
@@ -167,7 +168,7 @@ INDIA_STATES: list[StateGeo] = [
     StateGeo("DL", "Delhi", 28.65, 77.15, 25, [
         ("North Delhi", 28.7041, 77.1025), ("South Delhi", 28.5355, 77.2100),
         ("West Delhi", 28.6663, 77.0724),
-    ], monsoon_boost=0.35, seasonal_phase=0.8, spread=0.08, zoom=10),
+    ], monsoon_boost=0.35, seasonal_phase=0.8, spread=0.08, zoom=10, tags=("ut",)),
 
     StateGeo("TR", "Tripura", 23.94, 91.99, 20, [
         ("Agartala", 23.8315, 91.2868), ("Udaipur (TR)", 23.5333, 91.4833),
@@ -215,23 +216,46 @@ INDIA_STATES: list[StateGeo] = [
     StateGeo("LA", "Ladakh", 34.20, 77.60, 5, [
         ("Leh", 34.1526, 77.5771), ("Kargil", 34.5539, 76.1349),
     ], monsoon_months=(), monsoon_boost=0.05, seasonal_phase=5.2,
-       spread=0.5, zoom=8),
+       spread=0.5, zoom=8, tags=("ut",)),
 
     StateGeo("PY", "Puducherry", 11.94, 79.81, 5, [
         ("Puducherry", 11.9416, 79.8083),
     ], monsoon_months=(10, 11, 12), monsoon_boost=0.5, seasonal_phase=3.2,
-       spread=0.08, zoom=11),
+       spread=0.08, zoom=11, tags=("ut",)),
 
     StateGeo("AN", "Andaman & Nicobar", 11.67, 92.74, 5, [
         ("Port Blair", 11.6234, 92.7265),
     ], monsoon_months=(5, 6, 7, 8, 9), monsoon_boost=0.85, seasonal_phase=1.8,
-       spread=0.2, zoom=9),
+       spread=0.2, zoom=9, tags=("ut",)),
 
     StateGeo("CH", "Chandigarh", 30.73, 76.78, 3, [
         ("Chandigarh", 30.7333, 76.7794),
-    ], monsoon_boost=0.30, seasonal_phase=0.7, spread=0.05, zoom=11),
+    ], monsoon_boost=0.30, seasonal_phase=0.7, spread=0.05, zoom=11, tags=("ut",)),
+
+    # An archipelago: the jitter is kept tiny on purpose, because a facility
+    # scattered a few kilometres off an anchor here lands in the sea.
+    StateGeo("LD", "Lakshadweep", 10.57, 72.64, 4, [
+        ("Kavaratti", 10.5669, 72.6420), ("Andrott", 10.8167, 73.6833),
+    ], monsoon_months=(5, 6, 7, 8, 9), monsoon_boost=0.80, seasonal_phase=1.8,
+       spread=0.03, zoom=9, tags=("ut",)),
+
+    # One union territory since the 2020 merger, but still three separate
+    # pockets of coast, which is why all three are anchors.
+    StateGeo("DH", "Dadra & Nagar Haveli and Daman & Diu", 20.40, 72.83, 10, [
+        ("Silvassa", 20.2700, 73.0100), ("Daman", 20.3974, 72.8328),
+        ("Diu", 20.7144, 70.9874),
+    ], monsoon_boost=0.60, seasonal_phase=0.7, spread=0.08, zoom=9, tags=("ut",)),
 ]
 
 STATE_BY_CODE: dict[str, StateGeo] = {s.code: s for s in INDIA_STATES}
 
 TOTAL_SEEDED_FACILITIES = sum(s.facilities for s in INDIA_STATES)
+
+# India is 28 states and 8 union territories. The list above holds both, which
+# is why it is not named after either; these two make the split checkable.
+UNION_TERRITORY_CODES: frozenset[str] = frozenset(
+    s.code for s in INDIA_STATES if "ut" in s.tags
+)
+STATE_CODES: frozenset[str] = frozenset(
+    s.code for s in INDIA_STATES if "ut" not in s.tags
+)
