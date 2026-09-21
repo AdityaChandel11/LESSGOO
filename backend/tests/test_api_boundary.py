@@ -5,10 +5,11 @@ blank, which holds only while each external service is reached through exactly
 one mode-switched adapter. Until now that rule was a comment, and a comment
 cannot fail a build. These tests read the source and do.
 
-Three things are enforced:
+Four things are enforced:
   * `app/api.py` imports no vendor SDK and calls no vendor host directly;
   * every credential in settings is read only by the module that owns it;
-  * no module outside those owners touches one, however it is spelled.
+  * no module outside those owners touches one, however it is spelled;
+  * the set of routes that answer without a session is exactly the declared one.
 
 When a new adapter legitimately needs a credential, add it to CREDENTIAL_OWNERS
 in the same commit. That edit is the review: it is a one-line diff that says a
@@ -176,3 +177,46 @@ def test_api_docstring_still_states_the_rule() -> None:
     assert "mode-switched adapter" in doc, (
         "app/api.py's docstring no longer states the boundary these tests enforce"
     )
+
+
+# ---------------------------------------------------------------------------
+# The unauthenticated surface
+# ---------------------------------------------------------------------------
+# `public_router` is the only part of api.py that answers without a session, so
+# what sits on it is an access-control decision rather than a routing detail.
+# The landing page needs national aggregates before anyone has signed in; it
+# must not be the reason district rollups or individual facilities quietly
+# become public too. Adding a route here is a one-line diff that says so.
+PUBLIC_ROUTES = {
+    ("GET", "/client-config"),
+    ("GET", "/health"),
+    ("GET", "/map/summary"),
+    ("GET", "/map/states"),
+}
+
+
+def test_public_router_carries_exactly_the_declared_routes() -> None:
+    from app.api import public_router
+
+    actual = {
+        (method, route.path)
+        for route in public_router.routes
+        for method in getattr(route, "methods", set())
+        if method != "HEAD"
+    }
+    assert actual == PUBLIC_ROUTES, (
+        "the unauthenticated surface changed. Added {0}, removed {1}. Every path "
+        "here answers a stranger, so update PUBLIC_ROUTES deliberately.".format(
+            sorted(actual - PUBLIC_ROUTES) or "nothing",
+            sorted(PUBLIC_ROUTES - actual) or "nothing",
+        )
+    )
+
+
+def test_facility_detail_stays_behind_a_session() -> None:
+    """The public aggregates stop at state level; detail needs a sign-in."""
+    from app.api import router
+
+    guarded = {route.path for route in router.routes}
+    for path in ("/map/districts", "/map/facilities", "/facilities/{facility_id}"):
+        assert path in guarded, "{0} left the authenticated router".format(path)

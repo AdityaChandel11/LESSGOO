@@ -1,7 +1,9 @@
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 
 import App from "./App";
+import BrandMark from "./Brand";
 import DataNotice from "./DataNotice";
+import Landing from "./Landing";
 import {
   ApiError,
   type DemoAccount,
@@ -13,17 +15,23 @@ import {
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-function BrandMark({ size = 30 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 26 26" aria-hidden="true">
-      <rect width="26" height="26" rx="6" fill="#0b3d5c" />
-      <path d="M13 6v14M6 13h14" stroke="#fff" strokeWidth="3" strokeLinecap="round" />
-      <circle cx="19.5" cy="6.5" r="3" fill="#e0900e" stroke="#0b3d5c" strokeWidth="1.5" />
-    </svg>
-  );
-}
+/**
+ * The only two paths this app distinguishes. Everything the signed-in app
+ * needs to remember about where you are lives in the query string (see
+ * App.tsx), so the path is free to carry just this one decision: the public
+ * landing page, or the sign-in form. The server serves index.html for any
+ * path, so /sign-in survives a refresh and a pasted link.
+ */
+const LANDING_PATH = "/";
+const SIGN_IN_PATH = "/sign-in";
 
-function SignIn({ onSignedIn }: { onSignedIn: (s: Session) => void }) {
+function SignIn({
+  onSignedIn,
+  onBack,
+}: {
+  onSignedIn: (s: Session) => void;
+  onBack?: () => void;
+}) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -129,6 +137,16 @@ function SignIn({ onSignedIn }: { onSignedIn: (s: Session) => void }) {
             <BrandMark />
             <div className="text-[15px] font-semibold tracking-tight">SwasthSetu</div>
           </div>
+
+          {onBack && (
+            <button
+              type="button"
+              onClick={onBack}
+              className="mb-6 rounded-sm text-[12.5px] font-medium text-ink-3 hover:text-ink focus:ring-2 focus:ring-brand/30 focus:outline-none"
+            >
+              ← Back to the overview
+            </button>
+          )}
 
           {demoAccounts.length > 0 && (
             <section aria-labelledby="demo-heading" className="mb-8">
@@ -262,6 +280,7 @@ export default function AuthGate() {
   const [session, setSession] = useState<Session | null>(null);
   const [checking, setChecking] = useState(true);
   const [expired, setExpired] = useState(false);
+  const [path, setPath] = useState(() => window.location.pathname);
 
   useEffect(() => {
     auth
@@ -269,6 +288,28 @@ export default function AuthGate() {
       .then(setSession)
       .catch(() => setSession(null))
       .finally(() => setChecking(false));
+  }, []);
+
+  // The back button has to work on a page a stranger reached from a search
+  // result, so the two public views are real history entries rather than state.
+  useEffect(() => {
+    const onPop = () => setPath(window.location.pathname);
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  const go = useCallback((next: string) => {
+    window.history.pushState(null, "", next);
+    setPath(next);
+  }, []);
+
+  const signedIn = useCallback((s: Session) => {
+    setExpired(false);
+    // The app keeps its own place in the query string; /sign-in is not a page
+    // it has, so leaving it in the address bar would only confuse a refresh.
+    window.history.replaceState(null, "", LANDING_PATH);
+    setPath(LANDING_PATH);
+    setSession(s);
   }, []);
 
   useEffect(() => {
@@ -286,6 +327,8 @@ export default function AuthGate() {
     } finally {
       setSession(null);
       setExpired(false);
+      window.history.replaceState(null, "", LANDING_PATH);
+      setPath(LANDING_PATH);
     }
   }, []);
 
@@ -298,6 +341,11 @@ export default function AuthGate() {
   }
 
   if (!session) {
+    // A session that ended mid-task goes straight to the form; sending someone
+    // back to the front door to start reading again would be a small insult.
+    if (path !== SIGN_IN_PATH && !expired) {
+      return <Landing onSignedIn={signedIn} onSignIn={() => go(SIGN_IN_PATH)} />;
+    }
     return (
       <>
         {expired && (
@@ -306,10 +354,8 @@ export default function AuthGate() {
           </div>
         )}
         <SignIn
-          onSignedIn={(s) => {
-            setExpired(false);
-            setSession(s);
-          }}
+          onSignedIn={signedIn}
+          onBack={expired ? undefined : () => go(LANDING_PATH)}
         />
       </>
     );

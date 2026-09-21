@@ -55,8 +55,14 @@ from .models import (
 WEB_SOURCES = frozenset({"form", "photo", "voice"})
 DEMO_CHANNEL_SOURCES = frozenset({"sms", "ivr", "whatsapp"})
 
-# Everything on `router` requires a signed-in user. Only health checks are
-# public, so a load balancer can probe the service without credentials.
+# Everything on `router` requires a signed-in user. `public_router` carries the
+# short list that must answer without one: the health probe a load balancer
+# calls, the runtime config the browser needs before it can render anything,
+# and the two national aggregates the public landing page is built from. The
+# line is drawn at detail, not at sensitivity — a state-level count of how many
+# health centres are short of stock is the thing the page exists to say, while
+# district rollups and individual facilities stay behind a session.
+# test_api_boundary.py pins that list, so widening it is a deliberate edit.
 router = APIRouter(dependencies=[Depends(current_user)])
 public_router = APIRouter()
 
@@ -294,7 +300,7 @@ async def list_skus(session: AsyncSession = Depends(get_session)) -> list[SkuOut
     ]
 
 
-@router.get("/map/summary", tags=["map"])
+@public_router.get("/map/summary", tags=["map"])
 async def map_summary(
     sku: str | None = Query(default=None),
     state: str | None = Query(default=None),
@@ -303,7 +309,7 @@ async def map_summary(
     return await aggregates.summary(session, sku, state)
 
 
-@router.get("/map/states", response_model=list[BucketOut], tags=["map"])
+@public_router.get("/map/states", response_model=list[BucketOut], tags=["map"])
 async def map_states(
     sku: str | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
