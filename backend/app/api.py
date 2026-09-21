@@ -33,12 +33,14 @@ from . import (
     services,
     trust,
     vision,
+    workspace,
 )
 from .auth import (
     Principal,
     can_decide_transfer,
     can_plan_state,
     can_submit_reading,
+    can_view_facility,
     current_user,
 )
 from .config import settings
@@ -50,6 +52,7 @@ from .models import (
     MedicineMovement,
     Sku,
     StockReading,
+    Transfer,
 )
 
 WEB_SOURCES = frozenset({"form", "photo", "voice"})
@@ -642,6 +645,349 @@ async def get_facility(
     return FacilityDetailOut(
         **_to_out(snap).model_dump(),
         skus=[SkuStockOut(**vars(s)) for s in snap.skus],
+    )
+
+
+# ==========================================================================
+# The pharmacist's workspace — one facility, from its own rows.
+#
+# Three routes, all thin. Every decision they report is made by a pure
+# function in `workspace.py` and tested in tests/test_workspace.py; what is
+# left here is resolving the facility, checking who is asking, and shaping the
+# reply. Each query underneath is bounded by one facility or one (state, sku)
+# pair — none of them may grow into the national read that never returns.
+# ==========================================================================
+
+
+class LastReceiptOut(BaseModel):
+    batch_id: str
+    qty_received: float
+    received_at: datetime
+    received_via: str
+
+
+class ProvenanceOut(BaseModel):
+    """How the figure above it was last checked. `kind` is the word the screen
+    shows; `detail` is the sentence under it."""
+
+    kind: str
+    at: datetime | None
+    days_ago: int | None
+    detail: str
+
+
+class WorkspaceSkuOut(SkuStockOut):
+    # The unit a pharmacist counts in — sachets, ampoules, blisters. Carried
+    # here because a bare quantity on a phone screen has nothing beside it to
+    # give it meaning, unlike the officer's table which has a column header.
+    unit: str
+    last_receipt: LastReceiptOut | None
+    provenance: ProvenanceOut
+    stockout_on: date | None
+
+
+class WorkspaceOut(BaseModel):
+    facility: FacilityOut
+    skus: list[WorkspaceSkuOut]
+    open_requests: int
+    max_open_requests: int
+
+
+async def _facility_in_scope(
+    session: AsyncSession, facility_id: str, user: Principal
+) -> Facility:
+    """Resolve a facility the caller is entitled to work on.
+
+    A refusal must not describe what was refused: naming the facility here
+    would turn a 403 into a way of reading any centre's name out of the system
+    one id at a time.
+    """
+    facility = await session.get(Facility, facility_id)
+    if facility is None:
+        raise HTTPException(status_code=404, detail="Facility not found")
+    if not can_view_facility(
+        user,
+        facility_id=facility.id,
+        facility_state=facility.state_silo,
+        facility_district=facility.district,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="You can only open the workspace for your own facility",
+        )
+    return facility
+
+
+@router.get(
+    "/facilities/{facility_id}/workspace",
+    response_model=WorkspaceOut,
+    tags=["workspace"],
+)
+async def facility_workspace(
+    facility_id: str,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> WorkspaceOut:
+    """Everything one centre's staff need on one screen: what they hold, when
+    it runs out, and how each figure was last checked."""
+    facility = await _facility_in_scope(session, facility_id, user)
+    snaps = await services.get_snapshots(session, facility_ids=[facility.id])
+    if not snaps:
+        raise HTTPException(status_code=404, detail="Facility not found")
+    snap = snaps[0]
+
+    receipts = await workspace.last_receipts(session, facility.id)
+    open_here, _ = await workspace.open_request_counts(session, facility.id)
+    units = {
+        row.code: row.unit
+        for row in (await session.execute(select(Sku))).scalars().all()
+    }
+    now = datetime.now(timezone.utc)
+
+    rows: list[WorkspaceSkuOut] = []
+    for s in snap.skus:
+        receipt = receipts.get(s.sku_code)
+        prov = workspace.provenance(s.last_source, s.last_reported_at, receipt, now)
+        rows.append(
+            WorkspaceSkuOut(
+                **vars(s),
+                unit=units.get(s.sku_code, "unit"),
+                last_receipt=LastReceiptOut(**vars(receipt)) if receipt else None,
+                provenance=ProvenanceOut(**vars(prov)),
+                stockout_on=workspace.stockout_date(s.days_of_stock, s.last_reported_at),
+            )
+        )
+
+    return WorkspaceOut(
+        facility=_to_out(snap),
+        skus=rows,
+        open_requests=open_here,
+        max_open_requests=settings.max_open_requests_per_facility,
+    )
+
+
+class DonorOut(BaseModel):
+    facility_id: str
+    name: str
+    district: str
+    lat: float
+    lng: float
+    km: float
+    # 'straight_line_x1.3'. Never 'google_routes' while MAPS_MODE is osm: the
+    # UI must not imply a road route when it is showing a straight line.
+    distance_basis: str
+    spare_units: int
+    days_kept: float
+
+
+class SupplyOut(BaseModel):
+    sku_code: str
+    sku_name: str
+    unit: str
+    units_needed: int
+    donors: list[DonorOut]
+    manual_only: bool
+    reason: str | None
+
+
+@router.get(
+    "/facilities/{facility_id}/supply", response_model=SupplyOut, tags=["workspace"]
+)
+async def facility_supply(
+    facility_id: str,
+    sku: str = Query(..., min_length=1),
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> SupplyOut:
+    """The nearest centres that can spare this medicine and still hold their
+    own safety stock — the solver's own split, read from the short centre's
+    side, so nothing is offered that an officer would have to refuse."""
+    facility = await _facility_in_scope(session, facility_id, user)
+    sku_row = await session.get(Sku, sku)
+    if sku_row is None:
+        raise HTTPException(status_code=404, detail="Unknown medicine")
+
+    rule = workspace.SkuRule(
+        code=sku_row.code, name=sku_row.name, unit=sku_row.unit,
+        is_controlled=bool(sku_row.is_controlled), cold_chain=bool(sku_row.cold_chain),
+    )
+    nodes_by_sku = await redistribution.load_state_nodes(
+        session, facility.state_silo, sku
+    )
+    result = workspace.rank_donors(
+        nodes_by_sku.get(sku, []),
+        redistribution.PlanRules.from_settings(),
+        recipient_id=facility.id,
+        sku=rule,
+    )
+    return SupplyOut(
+        sku_code=rule.code, sku_name=rule.name, unit=rule.unit,
+        units_needed=result.units_needed,
+        donors=[DonorOut(**vars(d)) for d in result.donors],
+        manual_only=result.manual_only, reason=result.reason,
+    )
+
+
+class RequestIn(BaseModel):
+    sku_code: str = Field(min_length=1)
+    from_facility: str = Field(min_length=1)
+    qty: float = Field(gt=0)
+
+
+class RequestOut(BaseModel):
+    transfer_id: int
+    reference: str
+    status: str
+    sku_code: str
+    # The name and the unit travel with the receipt because it is printed and
+    # filed: "461 capsules of Amoxicillin 250mg" is a document a district
+    # office can act on, "461 AMOX" is a line only this system understands.
+    sku_name: str
+    unit: str
+    qty: float
+    from_facility: str
+    from_name: str
+    to_facility: str
+    # Which role may decide this one. block_mo can only decide inside its own
+    # district (auth.can_decide_transfer), so a cross-district donor needs the
+    # state officer. Naming it beats leaving the pharmacist to guess.
+    approver_role: str
+    km: float
+    distance_basis: str
+    eta_hours: float
+    estimated_delivery: date
+    estimate_label: str
+    assumptions: dict[str, float]
+
+
+@router.post(
+    "/facilities/{facility_id}/requests",
+    response_model=RequestOut,
+    status_code=201,
+    tags=["workspace"],
+)
+async def create_request(
+    facility_id: str,
+    payload: RequestIn,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> RequestOut:
+    """Raise a request for stock. This creates a *proposed* transfer and
+    nothing else: no stock moves until an officer approves it (spec 12.3 —
+    nothing auto-executes)."""
+    facility = await _facility_in_scope(session, facility_id, user)
+    sku_row = await session.get(Sku, payload.sku_code)
+    if sku_row is None:
+        raise HTTPException(status_code=404, detail="Unknown medicine")
+    donor_facility = await session.get(Facility, payload.from_facility)
+    if donor_facility is None:
+        raise HTTPException(status_code=404, detail="Unknown donor facility")
+    if donor_facility.id == facility.id:
+        raise HTTPException(
+            status_code=422, detail="A centre cannot request stock from itself"
+        )
+
+    open_here, open_overall = await workspace.open_request_counts(session, facility.id)
+    verdict = workspace.check_caps(
+        open_here, open_overall, workspace.CapLimits.from_settings()
+    )
+    if not verdict.allowed:
+        raise HTTPException(status_code=409, detail=verdict.reason)
+
+    rule = workspace.SkuRule(
+        code=sku_row.code, name=sku_row.name, unit=sku_row.unit,
+        is_controlled=bool(sku_row.is_controlled), cold_chain=bool(sku_row.cold_chain),
+    )
+    nodes_by_sku = await redistribution.load_state_nodes(
+        session, donor_facility.state_silo, payload.sku_code
+    )
+    nodes = nodes_by_sku.get(payload.sku_code, [])
+    donor_node = next((n for n in nodes if n.facility_id == donor_facility.id), None)
+    if donor_node is None:
+        raise HTTPException(
+            status_code=422, detail="That centre does not stock this medicine"
+        )
+
+    rules = redistribution.PlanRules.from_settings()
+    try:
+        workspace.validate_request(donor_node, payload.qty, sku=rule, rules=rules)
+    except workspace.RequestRefused as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    me_node = next((n for n in nodes if n.facility_id == facility.id), None)
+    km = (
+        workspace.road_km_between(donor_node, me_node, rules.road_factor)
+        if me_node
+        else 0.0
+    )
+    now = datetime.now(timezone.utc)
+    estimate = workspace.delivery_estimate(km=km, raised_at=now)
+    eta_hours = round(km / rules.avg_speed_kmh + rules.handling_hours, 2)
+    approver_role = (
+        "block_mo"
+        if donor_facility.district == facility.district
+        and donor_facility.state_silo == facility.state_silo
+        else "state_officer"
+    )
+
+    transfer = Transfer(
+        from_facility=donor_facility.id,
+        to_facility=facility.id,
+        sku_code=payload.sku_code,
+        qty=payload.qty,
+        route_km=round(km, 1),
+        eta_hours=eta_hours,
+        route_source="haversine",
+        status="proposed",
+        triggered_by=workspace.FACILITY_REQUEST,
+        rationale={
+            "origin": "facility_request",
+            "requested_by_role": user.role,
+            "approver_role": approver_role,
+            "units_needed": payload.qty,
+            "donor_days_kept": round((donor_node.qty - payload.qty) / donor_node.burn, 2),
+            "distance_basis": estimate.basis,
+            "estimate_label": estimate.label,
+            "assumptions": estimate.assumptions,
+        },
+    )
+    session.add(transfer)
+    await session.commit()
+    await session.refresh(transfer)
+
+    await events.record(
+        session,
+        events.TRANSFER_REQUESTED,
+        {
+            "transfer_id": transfer.id,
+            "reference": workspace.reference(transfer.id),
+            "facility_id": facility.id,
+            "facility_name": facility.name,
+            "sku_code": payload.sku_code,
+            "qty": payload.qty,
+            "from_name": donor_facility.name,
+        },
+        state_silo=facility.state_silo,
+    )
+
+    return RequestOut(
+        transfer_id=transfer.id,
+        reference=workspace.reference(transfer.id),
+        status=transfer.status,
+        sku_code=payload.sku_code,
+        sku_name=rule.name,
+        unit=rule.unit,
+        qty=payload.qty,
+        from_facility=donor_facility.id,
+        from_name=donor_facility.name,
+        to_facility=facility.id,
+        approver_role=approver_role,
+        km=round(km, 1),
+        distance_basis=estimate.basis,
+        eta_hours=eta_hours,
+        estimated_delivery=estimate.expected_on,
+        estimate_label=estimate.label,
+        assumptions={k: float(v) for k, v in estimate.assumptions.items()},
     )
 
 

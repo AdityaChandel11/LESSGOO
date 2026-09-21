@@ -180,6 +180,22 @@ class Settings(BaseSettings):
     handling_hours: float = 0.5
     min_transfer_units: int = 5
     critical_cost_weight: float = 0.35
+
+    # --- the pharmacist's workspace ---
+    # Two caps, because they stop two different things. The per-facility one
+    # keeps any single pharmacist's queue reviewable by the officer who has to
+    # read it. The global one is the database size guard: a judge clicking
+    # "Request stock" is otherwise an unbounded writer against a 1 GB volume.
+    # Both count only transfers tagged 'facility_request', so the solver's own
+    # proposals can never consume a pharmacist's allowance.
+    max_open_requests_per_facility: int = 3
+    max_open_facility_requests_global: int = 100
+    # A request raised after the cutoff leaves the next morning; district
+    # stores do not load vehicles at night. Both are assumptions, returned to
+    # the browser alongside every estimate and shown on screen as assumptions,
+    # never presented as a scheduled time.
+    dispatch_cutoff_hour: int = 14          # local time, 24h clock
+    working_hours_per_day: float = 8.0
     # How long a dispatched batch has to be confirmed before it reads as
     # overdue (spec 26.3). Generous on purpose: a batch sitting unconfirmed is
     # a question for the officer, not an accusation against the facility.

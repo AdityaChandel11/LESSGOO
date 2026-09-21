@@ -27,6 +27,9 @@ from .models import Event
 READING_COMMITTED = "reading.committed"
 STATUS_CHANGED = "status.changed"
 TRANSFER_PROPOSED = "transfer.proposed"
+# A facility asking for stock itself, rather than the solver proposing it.
+# Separate kind on purpose: the activity feed should say who started it.
+TRANSFER_REQUESTED = "transfer.requested"
 TRANSFER_DECIDED = "transfer.decided"
 FEDERATION_ROUND = "federation.round"
 TRUST_FLAGGED = "trust.flagged"

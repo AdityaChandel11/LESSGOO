@@ -114,6 +114,26 @@ def can_submit_reading(
     return False
 
 
+def can_view_facility(
+    p: Principal, *, facility_id: str, facility_state: str, facility_district: str
+) -> bool:
+    """Whether this person may open a facility's own workspace.
+
+    The same scope as reporting for it, deliberately. The national picture
+    stays visible to every signed-in user through the map — scope narrows what
+    you may change, never what you may see — but the workspace is not the
+    national picture: it is one centre's working screen, with its open
+    requests and its delivery queue on it, and that belongs to the people
+    responsible for that centre.
+    """
+    return can_submit_reading(
+        p,
+        facility_id=facility_id,
+        facility_state=facility_state,
+        facility_district=facility_district,
+    )
+
+
 # ==================================================================== tokens ===
 
 
