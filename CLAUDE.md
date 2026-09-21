@@ -53,6 +53,32 @@ Trigger table. These files are big — do **not** `@`-import them. Load only the
 - Label synthetic data as synthetic — in the README, the deck and the demo. Impact numbers are either cited from a public source or labelled an estimate; never invented.
 - Google AI must do load-bearing work: if removing Gemini would not break or visibly weaken a core feature, say so and propose how to make it load-bearing.
 
+## THE DEPLOYED DATABASE — SIZE GUARD
+Render's free Postgres is 1 GB and is **deleted 30 days after creation**. The
+deployed database is reached only through `RENDER_DATABASE_URL_EXTERNAL`, and
+only through `python -m scripts.remote`, which prints the target host, refuses
+a local one, and needs `--confirm` to write.
+
+- **Budget: stay under 800 MB.** Report the size before *and* after every
+  remote write.
+- **Stop and ask** if a step would take it over **750 MB**.
+- **Never reseed Render without asking first.** The seed truncates.
+- Nothing on the deployed app writes continuously: no background task, no
+  scheduler, no cron service, no auto-seed. Growth only comes from someone
+  using the app. Keep it that way — if a background writer is ever added, it
+  needs a retention policy in the same commit.
+- The app reads a **short window**: 28 days for the burn rate, 14 for trust, 60
+  for movements. Forecasts are pre-computed rows. Nothing reads deep history,
+  so anything older than ~60 days is dead weight on Render — but a `DELETE`
+  alone does not shrink a Postgres file, and `VACUUM FULL` needs free space
+  equal to the table it rewrites. Check that headroom exists before proposing
+  either, and never delete without approval.
+- **If it fills up**, fastest recovery in order: (1) `DELETE` the oldest
+  `stock_readings` for non-focus regions and `VACUUM` to stop further growth;
+  (2) re-seed smaller with `--days 28 --focus-days 60` — destructive, ask
+  first; (3) create a new instance and re-run seed, trust, publish and users,
+  which is the whole deploy path and takes about half an hour.
+
 ## AT THE END OF EVERY FINISHED STAGE
 In this order, no exceptions:
 1. Run the full check suite and every unit test. A stage with a failing test is not finished.

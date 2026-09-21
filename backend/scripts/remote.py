@@ -113,6 +113,11 @@ def main() -> None:
     p.add_argument("--show", action="store_true", help="print the target and stop")
     p.add_argument("--counts", action="store_true", help="row counts and database size")
     p.add_argument("--confirm", action="store_true", help="required for anything that writes")
+    p.add_argument("--python", default=sys.executable, help="interpreter to run (the Flower env has torch)")
+    p.add_argument("--cwd", default=None, help="working directory, relative to backend/")
+    # The federation scripts read their own variable, because a SuperNode is
+    # handed one silo's database and nothing else.
+    p.add_argument("--env-name", default="DATABASE_URL", help="variable the child reads the DSN from")
     p.add_argument("rest", nargs=argparse.REMAINDER, help="-- followed by arguments for python")
     args = p.parse_args()
 
@@ -135,13 +140,27 @@ def main() -> None:
             "--confirm once the host above is the one you meant."
         )
 
-    print("\n  running: python {0}\n".format(" ".join(command)))
+    cwd = BACKEND_ROOT if args.cwd is None else (BACKEND_ROOT / args.cwd)
+    print("\n  interpreter : {0}".format(args.python))
+    print("  working dir : {0}".format(cwd))
+    print("  dsn passed as {0}".format(args.env_name))
+    print("\n  running: {0}\n".format(" ".join(command)))
     # The DSN reaches the child in its environment, never on a command line,
     # because command lines are visible to every other process on the machine.
-    env = dict(os.environ, DATABASE_URL=dsn, PYTHONIOENCODING="utf-8", PYTHONUTF8="1")
+    env = dict(
+        os.environ,
+        PYTHONIOENCODING="utf-8",
+        PYTHONUTF8="1",
+        PYTHONPATH=str(cwd),
+    )
+    # Only the one the child was told to read. Setting both would mean a script
+    # that reached for the wrong variable still found a live database.
+    env.pop("DATABASE_URL", None)
+    env.pop("SWASTHSETU_DATABASE_URL", None)
     env.pop(VARIABLE, None)
+    env[args.env_name] = dsn
     raise SystemExit(
-        subprocess.run([sys.executable, *command], cwd=str(BACKEND_ROOT), env=env).returncode
+        subprocess.run([args.python, *command], cwd=str(cwd), env=env).returncode
     )
 
 
