@@ -57,27 +57,51 @@ Trigger table. These files are big — do **not** `@`-import them. Load only the
 Render's free Postgres is 1 GB and is **deleted 30 days after creation**. The
 deployed database is reached only through `RENDER_DATABASE_URL_EXTERNAL`, and
 only through `python -m scripts.remote`, which prints the target host, refuses
-a local one, and needs `--confirm` to write.
+a local one, and needs `--confirm` to write. `--show`, `--counts` and
+`--diagnose` are read-only and need no confirmation.
 
-- **Budget: stay under 800 MB.** Report the size before *and* after every
-  remote write.
-- **Stop and ask** if a step would take it over **750 MB**.
+- **Render's dashboard percentage is the authority. Stop at 85%.**
+- **`pg_database_size` is not the number.** It measured 667 MB on 2026-09-21
+  while the dashboard read 83.87%. It counts one database's relations; the
+  gauge counts a filesystem, which also carries the other databases on the
+  instance (~15 MB), the write-ahead log (`max_wal_size` 128 MB, `min_wal_size`
+  80 MB, no archiving, no replication slots — so it is recyclable, not
+  permanent), temp files during index builds, and the server's own logs.
+  Treat `--counts` as a floor, never as the reading.
+- **You cannot see the dashboard. Ask Aditya for the percentage** before any
+  remote write and again after it, and record both. Never infer it.
+- **Stop and ask** if a step would take it over 85%, and say which option you
+  would take and what it frees.
 - **Never reseed Render without asking first.** The seed truncates.
 - Nothing on the deployed app writes continuously: no background task, no
   scheduler, no cron service, no auto-seed. Growth only comes from someone
   using the app. Keep it that way — if a background writer is ever added, it
   needs a retention policy in the same commit.
 - The app reads a **short window**: 28 days for the burn rate, 14 for trust, 60
-  for movements. Forecasts are pre-computed rows. Nothing reads deep history,
-  so anything older than ~60 days is dead weight on Render — but a `DELETE`
-  alone does not shrink a Postgres file, and `VACUUM FULL` needs free space
-  equal to the table it rewrites. Check that headroom exists before proposing
-  either, and never delete without approval.
-- **If it fills up**, fastest recovery in order: (1) `DELETE` the oldest
-  `stock_readings` for non-focus regions and `VACUUM` to stop further growth;
-  (2) re-seed smaller with `--days 28 --focus-days 60` — destructive, ask
-  first; (3) create a new instance and re-run seed, trust, publish and users,
-  which is the whole deploy path and takes about half an hour.
+  for movements. Forecasts are pre-computed rows. Nothing reads deep history.
+- **What actually frees space, cheapest first.** Verified 2026-09-21:
+  1. **Wait.** WAL recycles toward `min_wal_size` once writes stop, and no
+     replication slot is pinning it. Costs nothing, risks nothing, and may be
+     the whole gap. `CHECKPOINT` needs a role we do not have.
+  2. **`DROP INDEX`.** Frees the file immediately, needs no free space, and is
+     reversible. `stock_readings` carries 332 MB of indexes against 253 MB of
+     table; `ix_stock_readings_facility_id` (25 MB) is a strict prefix of
+     `ix_readings_facility_sku_time` and therefore redundant.
+  3. **`TRUNCATE` then reseed smaller** (`--days 28 --focus-days 60`).
+     TRUNCATE releases the file at once, so the low point comes before the
+     rebuild, not after — but the rebuild is the whole deploy path again
+     (seed, publish forecasts for 36 regions, trust, federation rounds,
+     `scripts.users`) and a failure halfway leaves a broken demo.
+  4. **A new instance.** Half an hour, and resets the 30-day clock.
+- **What does not work here.** `DELETE` alone never shrinks a Postgres file,
+  and `VACUUM FULL` rewrites the table, so it needs free space equal to the
+  table it is rewriting — 585 MB for `stock_readings`, which does not exist on
+  a disk at 85%. Dead tuples are currently negligible, so plain `VACUUM` has
+  nothing to reclaim either.
+- **Never reload the deployed database from the local one.** Local predates
+  `1ddbedd`: 34 regions and 3,496 facilities against Render's correct 36 and
+  3,510. Copying rows across would replace right data with stale data and
+  break facility foreign keys.
 
 ## AT THE END OF EVERY FINISHED STAGE
 In this order, no exceptions:
