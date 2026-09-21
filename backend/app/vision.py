@@ -139,6 +139,20 @@ def _mock_extraction(simulate: dict | None) -> BedExtraction:
     )
 
 
+def _quota_note(response: httpx.Response) -> str:
+    """Which limit was hit, for the log. Google names it; guessing wastes a day."""
+    try:
+        for detail in response.json().get("error", {}).get("details", []):
+            for violation in detail.get("violations", []):
+                if violation.get("quotaId"):
+                    return " — {0} (limit {1})".format(
+                        violation["quotaId"], violation.get("quotaValue", "?")
+                    )
+    except (ValueError, AttributeError, TypeError):
+        pass
+    return ""
+
+
 def _first_json_object(text: str) -> dict:
     """Gemini returns JSON, occasionally wrapped in a code fence."""
     text = text.strip()
@@ -205,15 +219,23 @@ async def _call_gemini(
                     )
                     await asyncio.sleep(RETRY_BACKOFF_S[attempt])
                     continue
-                log.error("Gemini refused the request (HTTP %s)", status)
-                # Worth separating: a busy model says nothing about the photo,
-                # and telling somebody their photograph was rejected when the
-                # service was merely overloaded sends them to re-take it.
-                raise VisionError(
-                    "The model is busy right now — send the photo again in a moment"
-                    if status in RETRY_STATUSES
-                    else "The photo service rejected the request"
-                ) from exc
+                log.error(
+                    "Gemini refused the request (HTTP %s)%s",
+                    status, _quota_note(exc.response),
+                )
+                # Three different things, and sending somebody to re-take a
+                # photograph is only right for one of them. A spent quota does
+                # not recover in a moment, and neither says anything about the
+                # photo itself.
+                if status == 429:
+                    message = (
+                        "The model's request quota for today is used up — the photo was not read"
+                    )
+                elif status in RETRY_STATUSES:
+                    message = "The model is busy right now — send the photo again in a moment"
+                else:
+                    message = "The photo service rejected the request"
+                raise VisionError(message) from exc
             except httpx.HTTPError as exc:
                 log.warning("Gemini call failed: %s", type(exc).__name__)
                 raise VisionError("The photo service could not be reached") from exc

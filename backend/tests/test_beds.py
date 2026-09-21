@@ -273,3 +273,43 @@ def test_a_refusal_is_not_retried(monkeypatch):
     with pytest.raises(vision.VisionError):
         asyncio.run(vision.read_ward_photo(b"jpeg-bytes", client=client))
     assert len(seen) == 1
+
+
+def test_a_spent_quota_does_not_read_as_a_rejected_photo(monkeypatch):
+    """429 is not 400. Sending somebody to re-take a photograph, or to try
+    again in a moment, is wrong when the day's quota is simply gone."""
+    _live(monkeypatch)
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda r: httpx.Response(429, json={}))
+    )
+    with pytest.raises(vision.VisionError) as caught:
+        asyncio.run(vision.read_ward_photo(b"jpeg-bytes", client=client))
+    assert "quota" in str(caught.value)
+
+
+def test_the_log_names_the_quota_google_reported(monkeypatch):
+    """Guessing which limit was hit costs a day; Google says so in the body."""
+    response = httpx.Response(
+        429,
+        json={
+            "error": {
+                "details": [
+                    {
+                        "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                        "violations": [
+                            {
+                                "quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier",
+                                "quotaValue": "20",
+                            }
+                        ],
+                    }
+                ]
+            }
+        },
+    )
+    note = vision._quota_note(response)
+    assert "GenerateRequestsPerDayPerProjectPerModel-FreeTier" in note and "20" in note
+
+
+def test_an_unparseable_body_does_not_break_the_error_path(monkeypatch):
+    assert vision._quota_note(httpx.Response(429, text="<html>nope</html>")) == ""
