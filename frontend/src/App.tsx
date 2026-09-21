@@ -610,6 +610,14 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
             <FederationPanel refreshKey={refreshKey} />
           ) : mode === "trust" ? (
             <AuditQueuePanel
+              // One value decides both the request and the heading. An
+              // administrator follows the map; every other role is pinned to
+              // its own patch by the server regardless of what is asked. The
+              // key remounts on a change of scope, so the previous scope's
+              // rows never sit under the new scope's heading while the
+              // replacement request is still in flight.
+              key={user.state_silo ?? activeState ?? "national"}
+              state={user.state_silo ?? activeState}
               stateLabel={
                 user.state_silo
                   ? stateName(user.state_silo)

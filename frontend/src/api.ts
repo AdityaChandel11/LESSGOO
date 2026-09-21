@@ -333,7 +333,14 @@ export const api = {
     post<Checkin>(`/facilities/${encodeURIComponent(facilityId)}/checkins`, body),
   facilityTrust: (facilityId: string) =>
     get<Trust | null>(`/facilities/${encodeURIComponent(facilityId)}/trust`),
-  trustQueue: (limit = 50) => get<AuditRow[]>("/trust/queue", { limit }),
+  /**
+   * `state` is honoured only for an administrator. A state or district officer
+   * is narrowed to their own patch by the server whatever they ask for, which
+   * is why the panel titles itself from the same value it sends: a national
+   * list under a state heading is how this went wrong before.
+   */
+  trustQueue: (state: string | null = null, limit = 50) =>
+    get<AuditRow[]>("/trust/queue", { state, limit }),
 };
 
 /* --------------------------------------------------------- attendance --- */

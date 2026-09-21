@@ -148,10 +148,14 @@ export function TrustBlock({
 
 export function AuditQueuePanel({
   stateLabel,
+  state,
   refreshKey,
   onPick,
 }: {
   stateLabel: string;
+  /** The scope actually requested, so the heading and the rows agree. Null is
+   *  national, which only an administrator can be. */
+  state: string | null;
   refreshKey: number;
   onPick: (row: AuditRow) => void;
 }) {
@@ -163,7 +167,7 @@ export function AuditQueuePanel({
   const load = useCallback(() => {
     setLoading(true);
     api
-      .trustQueue()
+      .trustQueue(state)
       .then((r) => {
         setRows(r);
         setError(null);
@@ -172,7 +176,7 @@ export function AuditQueuePanel({
         setError(e instanceof ApiError ? e.message : "Could not load the audit queue"),
       )
       .finally(() => setLoading(false));
-  }, []);
+  }, [state]);
 
   useEffect(load, [load, refreshKey]);
 

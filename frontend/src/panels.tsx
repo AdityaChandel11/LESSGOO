@@ -443,7 +443,11 @@ export function FacilityPanel({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div className="border-b border-line px-4 pt-3 pb-4">
+      {/* Who this is stays put; everything below it scrolls together. The
+          trust, bed and attendance blocks used to sit outside the scroll
+          region as fixed-height siblings, so on a short window they overflowed
+          the column and printed straight through the field-reports footer. */}
+      <div className="shrink-0 border-b border-line px-4 pt-3 pb-4">
         <button
           onClick={onBack}
           className="text-[12px] font-medium text-brand hover:underline"
@@ -483,38 +487,38 @@ export function FacilityPanel({
         )}
       </div>
 
-      {detail && (
-        <>
-          <TrustBlock
-            facilityId={detail.id}
-            refreshKey={refreshKey}
-            onOpenEvidence={
-              onOpenEvidence && ((e) => onOpenEvidence(e, { id: detail.id, name: detail.name }))
-            }
-          />
-          <BedPanel
-            facilityId={detail.id}
-            facility={detail}
-            user={user}
-            refreshKey={refreshKey}
-            demoMode={demoMode}
-          />
-          <AttendancePanel
-            facilityId={detail.id}
-            facility={detail}
-            user={user}
-            refreshKey={refreshKey}
-            demoMode={demoMode}
-          />
-        </>
-      )}
-
-      <div className="flex items-center justify-between px-4 pt-3 pb-1">
-        <Eyebrow>Medicine stock</Eyebrow>
-        <span className="text-[10.5px] text-ink-3">days of cover at current use</span>
-      </div>
-
       <div className="min-h-0 flex-1 overflow-y-auto pb-3">
+        {detail && (
+          <>
+            <TrustBlock
+              facilityId={detail.id}
+              refreshKey={refreshKey}
+              onOpenEvidence={
+                onOpenEvidence && ((e) => onOpenEvidence(e, { id: detail.id, name: detail.name }))
+              }
+            />
+            <BedPanel
+              facilityId={detail.id}
+              facility={detail}
+              user={user}
+              refreshKey={refreshKey}
+              demoMode={demoMode}
+            />
+            <AttendancePanel
+              facilityId={detail.id}
+              facility={detail}
+              user={user}
+              refreshKey={refreshKey}
+              demoMode={demoMode}
+            />
+          </>
+        )}
+
+        <div className="flex items-center justify-between px-4 pt-3 pb-1">
+          <Eyebrow>Medicine stock</Eyebrow>
+          <span className="text-[10.5px] text-ink-3">days of cover at current use</span>
+        </div>
+
         {!detail && !error && <p className="px-4 py-6 text-[12px] text-ink-3">Loading…</p>}
         {rows.map((s) => {
           const focused = s.sku_code === sku;
@@ -599,7 +603,9 @@ export function ActivityFeed({
 }) {
   const readings = events.filter((e) => e.kind === "reading.committed").slice(0, 3);
   return (
-    <div className="border-t border-line bg-canvas/60 px-4 py-2.5">
+    // shrink-0: the footer keeps its own height whatever the panel above it
+    // does, instead of being compressed while that panel overflows through it.
+    <div className="shrink-0 border-t border-line bg-canvas/60 px-4 py-2.5">
       <div className="flex items-center justify-between">
         <Eyebrow>Field reports</Eyebrow>
         <button
