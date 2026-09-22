@@ -2,10 +2,20 @@
 
     python -m checks
     python -m checks ledger federation
+    python -m checks beds --live-llm      # spends real Gemini quota, on purpose
 
 Exit code is 1 if any assertion failed, so this can gate a release. A check that
 could not run at all (a missing interpreter, an empty database) is reported as
 skipped and does not silently count as a pass.
+
+**Live model calls are blocked unless --live-llm is passed.** These checks are
+a release gate and run constantly; the Gemini free tier allows twenty generate
+requests a day per model. A gate that spends one on every run exhausts the
+quota by lunchtime and then starts failing for a reason that has nothing to do
+with the code — which is what the ward-photo check did, on every single run,
+until this flag existed. Blocking is enforced inside `vision` itself rather
+than trusted to each check, and it raises rather than silently downgrading,
+because a quiet fallback would hide the mistake it exists to catch.
 """
 
 from __future__ import annotations
@@ -15,6 +25,7 @@ import sys
 import time
 import traceback
 
+from app import vision
 from app.config import settings
 
 from . import CHECKS
@@ -73,11 +84,27 @@ def summarise(reports: list[Report]) -> int:
 
 
 def main() -> int:
-    names = sys.argv[1:] or list(CHECKS)
+    argv = sys.argv[1:]
+    live_llm = "--live-llm" in argv
+    names = [a for a in argv if not a.startswith("--")] or list(CHECKS)
+
     unknown = [n for n in names if n not in CHECKS]
     if unknown:
-        print("unknown check(s): {0}\nknown: {1}".format(", ".join(unknown), ", ".join(CHECKS)))
+        print("unknown check(s): {0}".format(", ".join(unknown)))
+        print("known: {0}".format(", ".join(CHECKS)))
         return 2
+
+    # Two belts. The mode switch sends every mode-aware path down its local
+    # branch, and the guard makes the attempt itself raise at the one place
+    # that can open a connection to Google — so a check that ignores the
+    # mode still cannot spend a request.
+    if live_llm:
+        print("  --live-llm: real model calls are ENABLED and will spend quota.")
+    else:
+        settings.llm_mode = "mock"
+        vision.block_live_calls(True)
+        print("  live model calls blocked (pass --live-llm to spend real quota)")
+
     return summarise(asyncio.run(run_named(names)))
 
 

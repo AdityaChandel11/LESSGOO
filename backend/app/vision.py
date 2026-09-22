@@ -139,6 +139,64 @@ def _mock_extraction(simulate: dict | None) -> BedExtraction:
     )
 
 
+# ============================================================ live guard ===
+# A switch that makes an accidental paid call impossible rather than unlikely.
+#
+# The free tier allows twenty generate requests a day per model. An automated
+# run that quietly spends one is worse than an outage: the suite still passes,
+# nobody notices, and the quota is gone when a rehearsal needs it. This project
+# has already had exactly that — an integration check that read a ward photo
+# through the live model on every `python -m checks`, and a briefing check that
+# did the same the day it was written.
+#
+# So the rule is enforced here, at the only place that can reach Google, rather
+# than trusted to each caller:
+#
+#   * pytest turns it on for the whole session (tests/conftest.py);
+#   * `python -m checks` turns it on unless --live-llm is passed;
+#   * scripts/check_gemini.py deliberately does not, because a person running
+#     it is choosing to spend the call.
+#
+# It blocks only calls that would build a *real* client. A test that injects an
+# httpx mock transport passes `client=`, reaches no network, and is unaffected
+# — which is why the existing bed-photo tests keep working unchanged.
+#
+# It raises rather than falling back on purpose. A silent downgrade to the mock
+# path would hide the very mistake this exists to catch.
+
+_block_live_calls = False
+
+
+class LiveCallBlocked(VisionError):
+    """A real model call was attempted while live calls were blocked."""
+
+
+def block_live_calls(blocked: bool = True) -> None:
+    """Turn the guard on or off. Called by test and check entry points."""
+    global _block_live_calls
+    _block_live_calls = blocked
+
+
+def live_calls_blocked() -> bool:
+    return _block_live_calls
+
+
+def _guard_real_client(client: httpx.AsyncClient | None, what: str) -> None:
+    """Refuse to build a real client while the guard is on.
+
+    `client is None` is precisely the condition under which this module would
+    open its own connection to Google. An injected client is somebody's test
+    double and is none of this guard's business.
+    """
+    if client is None and _block_live_calls:
+        raise LiveCallBlocked(
+            "Refusing a live {0} call: this process blocked them "
+            "(vision.block_live_calls). Automated runs must not spend the "
+            "20-a-day quota. Inject an httpx client to stub it, or run "
+            "`python -m scripts.check_gemini` if a real call is intended.".format(what)
+        )
+
+
 def _quota_note(response: httpx.Response) -> str:
     """Which limit was hit, for the log. Google names it; guessing wastes a day."""
     try:
@@ -195,6 +253,7 @@ async def _call_gemini(
             "temperature": 0.0,
         },
     }
+    _guard_real_client(client, "ward photo")
     own = client is None
     http = client or httpx.AsyncClient(timeout=REQUEST_TIMEOUT_S)
     try:
@@ -375,6 +434,7 @@ async def write_briefing(
         },
     }
 
+    _guard_real_client(client, "briefing")
     own = client is None
     http = client or httpx.AsyncClient(timeout=REQUEST_TIMEOUT_S)
     try:
