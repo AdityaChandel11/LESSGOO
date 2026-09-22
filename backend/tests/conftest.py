@@ -33,18 +33,26 @@ from app import vision
 from app.config import settings
 
 
+# Armed HERE, at import, not inside a fixture. A session-scoped autouse
+# fixture does not run until the first test does, which leaves everything that
+# executes at COLLECTION time unprotected: module-level statements in any
+# test_*.py, and @pytest.mark.parametrize argument expressions. `pytest
+# --collect-only` would never arm it at all. conftest.py is imported before any
+# of that, so this is the earliest point that covers the whole run.
+settings.llm_mode = "mock"
+settings.gemini_api_key = ""
+vision.block_live_calls(True)
+
+
 @pytest.fixture(autouse=True, scope="session")
 def no_live_model_calls():
-    """Make a real Gemini call impossible for the whole test session."""
-    previous_mode = settings.llm_mode
-    previous_key = settings.gemini_api_key
+    """Hold the guard for the session and release it afterwards.
 
-    settings.llm_mode = "mock"
-    settings.gemini_api_key = ""
-    vision.block_live_calls(True)
+    The arming above is what protects collection; this exists so the process
+    is left as it was found, which matters when pytest is embedded in a larger
+    run rather than being the whole process.
+    """
     try:
         yield
     finally:
         vision.block_live_calls(False)
-        settings.llm_mode = previous_mode
-        settings.gemini_api_key = previous_key

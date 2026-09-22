@@ -12,13 +12,13 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 from sqlalchemy import delete, select
 
+from app import childproc
 from app.config import settings
 from app.models import LoginFailure
 
@@ -37,7 +37,10 @@ def _blank_env_defaults() -> dict:
     from app.config import settings as current
 
     scratch = tempfile.mkdtemp(prefix="swasthsetu-blank-")
-    proc = subprocess.run(
+    # The env below is deliberately almost empty — this check exists to prove
+    # the app starts with no configuration at all — so childproc.run merges in
+    # the UTF-8 variables and refills nothing else.
+    proc = childproc.run(
         [sys.executable, "-m", "checks.blankenv"],
         cwd=scratch,
         env={
@@ -48,7 +51,6 @@ def _blank_env_defaults() -> dict:
             "DATABASE_URL": current.database_url,
         },
         capture_output=True,
-        text=True,
     )
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or proc.stdout).strip().splitlines()[-1])

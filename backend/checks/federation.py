@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 from pathlib import Path
+
+from app import childproc
 
 from .harness import Checker, Report
 
@@ -34,13 +35,12 @@ def _dsn() -> str:
 
 def _probe(env_extra: dict[str, str]) -> dict:
     """Run the days-of-stock probe in a fresh process with these settings."""
-    env = dict(os.environ, PYTHONIOENCODING="utf-8", **env_extra)
-    proc = subprocess.run(
+    env = childproc.inherit_env(**env_extra)
+    proc = childproc.run(
         [sys.executable, "-m", "checks.b5probe"],
         cwd=str(BACKEND_ROOT),
         env=env,
         capture_output=True,
-        text=True,
     )
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or proc.stdout).strip().splitlines()[-1])
@@ -59,18 +59,16 @@ async def run() -> Report:
         )
         c.skip("silo half not measured")
     else:
-        proc = subprocess.run(
+        proc = childproc.run(
             [python, str(SILO_SCRIPT)],
             cwd=str(SILO_SCRIPT.parent),
-            env=dict(
-                os.environ,
+            # federation/ does not import `app`, so force_utf8_console never
+            # runs there: the child's UTF-8 comes entirely from this env.
+            env=childproc.inherit_env(
                 SWASTHSETU_DATABASE_URL=_dsn(),
-                PYTHONIOENCODING="utf-8",
-                PYTHONUTF8="1",
                 PYTHONPATH=str(SILO_SCRIPT.parent),
             ),
             capture_output=True,
-            text=True,
         )
         payload = None
         for line in (proc.stdout or "").splitlines():

@@ -20,6 +20,8 @@ these tests assert the source behaves, not that one caller remembered to.
 from __future__ import annotations
 
 import ast
+import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -140,6 +142,90 @@ def test_a_blocked_call_raises_rather_than_downgrading():
     but it is its own type, so a silent fallback can be told apart from a real
     model failure when reading a log."""
     assert issubclass(vision.LiveCallBlocked, vision.VisionError)
+
+
+# ================================================= child processes ===
+# The mirror of the encoding fix, and the one all three readers missed:
+# forcing UTF-8 on a child is only half the pair. Reading its output with the
+# parent's locale throws inside subprocess's reader thread, so run() returns
+# returncode 0 with stdout silently None — a check then reports the wrong
+# cause, which is worse than failing.
+
+
+def test_a_child_printing_hindi_is_read_back_intact():
+    from app import childproc
+
+    child = "import sys; sys.stdout.reconfigure(encoding='utf-8'); print({0!r})".format(HINDI)
+    result = childproc.run([sys.executable, "-c", child], capture_output=True)
+    assert result.returncode == 0
+    assert result.stdout is not None, "the reader thread died and run() hid it"
+    assert HINDI in result.stdout
+
+
+def test_the_naive_call_still_loses_the_output():
+    """The negative control. If this ever stops reproducing, the environment
+    changed and the test above has stopped proving anything."""
+    child = "import sys; sys.stdout.reconfigure(encoding='utf-8'); print({0!r})".format(HINDI)
+    result = subprocess.run(
+        [sys.executable, "-c", child], capture_output=True, text=True
+    )
+    assert result.returncode == 0
+    assert result.stdout is None or HINDI not in result.stdout
+
+
+def test_a_child_never_inherits_a_live_model_credential():
+    """In-process guards do not cross a process boundary, and a child re-reads
+    the repository .env — where LLM_MODE is live and the key is real."""
+    from app import childproc
+
+    env = childproc.inherit_env()
+    assert env["LLM_MODE"] == "mock"
+    for name in childproc.CREDENTIAL_VARS:
+        assert name not in env, name
+    assert env["PYTHONUTF8"] == "1"
+    assert env["PYTHONIOENCODING"] == "utf-8"
+
+
+def test_a_caller_that_builds_its_own_env_keeps_it():
+    """checks/platform.py hands over a nearly empty environment on purpose, to
+    prove the app starts with no configuration at all. The helper must add
+    UTF-8 and refill nothing else."""
+    from app import childproc
+
+    child = "import os, json; print(json.dumps(sorted(os.environ)))"
+    result = childproc.run(
+        [sys.executable, "-c", child],
+        env={"PATH": "", "SYSTEMROOT": os.environ.get("SYSTEMROOT", "")},
+        capture_output=True,
+    )
+    seen = set(json.loads(result.stdout))
+    assert "PYTHONUTF8" in seen
+    assert "DATABASE_URL" not in seen
+    assert "GEMINI_API_KEY" not in seen
+
+
+# ============================================ the guard reads transports ===
+
+
+def test_a_plain_client_is_blocked_because_it_reaches_the_network():
+    """"Not None" was never the question. A plain AsyncClient carries the
+    default transport and reaches Google exactly as if vision had built it —
+    which a shared-pool refactor would do without meaning to."""
+    import httpx
+
+    real = httpx.AsyncClient()
+    with pytest.raises(vision.LiveCallBlocked):
+        vision._guard_real_client(real, "ward photo")
+
+
+def test_an_asgi_transport_is_allowed():
+    """checks/ drives the real app in-process; that reaches no network."""
+    import httpx
+
+    from app.main import app as fastapi_app
+
+    stub = httpx.AsyncClient(transport=httpx.ASGITransport(app=fastapi_app))
+    vision._guard_real_client(stub, "briefing")
 
 
 # ------------------------------------------------------------ structural ---

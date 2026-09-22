@@ -181,14 +181,24 @@ def live_calls_blocked() -> bool:
     return _block_live_calls
 
 
-def _guard_real_client(client: httpx.AsyncClient | None, what: str) -> None:
-    """Refuse to build a real client while the guard is on.
+def _is_stubbed(client: httpx.AsyncClient | None) -> bool:
+    """Whether this client provably cannot reach the network.
 
-    `client is None` is precisely the condition under which this module would
-    open its own connection to Google. An injected client is somebody's test
-    double and is none of this guard's business.
+    Only a mock or in-process ASGI transport qualifies. "Not None" is not the
+    same question: a plain `httpx.AsyncClient()` carries the default transport
+    and reaches Google exactly as if this module had built it. Threading a
+    shared pooled client in for connection reuse is an ordinary refactor, and
+    it must not silently disarm the guard.
     """
-    if client is None and _block_live_calls:
+    if client is None:
+        return False
+    transport = getattr(client, "_transport", None)
+    return isinstance(transport, (httpx.MockTransport, httpx.ASGITransport))
+
+
+def _guard_real_client(client: httpx.AsyncClient | None, what: str) -> None:
+    """Refuse a call that could reach the network while the guard is on."""
+    if _block_live_calls and not _is_stubbed(client):
         raise LiveCallBlocked(
             "Refusing a live {0} call: this process blocked them "
             "(vision.block_live_calls). Automated runs must not spend the "

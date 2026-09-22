@@ -19,13 +19,21 @@ import argparse
 import asyncio
 import json
 import os
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from app import evaluation, groundtruth
+from app import childproc, evaluation, groundtruth, vision
+from app.config import settings as _settings
+
+# A third automated entry point, alongside pytest and `python -m checks`. It is
+# neither, so neither of their guards loads — and it imports `app`, which reads
+# the repository .env, where LLM_MODE is live and the key is real. Arm the same
+# block here: producing the numbers quoted in the deck must not cost a model
+# request.
+_settings.llm_mode = "mock"
+vision.block_live_calls(True)
 from app.db import SessionLocal, engine
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
@@ -56,19 +64,15 @@ def run_federation_eval() -> tuple[dict[str, Any] | None, str | None]:
         or os.environ.get("DATABASE_URL")
         or settings.database_url
     )
-    env = dict(
-        os.environ,
+    env = childproc.inherit_env(
         SWASTHSETU_DATABASE_URL=dsn.replace("postgresql+asyncpg://", "postgresql://"),
-        PYTHONIOENCODING="utf-8",
-        PYTHONUTF8="1",
         PYTHONPATH=str(FEDERATION_SCRIPT.parent),
     )
-    proc = subprocess.run(
+    proc = childproc.run(
         [python, str(FEDERATION_SCRIPT), "--out", str(FEDERATION_JSON)],
         cwd=str(FEDERATION_SCRIPT.parent),
         env=env,
         capture_output=True,
-        text=True,
     )
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()
