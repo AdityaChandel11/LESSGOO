@@ -52,7 +52,7 @@ never runs inside the web service, so a bad training run degrades to the burn-ra
 taking the site down.
 
 **3 · A transfer is proposed, and a human approves it.** An OR-Tools min-cost-flow solver matches
-surplus to deficit over real road distances, never proposing to take a donor below its own safety
+surplus to deficit over road distances, never proposing to take a donor below its own safety
 stock. **Nothing auto-executes.** Controlled substances are excluded from the solver entirely and
 routed to a manual queue.
 
@@ -76,11 +76,21 @@ registered coordinates. A report only reaches `verified` if both halves pass —
 re-uploaded fails on the code, and a photograph taken elsewhere fails on the geofence.
 
 That is genuine multimodal reasoning turning an unstructured image into a verifiable database row,
-not OCR for its own sake. It runs live in production (`LLM_MODE=live`, `gemini-3.6-flash`).
+not OCR for its own sake. It runs live in production (`LLM_MODE=live`). Vision uses
+`gemini-3.1-flash-lite` and the plain-language briefings use `gemini-3.5-flash-lite` — two
+different models on purpose, because the free tier counts requests per day *per model*, so a
+day of ward photographs cannot exhaust the briefings or the reverse.
 
-**Google Maps** does two separate jobs: real road distances from the Routes API feed the
-redistribution solver's cost function, because straight-line distance is a poor proxy on rural road
-networks; and geofence verification checks where a check-in or photograph actually happened.
+**Google Maps** does two separate jobs when `GOOGLE_MAPS_SERVER_KEY` is set: road distances from
+the Routes API feed the redistribution solver's cost function, because straight-line distance is a
+poor proxy on rural road networks; and geofence verification checks where a check-in or
+photograph actually happened.
+
+The public demo runs **without** a Maps key, on the tested `MAPS_MODE=osm` fallback: a haversine
+distance multiplied by 1.3 to approximate a road route. Every screen that shows one of those
+distances says "straight-line estimate" next to it and draws the route as a dashed line, because a
+check that did not run must never be displayed as one that passed. That is the same rule the
+geofence, the rotating code and the bill reader all follow.
 
 ---
 
@@ -157,7 +167,7 @@ shows the measured bytes, every tensor shape and a SHA-256 of the weights.
 | Frontend | React 19, Vite 6, TypeScript, Tailwind v4, Leaflet directly |
 | Federation | Flower 1.37 deployment engine, PyTorch `DemandLSTM` |
 | Optimiser | OR-Tools `SimpleMinCostFlow`, greedy fallback |
-| AI | Gemini `gemini-3.6-flash` behind `LLM_MODE` |
+| AI | Gemini `gemini-3.1-flash-lite` (vision) and `gemini-3.5-flash-lite` (briefings) behind `LLM_MODE` |
 
 **Every external service has a zero-credential fallback, and both paths stay tested.**
 `LLM_MODE`, `MAPS_MODE` and `COMMS_MODE` each default to a mode that needs no API key, so the
