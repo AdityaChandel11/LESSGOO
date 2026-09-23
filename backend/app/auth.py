@@ -66,10 +66,16 @@ class Principal:
     state_silo: str | None
     district: str | None
     facility_id: str | None
+    # Read only on the server, to scope /me/attendance to the reader's own
+    # rows. Never serialised to the client — UserOut carries a boolean.
+    staff_ref: str | None
 
     @classmethod
     def from_user(cls, u: User) -> "Principal":
-        return cls(u.id, u.email, u.name, u.role, u.state_silo, u.district, u.facility_id)
+        return cls(
+            u.id, u.email, u.name, u.role, u.state_silo, u.district,
+            u.facility_id, u.staff_ref,
+        )
 
 
 # ------------------------------------------------------- permission rules ---
@@ -298,6 +304,10 @@ class UserOut(BaseModel):
     state_silo: str | None
     district: str | None
     facility_id: str | None
+    # Whether this account is linked to an attendance record, so the app can
+    # decide whether to offer the tab. The pseudonymous reference itself stays
+    # on the server: the client has no use for it and nothing to do with it.
+    has_staff_record: bool = False
 
 
 class SessionOut(BaseModel):
@@ -307,8 +317,9 @@ class SessionOut(BaseModel):
 
 
 def _session_out(p: Principal) -> SessionOut:
+    fields = {k: v for k, v in p.__dict__.items() if k != "staff_ref"}
     return SessionOut(
-        user=UserOut(**p.__dict__),
+        user=UserOut(**fields, has_staff_record=p.staff_ref is not None),
         demo_mode=settings.demo_mode,
         environment=settings.environment,
     )

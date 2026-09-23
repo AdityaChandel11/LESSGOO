@@ -264,61 +264,164 @@ def simulate_facility(
     return readings, snapshots, beds
 
 
+ATTENDANCE_DAYS = 30
+IST_OFFSET = timedelta(hours=5, minutes=30)
+# Sent at an unpredictable moment inside a shift, roughly this often. Not every
+# day: a ping a worker can set their watch by is a ping they can arrange to be
+# somewhere for, which defeats the whole point of it being random.
+PING_CHANCE = 0.45
+
+
 def build_checkins(
     facilities: list[dict], rng: random.Random, gaming: set[str]
-) -> list[tuple]:
-    """Shift check-ins with the provenance of each location — spec 26.1.
+) -> tuple[list[tuple], list[tuple]]:
+    """Daily shift check-ins and their random re-verification pings.
 
-    Channels are mixed deliberately: most facilities check in from a phone with
+    Two row-sets, built together because the second depends on the first: a
+    ping is only ever sent to somebody who checked in, since there is no shift
+    to re-verify otherwise.
+
+    Channels are mixed deliberately. Most facilities check in from a phone with
     GPS, some over a USSD gateway that carries only a cell tower, and some by
     IVR, which carries no location at all. A facility reporting entirely
-    through a channel that cannot be geofenced is not doing anything wrong —
+    through a channel that cannot be geofenced is not doing anything wrong --
     but it is a facility whose attendance nobody can verify, and the trust
     score has to be able to see that.
+
+    Absences are generated per person per day, not as one ratio applied to a
+    facility, because that is what makes a pattern legible on the worker's own
+    screen: a scatter of missed days reads as leave, a run of five reads as a
+    posting elsewhere, and the app says it cannot tell which.
     """
-    rows: list[tuple] = []
+    checkins: list[tuple] = []
+    pings: list[tuple] = []
     now = datetime.now(timezone.utc)
+
     for fac in facilities:
         roster = 8 if fac["type"] == "CHC" else 4
-        present_ratio = rng.choice([0.9, 0.9, 1.0, 0.75, 0.4])
         # How this facility reports: most have a smartphone somewhere on site.
-        channel = rng.choices(
+        source, method = rng.choices(
             [("form", "gps"), ("ussd", "simulated"), ("ivr", "none")],
             weights=[0.7, 0.18, 0.12],
         )[0]
+        # A gaming facility marks everyone present every single day. Its
+        # footfall is the signal that disagrees, which is the whole point of
+        # 12.6 -- and, on the worker's own screen, its pings go unanswered.
+        is_gaming = fac["id"] in gaming
 
-        for s in range(roster):
-            ref = f"{fac['id']}-S{s:02d}"
-            for days_ago in (rng.randint(3, 20), 0):
-                if days_ago == 0 and rng.random() >= present_ratio:
+        for staff in range(roster):
+            ref = f"{fac['id']}-S{staff:02d}"
+            # Each person keeps their own attendance rate across the month, so
+            # one centre can hold a reliable worker and a patchy one at once.
+            attends = 1.0 if is_gaming else rng.choice([0.93, 0.9, 0.87, 0.82, 0.7])
+            # One stretch of consecutive absence somewhere in the window for
+            # about a third of people -- leave, training, or a posting.
+            block_start = (
+                rng.randint(2, ATTENDANCE_DAYS - 6)
+                if not is_gaming and rng.random() < 0.45
+                else None
+            )
+            block_len = rng.randint(2, 5) if block_start is not None else 0
+
+            for days_ago in range(ATTENDANCE_DAYS):
+                if (
+                    block_start is not None
+                    and block_start <= days_ago < block_start + block_len
+                ):
                     continue
-                at = now - (
-                    timedelta(hours=rng.randint(1, 10))
-                    if days_ago == 0
-                    else timedelta(days=days_ago)
+                if rng.random() >= attends:
+                    continue
+
+                shift = rng.choice(["morning", "morning", "evening", "night"])
+                # Rostered in Indian Standard Time, stored in UTC. Writing 08:00
+                # straight into a UTC column would put a shift labelled "morning"
+                # on screen at half past one in the afternoon, which is how a
+                # timestamp bug gets read as a data problem by the one person
+                # who knows what time they actually started.
+                start_hour = {"morning": 8, "evening": 14, "night": 20}[shift]
+                day = now - timedelta(days=days_ago)
+                checked_in = day.replace(
+                    hour=0, minute=0, second=0, microsecond=0
+                ) + timedelta(hours=start_hour, minutes=rng.randint(0, 40)) - IST_OFFSET
+                # A night shift nominally starting at 20:00 has not started
+                # yet if it is two in the afternoon. Seeding it anyway would
+                # put a check-in in the future, where it outranks every real
+                # report made this morning.
+                if checked_in > now:
+                    continue
+                # Today's shift may still be running; every earlier one closed.
+                checked_out = (
+                    None
+                    if days_ago == 0 and rng.random() < 0.5
+                    else checked_in + timedelta(hours=8, minutes=rng.randint(-25, 40))
                 )
-                source, method = channel
-                lat = lng = km = ok = None
-                cell = None
-                if method == "gps":
-                    # Within the compound, give or take a GPS fix.
-                    lat = fac["lat"] + rng.gauss(0, 0.0006)
-                    lng = fac["lng"] + rng.gauss(0, 0.0006)
-                    km = round(math.dist((fac["lat"], fac["lng"]), (lat, lng)) * 111.0, 3)
-                    ok = km <= 0.25
-                elif method == "simulated":
-                    cell = f"404-{rng.randint(10, 99)}-{rng.randint(1000, 9999)}"
-                    km = round(rng.uniform(0.2, 2.6), 3)
-                    ok = km <= 2.0
-                # A gaming facility marks everyone present; its footfall is the
-                # signal that disagrees, which is the whole point of 12.6.
-                footfall = 0 if fac["id"] in gaming and rng.random() < 0.6 else rng.randint(8, 70)
-                rows.append((
-                    fac["id"], ref, at, None,
-                    rng.choice(["morning", "morning", "evening", "night"]),
+                _, _, km, ok, cell = _fix(fac, method, rng)
+                footfall = 0 if is_gaming and rng.random() < 0.6 else rng.randint(8, 70)
+                checkins.append((
+                    fac["id"], ref, checked_in, checked_out, shift,
                     source, cell, method, km, ok, footfall,
                 ))
-    return rows
+
+                if rng.random() >= PING_CHANCE:
+                    continue
+                # Somewhere inside the shift, never at its edges.
+                sent = checked_in + timedelta(
+                    minutes=rng.randint(70, 380), seconds=rng.randint(0, 59)
+                )
+                if sent > now:
+                    continue
+                channel = "sms" if method != "none" else "ivr"
+                pings.append(_ping(fac, ref, sent, channel, method, is_gaming, rng))
+
+    return checkins, pings
+
+
+def _fix(
+    fac: dict, method: str, rng: random.Random
+) -> tuple[float | None, float | None, float | None, bool | None, str | None]:
+    """The location a channel actually supplies, and whether it clears."""
+    if method == "gps":
+        # Within the compound, give or take a GPS fix.
+        lat = fac["lat"] + rng.gauss(0, 0.0006)
+        lng = fac["lng"] + rng.gauss(0, 0.0006)
+        km = round(math.dist((fac["lat"], fac["lng"]), (lat, lng)) * 111.0, 3)
+        return lat, lng, km, km <= 0.25, None
+    if method == "simulated":
+        cell = f"404-{rng.randint(10, 99)}-{rng.randint(1000, 9999)}"
+        km = round(rng.uniform(0.2, 2.6), 3)
+        return None, None, km, km <= 2.0, cell
+    # IVR carries the caller's number and nothing more. A check that could not
+    # run is never written as one that passed.
+    return None, None, None, None, None
+
+
+def _ping(
+    fac: dict,
+    ref: str,
+    sent: datetime,
+    channel: str,
+    method: str,
+    is_gaming: bool,
+    rng: random.Random,
+) -> tuple:
+    """One random re-verification, and the four things that can come of it."""
+    # A centre marking everyone present regardless is also a centre where the
+    # ping often finds nobody to answer it.
+    if rng.random() < (0.45 if is_gaming else 0.08):
+        return (fac["id"], ref, channel, sent, None, None, None, None, None, "no_reply")
+
+    replied = sent + timedelta(minutes=rng.randint(1, 22))
+    if method == "none":
+        # Answered, but over a channel that places nobody anywhere.
+        return (
+            fac["id"], ref, channel, sent, replied, "none", None, None, None,
+            "unlocatable",
+        )
+    _, _, km, ok, cell = _fix(fac, method, rng)
+    return (
+        fac["id"], ref, channel, sent, replied, method, cell, km, ok,
+        "confirmed" if ok else "out_of_range",
+    )
 
 
 def build_movements(
@@ -622,7 +725,8 @@ async def main() -> None:
             text(
                 "TRUNCATE facility_sku_state, stock_readings, bed_status, "
                 "medicine_movements, verification_codes, bed_reports, "
-                "facility_trust, staff_checkins, approvals, transfers, trust_flags, "
+                "facility_trust, staff_checkins, staff_verifications, approvals, "
+                "transfers, trust_flags, "
                 "outbreak_events, route_matrix_cache, outbound_messages, "
                 "impact_ledger, federation_rounds, events, facility_contacts, facilities, skus "
                 "RESTART IDENTITY CASCADE"
@@ -711,12 +815,19 @@ async def main() -> None:
                      "source", "footfall_same_day", "confidence"], batch_r)
         await _copy(conn, "bed_status",
                     ["facility_id", "beds_occupied", "recorded_at"], batch_b)
+        checkin_rows, ping_rows = build_checkins(facilities, rng, gaming)
         await _copy(
             conn, "staff_checkins",
             ["facility_id", "staff_ref", "checked_in_at", "checked_out_at", "shift",
              "source", "cell_id", "loc_method", "geofence_km", "geofence_ok",
              "footfall_same_period"],
-            build_checkins(facilities, rng, gaming),
+            checkin_rows,
+        )
+        await _copy(
+            conn, "staff_verifications",
+            ["facility_id", "staff_ref", "channel", "sent_at", "responded_at",
+             "loc_method", "cell_id", "geofence_km", "geofence_ok", "outcome"],
+            ping_rows,
         )
         code_rows, bed_report_rows = build_bed_reports(facilities, rng)
         await _copy(

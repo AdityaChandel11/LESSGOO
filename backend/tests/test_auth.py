@@ -22,7 +22,7 @@ from app.models import User
 
 
 def person(role, state=None, district=None, facility=None):
-    return Principal(1, "p@example.org", "P", role, state, district, facility)
+    return Principal(1, "p@example.org", "P", role, state, district, facility, None)
 
 
 ADMIN = person("admin")

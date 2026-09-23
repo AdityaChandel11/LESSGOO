@@ -23,14 +23,14 @@ anything, and it attaches to a facility and a pattern — never to a person.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import events
 from .beds import distance_km, geofence_radius_km
-from .models import Facility, StaffCheckin, StockReading
+from .models import Facility, StaffCheckin, StaffVerification, StockReading
 
 # A staff member seen at any point in this window counts towards the roster.
 # There is no establishment table to read: the roster is who actually works
@@ -237,4 +237,194 @@ async def recent(
                 .limit(limit)
             )
         ).scalars()
+    )
+
+
+# ------------------------------------------------- one person's own record ---
+# Everything above this line reports a facility. Everything below reports one
+# person to themselves, and to nobody else.
+#
+# Rule 8 (v3 1.8) says attendance flags attach to a facility and a pattern,
+# never a named individual. It is a rule about exposure: it exists so that a
+# district officer cannot open a console and read a named health worker's
+# movements. It was never a rule that a worker may not see their own record —
+# refusing them that would mean the one person with a right to the data is the
+# only one who cannot check it, and cannot correct it when it is wrong.
+#
+# So the boundary is enforced at the door: the endpoint reads `staff_ref` from
+# the signed-in account and from nowhere else. There is no parameter to pass
+# somebody else's, and the officer-facing `summarise()` above still returns
+# counts with no reference in them at all.
+
+# Long enough to show a month's pattern, short enough that the query stays
+# bounded — the database size guard forbids unbounded reads.
+SELF_WINDOW_DAYS = 30
+
+# The outside edge of one shift, used to decide which shift a re-verification
+# belongs to. Longer than a rostered eight hours, because a ping sent late in
+# a shift that started late is still that shift's.
+SHIFT_SPAN_HOURS = 14
+
+
+@dataclass(frozen=True)
+class VerificationPing:
+    sent_at: datetime
+    responded_at: datetime | None
+    channel: str
+    loc_method: str | None
+    cell_id: str | None
+    geofence_km: float | None
+    geofence_ok: bool | None
+    outcome: str
+
+
+@dataclass(frozen=True)
+class SelfDay:
+    """One calendar day of one person's own record."""
+
+    day: date
+    present: bool
+    checked_in_at: datetime | None
+    checked_out_at: datetime | None
+    shift: str | None
+    source: str | None
+    loc_method: str | None
+    cell_id: str | None
+    geofence_km: float | None
+    geofence_ok: bool | None
+    pings: list[VerificationPing]
+
+
+@dataclass(frozen=True)
+class SelfRecord:
+    facility_id: str
+    staff_ref: str
+    window_days: int
+    days_present: int
+    # Working days in the window with no check-in at all. Counted, not judged:
+    # leave, a posting elsewhere and a dead handset all land here, and the UI
+    # says so.
+    days_absent: int
+    pings_sent: int
+    pings_confirmed: int
+    pings_unanswered: int
+    days: list[SelfDay]
+
+
+async def own_record(
+    session: AsyncSession,
+    facility_id: str,
+    staff_ref: str,
+    *,
+    window_days: int = SELF_WINDOW_DAYS,
+    now: datetime | None = None,
+) -> SelfRecord:
+    """This person's own attendance and re-verification history.
+
+    Both queries are bounded by facility, staff reference and a date floor —
+    never an open scan (see the size guard in CLAUDE.md).
+    """
+    at = now or datetime.now(timezone.utc)
+    today = at.date()
+    floor = (at - timedelta(days=window_days - 1)).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+
+    checkins = list(
+        (
+            await session.execute(
+                select(StaffCheckin)
+                .where(
+                    StaffCheckin.facility_id == facility_id,
+                    StaffCheckin.staff_ref == staff_ref,
+                    StaffCheckin.checked_in_at >= floor,
+                )
+                .order_by(StaffCheckin.checked_in_at.asc())
+            )
+        ).scalars()
+    )
+    pings = list(
+        (
+            await session.execute(
+                select(StaffVerification)
+                .where(
+                    StaffVerification.facility_id == facility_id,
+                    StaffVerification.staff_ref == staff_ref,
+                    StaffVerification.sent_at >= floor,
+                )
+                .order_by(StaffVerification.sent_at.asc())
+            )
+        ).scalars()
+    )
+
+    # Keyed by date so a day with two check-ins keeps the first — the shift
+    # that started the day — rather than whichever row the query returned last.
+    by_day: dict[date, StaffCheckin] = {}
+    for row in checkins:
+        by_day.setdefault(row.checked_in_at.date(), row)
+
+    # A ping is filed under the day of the shift it follows, not the day on
+    # the clock when it was sent. A night shift starting at 20:00 is still
+    # that day's shift when its re-verification arrives at half past one, and
+    # a reader looking at Tuesday should find Tuesday night's ping on it.
+    pings_by_day: dict[date, list[StaffVerification]] = {}
+    starts = sorted((c.checked_in_at, c.checked_in_at.date()) for c in checkins)
+    for p in pings:
+        owner = p.sent_at.date()
+        for started, day_of in reversed(starts):
+            if started <= p.sent_at:
+                # Beyond this and it is not the same shift any more, whatever
+                # the clock says.
+                if p.sent_at - started <= timedelta(hours=SHIFT_SPAN_HOURS):
+                    owner = day_of
+                break
+        pings_by_day.setdefault(owner, []).append(p)
+
+    days: list[SelfDay] = []
+    for offset in range(window_days):
+        d = today - timedelta(days=window_days - 1 - offset)
+        row = by_day.get(d)
+        days.append(
+            SelfDay(
+                day=d,
+                present=row is not None,
+                checked_in_at=row.checked_in_at if row else None,
+                checked_out_at=row.checked_out_at if row else None,
+                shift=row.shift if row else None,
+                source=row.source if row else None,
+                loc_method=row.loc_method if row else None,
+                cell_id=row.cell_id if row else None,
+                geofence_km=row.geofence_km if row else None,
+                geofence_ok=row.geofence_ok if row else None,
+                pings=[
+                    VerificationPing(
+                        sent_at=p.sent_at,
+                        responded_at=p.responded_at,
+                        channel=p.channel,
+                        loc_method=p.loc_method,
+                        cell_id=p.cell_id,
+                        geofence_km=p.geofence_km,
+                        geofence_ok=p.geofence_ok,
+                        outcome=p.outcome,
+                    )
+                    for p in pings_by_day.get(d, [])
+                ],
+            )
+        )
+
+    # Newest first: the reader's own most recent shift is the thing they came
+    # to check, and it should not be thirty rows down.
+    days.reverse()
+    present_count = sum(1 for d in days if d.present)
+
+    return SelfRecord(
+        facility_id=facility_id,
+        staff_ref=staff_ref,
+        window_days=window_days,
+        days_present=present_count,
+        days_absent=window_days - present_count,
+        pings_sent=len(pings),
+        pings_confirmed=sum(1 for p in pings if p.outcome == "confirmed"),
+        pings_unanswered=sum(1 for p in pings if p.outcome == "no_reply"),
+        days=days,
     )

@@ -122,6 +122,12 @@ export interface User {
   state_silo: string | null;
   district: string | null;
   facility_id: string | null;
+  /**
+   * Whether this account is linked to an attendance record of its own. The
+   * pseudonymous reference behind it never leaves the server — there is
+   * nothing the browser could do with it, and one fewer place it can leak.
+   */
+  has_staff_record: boolean;
 }
 
 export interface Session {
@@ -363,6 +369,8 @@ export const api = {
     post<BedReport>(`/facilities/${encodeURIComponent(facilityId)}/bed-reports`, body),
   attendance: (facilityId: string) =>
     get<Attendance>(`/facilities/${encodeURIComponent(facilityId)}/attendance`),
+  /** This account's own attendance. No argument, by design — see SelfRecord. */
+  myAttendance: () => get<SelfRecord>("/me/attendance"),
   checkin: (facilityId: string, body: Record<string, unknown>) =>
     post<Checkin>(`/facilities/${encodeURIComponent(facilityId)}/checkins`, body),
   facilityTrust: (facilityId: string) =>
@@ -391,6 +399,55 @@ export interface Attendance {
   footfall_today: number | null;
   /** Set when staff are present and no patients were logged — worth a look, no more. */
   contradiction: string | null;
+}
+
+/**
+ * One person's own record — the only per-person attendance shape on this wire.
+ *
+ * It arrives from `/me/attendance`, which takes no parameter naming whose
+ * record to return: the server reads it off the session. So there is no call
+ * this client could make, by mistake or otherwise, that fetches somebody
+ * else's. The facility-level `Attendance` above stays the only view of other
+ * people and carries counts alone.
+ */
+export interface VerificationPing {
+  sent_at: string;
+  /** null when the window closed with nothing back. */
+  responded_at: string | null;
+  channel: "sms" | "ivr";
+  loc_method: string | null;
+  cell_id: string | null;
+  geofence_km: number | null;
+  geofence_ok: boolean | null;
+  outcome: "confirmed" | "out_of_range" | "unlocatable" | "no_reply";
+}
+
+export interface SelfDay {
+  /** ISO date. Every day in the window is present, including the empty ones. */
+  day: string;
+  present: boolean;
+  checked_in_at: string | null;
+  checked_out_at: string | null;
+  shift: string | null;
+  source: string | null;
+  loc_method: string | null;
+  cell_id: string | null;
+  geofence_km: number | null;
+  geofence_ok: boolean | null;
+  pings: VerificationPing[];
+}
+
+export interface SelfRecord {
+  facility_id: string;
+  facility_name: string;
+  window_days: number;
+  days_present: number;
+  days_absent: number;
+  pings_sent: number;
+  pings_confirmed: number;
+  pings_unanswered: number;
+  /** Newest first. */
+  days: SelfDay[];
 }
 
 export interface Checkin {

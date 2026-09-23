@@ -15,6 +15,11 @@
  * never to a person), and the closing line says so on screen, because a
  * guarantee nobody can read is a guarantee nobody believes.
  *
+ * The Attendance tab is the one exception, and it does not weaken this: it
+ * shows a person their own record and nobody else's, from an endpoint that
+ * takes no parameter naming whose record to return. This card is still the
+ * only place anyone sees anything about a colleague, and it is still counts.
+ *
  * Two things it refuses to round up. A geofence that could not run is never
  * displayed as one that passed — a phone call carries no location, so a centre
  * reporting by IVR gets told plainly that its attendance cannot be placed here.
@@ -122,7 +127,8 @@ export default function Team({
       )}
 
       <p className="mt-2 border-t border-line pt-2 text-[11px] leading-snug text-ink-3">
-        Counts only. Attendance is never shown, scored or exported per person.
+        Counts only. Nobody here is named, scored or exported per person — each
+        person's own record is on their own Attendance tab, visible to them alone.
       </p>
     </section>
   );

@@ -34,7 +34,7 @@ from app.auth import MIN_PASSWORD_LENGTH, hash_password
 from app.config import settings
 from app.db import SessionLocal
 from app.geo import STATE_BY_CODE
-from app.models import USER_ROLES, Facility, User
+from app.models import USER_ROLES, Facility, StaffCheckin, User
 
 
 def _read_password(confirm: bool = True) -> str:
@@ -80,6 +80,41 @@ async def _resolve_scope(
     return state, district, None
 
 
+async def _free_staff_ref(session, facility_id: str) -> str | None:
+    """An attendance record at this facility that no account has claimed.
+
+    The seed writes check-ins under refs of the form `<facility>-S00`, and a
+    facility account is only useful on the attendance screen if it points at
+    one of them. Claimed refs are skipped, so two accounts at one centre never
+    end up reading the same person's shifts.
+
+    Returns None when the facility has no attendance history at all. That is a
+    real state, not an error: the account still works, and the attendance tab
+    simply does not appear.
+    """
+    taken = set(
+        (
+            await session.execute(
+                select(User.staff_ref).where(
+                    User.facility_id == facility_id, User.staff_ref.is_not(None)
+                )
+            )
+        ).scalars()
+    )
+    refs = (
+        await session.execute(
+            select(StaffCheckin.staff_ref)
+            .where(
+                StaffCheckin.facility_id == facility_id,
+                StaffCheckin.staff_ref.is_not(None),
+            )
+            .distinct()
+            .order_by(StaffCheckin.staff_ref)
+        )
+    ).scalars()
+    return next((r for r in refs if r not in taken), None)
+
+
 async def upsert_user(
     *, email: str, name: str, role: str, password: str,
     state: str | None = None, district: str | None = None, facility: str | None = None,
@@ -99,6 +134,13 @@ async def upsert_user(
         user.state_silo = state
         user.district = district
         user.facility_id = facility
+        # Only a facility account gets an attendance record, and only if it
+        # does not already have one — re-running this must not silently move
+        # somebody onto a different person's shifts.
+        if facility and role == "facility_user" and not user.staff_ref:
+            user.staff_ref = await _free_staff_ref(session, facility)
+        elif not facility:
+            user.staff_ref = None
         user.password_hash = hash_password(password)
         user.is_active = True
         await session.commit()

@@ -16,6 +16,8 @@ export const L = {
   // Navigation
   medicines: ["Medicines", "दवाइयाँ"],
   orders: ["Orders", "ऑर्डर"],
+  beds: ["Beds", "बिस्तर"],
+  attendance: ["Attendance", "उपस्थिति"],
   signOut: ["Sign out", "साइन आउट"],
 
   // Stock position
@@ -40,6 +42,19 @@ export const L = {
   requestStock: ["Request stock", "स्टॉक माँगें"],
   confirmReceipt: ["Confirm receipt", "प्राप्ति की पुष्टि करें"],
   print: ["Print", "प्रिंट करें"],
+
+  // Your own record
+  yourAttendance: ["Your attendance", "आपकी उपस्थिति"],
+  dayByDay: ["Day by day", "दिन-प्रतिदिन"],
+  noCheckIn: ["No check-in recorded", "कोई उपस्थिति दर्ज नहीं"],
+  randomChecks: ["Random verification", "आकस्मिक जाँच"],
+  onlyYou: ["Only you can see this page.", "यह पृष्ठ केवल आप देख सकते हैं।"],
+
+  // Beds
+  bedsOccupied: ["Beds occupied", "भरे हुए बिस्तर"],
+  bedsFree: ["Beds free", "खाली बिस्तर"],
+  todaysCode: ["Today's ward code", "आज का वार्ड कोड"],
+  lastWardReport: ["Last ward report", "पिछली वार्ड रिपोर्ट"],
 } as const;
 
 export type LabelKey = keyof typeof L;

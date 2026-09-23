@@ -17,16 +17,29 @@ import { useEffect, useState } from "react";
 import BrandMark from "../Brand";
 import DataNotice from "../DataNotice";
 import { type FacilityDetail, type Session, api } from "../api";
+import Beds from "./Beds";
 import Medicines from "./Medicines";
+import MyAttendance from "./MyAttendance";
 import Orders from "./Orders";
-import { both } from "./labels";
+import { both, en } from "./labels";
 
-export type Tab = "medicines" | "orders";
+export type Tab = "medicines" | "orders" | "beds" | "attendance";
 
-const TABS: { id: Tab; label: string }[] = [
-  { id: "medicines", label: both("medicines") },
-  { id: "orders", label: both("orders") },
-];
+/**
+ * Four tabs is the ceiling at 360px, which is why the labels here drop to
+ * English alone while the two-language pair stays on each screen's own
+ * heading. Attendance is last and conditional: an account with no attendance
+ * record of its own does not get an empty tab explaining that it is empty.
+ */
+function tabsFor(hasStaffRecord: boolean): { id: Tab; label: string }[] {
+  const tabs: { id: Tab; label: string }[] = [
+    { id: "medicines", label: en("medicines") },
+    { id: "orders", label: en("orders") },
+    { id: "beds", label: en("beds") },
+  ];
+  if (hasStaffRecord) tabs.push({ id: "attendance", label: en("attendance") });
+  return tabs;
+}
 
 /**
  * A facility_user with no facility is a state the server refuses to create
@@ -60,6 +73,7 @@ export default function Workspace({
   onSignOut: () => void;
 }) {
   const facilityId = session.user.facility_id;
+  const tabs = tabsFor(session.user.has_staff_record);
   const [tab, setTab] = useState<Tab>("medicines");
   const [facility, setFacility] = useState<FacilityDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -110,7 +124,7 @@ export default function Workspace({
         </div>
 
         <div role="tablist" aria-label="Workspace view" className="flex gap-1 px-2">
-          {TABS.map((t) => {
+          {tabs.map((t) => {
             const active = tab === t.id;
             return (
               <button
@@ -118,7 +132,7 @@ export default function Workspace({
                 role="tab"
                 aria-selected={active}
                 onClick={() => setTab(t.id)}
-                className={`min-h-11 flex-1 border-b-2 px-3 text-[13px] font-medium ${
+                className={`min-h-11 flex-1 border-b-2 px-1.5 text-[12.5px] font-medium ${
                   active
                     ? "border-brand text-brand"
                     : "border-transparent text-ink-2"
@@ -156,6 +170,10 @@ export default function Workspace({
             onChanged={() => setRefreshKey((k) => k + 1)}
           />
         )}
+        {tab === "beds" && (
+          <Beds facilityId={facilityId} facility={facility} refreshKey={refreshKey} />
+        )}
+        {tab === "attendance" && <MyAttendance refreshKey={refreshKey} />}
       </main>
     </div>
   );

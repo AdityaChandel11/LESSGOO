@@ -25,6 +25,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     Text,
+    UniqueConstraint,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -51,6 +52,8 @@ CALL_OUTCOMES = (
 )
 VERIFICATION_STATES = ("verified", "unverified", "rejected")
 TRUST_BANDS = ("good", "watch", "audit")
+VERIFICATION_CHANNELS = ("sms", "ivr")
+VERIFICATION_OUTCOMES = ("confirmed", "out_of_range", "unlocatable", "no_reply")
 # What produced a location, recorded on every geofenced row so the UI can say
 # which check actually ran (spec 26.1).
 LOC_METHODS = ("gps", "cell_id", "none", "simulated")
@@ -97,6 +100,11 @@ class User(Base):
     state_silo: Mapped[str | None] = mapped_column(Text)
     district: Mapped[str | None] = mapped_column(Text)
     facility_id: Mapped[str | None] = mapped_column(Text)
+    # Links this account to its own rows in `staff_checkins` and
+    # `staff_verifications`, so a health worker can see their own attendance.
+    # Pseudonymous and one-way: it never renders, and nothing resolves a
+    # staff_ref back to a name.
+    staff_ref: Mapped[str | None] = mapped_column(Text)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -106,6 +114,7 @@ class User(Base):
     __table_args__ = (
         CheckConstraint(f"role IN {USER_ROLES}", name="ck_users_role"),
         CheckConstraint("email = lower(email)", name="ck_users_email_lower"),
+        UniqueConstraint("facility_id", "staff_ref", name="uq_users_facility_staff_ref"),
     )
 
 
@@ -381,6 +390,60 @@ class StaffCheckin(Base):
     geofence_km: Mapped[float | None] = mapped_column()
     geofence_ok: Mapped[bool | None] = mapped_column(Boolean)
     footfall_same_period: Mapped[int | None] = mapped_column(Integer)
+
+
+class StaffVerification(Base):
+    """A random mid-shift re-verification — data-trust-layer.md 1.
+
+    A check-in records that a shift was started. It cannot record that anyone
+    stayed. These are the unpredictable follow-ups: an SMS or an IVR callback
+    at a moment nobody can plan around, and what came back.
+
+    `sent_at` and `responded_at` are separate because an unanswered ping is
+    itself a finding, and must never be indistinguishable from one that was
+    never sent. `outcome` says which of the four things happened and is
+    constrained in the database, not just here:
+
+        confirmed      answered, and the location cleared the geofence
+        out_of_range   answered, but from outside it
+        unlocatable    answered over a channel that carries no location
+        no_reply       the window closed with nothing back
+
+    No phone number, no message body, no recording, no transcript. The API
+    returns these rows only to the account whose own `staff_ref` they carry.
+    """
+
+    __tablename__ = "staff_verifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    facility_id: Mapped[str] = mapped_column(
+        ForeignKey("facilities.id", ondelete="CASCADE"), nullable=False
+    )
+    staff_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    channel: Mapped[str] = mapped_column(Text, nullable=False)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    loc_method: Mapped[str | None] = mapped_column(Text)
+    cell_id: Mapped[str | None] = mapped_column(Text)
+    geofence_km: Mapped[float | None] = mapped_column(Float)
+    geofence_ok: Mapped[bool | None] = mapped_column(Boolean)
+    outcome: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            f"channel IN {VERIFICATION_CHANNELS}",
+            name="ck_staff_verifications_channel",
+        ),
+        CheckConstraint(
+            f"outcome IN {VERIFICATION_OUTCOMES}",
+            name="ck_staff_verifications_outcome",
+        ),
+        CheckConstraint(
+            "(outcome = 'no_reply') = (responded_at IS NULL)",
+            name="ck_staff_verifications_reply",
+        ),
+        Index("ix_staff_verifications_ref_sent", "staff_ref", "sent_at"),
+    )
 
 
 class FacilityTrust(Base):

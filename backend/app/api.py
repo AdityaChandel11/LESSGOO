@@ -1848,6 +1848,81 @@ async def facility_attendance(
     return AttendanceOut(**asdict(await attendance.summarise(session, facility_id)))
 
 
+# ---------------------------------------------------- one's own record ---
+# The only endpoint in this file that returns a per-person attendance history,
+# and it returns exactly one person's: the reader's.
+#
+# The scoping is structural, not a check that could be forgotten. There is no
+# `staff_ref` path parameter, no query parameter and no request body — the
+# reference comes off the signed-in Principal and from nowhere else, so there
+# is no value an attacker can vary to reach somebody else's rows. An officer
+# calling this gets their own record or nothing; the facility-level endpoint
+# above is still the only view of other people, and it returns counts with no
+# reference in them at all (rule 8, v3 1.8).
+
+
+class VerificationPingOut(BaseModel):
+    sent_at: datetime
+    responded_at: datetime | None
+    channel: str
+    loc_method: str | None
+    cell_id: str | None
+    geofence_km: float | None
+    geofence_ok: bool | None
+    outcome: str
+
+
+class SelfDayOut(BaseModel):
+    day: date
+    present: bool
+    checked_in_at: datetime | None
+    checked_out_at: datetime | None
+    shift: str | None
+    source: str | None
+    loc_method: str | None
+    cell_id: str | None
+    geofence_km: float | None
+    geofence_ok: bool | None
+    pings: list[VerificationPingOut]
+
+
+class SelfRecordOut(BaseModel):
+    facility_id: str
+    facility_name: str
+    window_days: int
+    days_present: int
+    days_absent: int
+    pings_sent: int
+    pings_confirmed: int
+    pings_unanswered: int
+    days: list[SelfDayOut]
+
+
+@router.get("/me/attendance", response_model=SelfRecordOut, tags=["attendance"])
+async def my_attendance(
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> SelfRecordOut:
+    """This account's own attendance record. Never anybody else's."""
+    if not user.facility_id or not user.staff_ref:
+        raise HTTPException(
+            status_code=404,
+            detail="This account is not linked to an attendance record",
+        )
+    facility = await session.get(Facility, user.facility_id)
+    if facility is None:
+        raise HTTPException(status_code=404, detail="Unknown facility")
+
+    record = await attendance.own_record(
+        session, user.facility_id, user.staff_ref
+    )
+    payload = asdict(record)
+    # The pseudonymous reference is how the rows were found; it is not part of
+    # the answer, and the reader already knows who they are.
+    payload.pop("staff_ref", None)
+    return SelfRecordOut(facility_name=facility.name, **payload)
+
+
 @router.post(
     "/facilities/{facility_id}/checkins", response_model=CheckinOut, tags=["attendance"]
 )
