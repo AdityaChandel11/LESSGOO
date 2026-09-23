@@ -30,7 +30,16 @@ from .config import settings
 log = logging.getLogger(__name__)
 
 API_ROOT = "https://generativelanguage.googleapis.com/v1beta/models"
+# Text and images are not the same wait. A one-sentence briefing comes back in
+# about two seconds; a photograph of a delivery note measured 10.1s on a warm
+# local connection on 2026-09-23, and a free-tier container that has just woken
+# up is slower than that. One flat 30s timeout meant every bill photo failed
+# with "the model could not be reached" while the briefing beside it worked,
+# which reads as a broken feature rather than a tight deadline. Connect stays
+# short either way, so a genuine outage still fails fast instead of hanging.
 REQUEST_TIMEOUT_S = 30.0
+VISION_TIMEOUT_S = 60.0
+CONNECT_TIMEOUT_S = 10.0
 MAX_IMAGE_BYTES = 6 * 1024 * 1024
 
 # A shared flash model answers 503 when its capacity is tight, and 429 when the
@@ -243,6 +252,7 @@ async def _post_generate(
     *,
     client: httpx.AsyncClient | None,
     what: str,
+    timeout_s: float = REQUEST_TIMEOUT_S,
 ) -> dict:
     """One generateContent call, with the guard, the retries and the honest
     error messages that every caller in this module needs.
@@ -256,7 +266,9 @@ async def _post_generate(
     """
     _guard_real_client(client, what)
     own = client is None
-    http = client or httpx.AsyncClient(timeout=REQUEST_TIMEOUT_S)
+    http = client or httpx.AsyncClient(
+        timeout=httpx.Timeout(timeout_s, connect=CONNECT_TIMEOUT_S)
+    )
     try:
         for attempt in range(len(RETRY_BACKOFF_S) + 1):
             try:
@@ -332,7 +344,9 @@ async def _call_gemini(
             "temperature": 0.0,
         },
     }
-    data = await _post_generate(model, body, client=client, what="ward photo")
+    data = await _post_generate(
+        model, body, client=client, what="ward photo", timeout_s=VISION_TIMEOUT_S
+    )
     try:
         text = data["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError, TypeError) as exc:
@@ -635,7 +649,9 @@ async def read_stock_photo(
             "temperature": 0.0,
         },
     }
-    data = await _post_generate(model, body, client=client, what="stock photo")
+    data = await _post_generate(
+        model, body, client=client, what="stock photo", timeout_s=VISION_TIMEOUT_S
+    )
     try:
         text = data["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError, TypeError) as exc:

@@ -363,7 +363,22 @@ export function FederationPanel({
                   >
                     <span className="text-[11.5px] text-ink-2">Round {r.round_no}</span>
                     <span className="font-mono text-[11.5px] tabular-nums text-ink-2">
-                      MAE {mae(r.global_val_mae)} · {bytes(r.bytes_transmitted)} · {r.raw_rows_transmitted} rows
+                      MAE {mae(r.global_val_mae)} · {bytes(r.bytes_transmitted)}
+                      {" · "}
+                      {/* The zero is the result this whole subsystem exists to
+                          produce, so it is written as a finding rather than as
+                          an empty column. "0 rows", set in the same grey as the
+                          numbers beside it, reads like a figure nobody filled
+                          in; the assertion is that no facility row left its
+                          state, and it was checked before the round was
+                          written. */}
+                      {r.raw_rows_transmitted === 0 ? (
+                        <span className="text-ok">no rows left the state</span>
+                      ) : (
+                        <span className="text-crit">
+                          {r.raw_rows_transmitted.toLocaleString("en-IN")} rows left the state
+                        </span>
+                      )}
                     </span>
                   </div>
                 ))}

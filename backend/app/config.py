@@ -145,7 +145,16 @@ class Settings(BaseSettings):
     # Not 2.5: the API now answers 404 for gemini-2.5-flash and -flash-lite with
     # "no longer available to new users", naming 3.6-flash as the replacement.
     # Verified against a real key on 2026-09-20.
-    gemini_model: str = "gemini-3.6-flash"
+    #
+    # And not 3.6-flash either, despite that advice. Measured against a real
+    # key on 2026-09-23, sending the same delivery note to each: 3.6-flash
+    # never answered (ReadTimeout at 158s, twice), 3.5-flash answered
+    # correctly in 38.7s, and this one answered correctly in 10.1s. A model
+    # that takes longer than a minute is a model that has already failed in
+    # front of whoever is watching, so the fast one that works wins. Still a
+    # different id from the briefing model below, which is the point of
+    # having two.
+    gemini_model: str = "gemini-3.1-flash-lite"
     # A *different* model from the vision one, on purpose. The free tier limits
     # GenerateRequestsPerDayPerProjectPerModel to 20 — per model — so putting
     # the briefing on its own id means a day of ward photos cannot exhaust the
