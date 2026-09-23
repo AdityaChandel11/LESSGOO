@@ -405,6 +405,12 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
   const pickFacility = useCallback(
     (p: Pin) => {
       setSelected(p);
+      // Choosing a facility is a request to look at that facility, so it
+      // returns to the tab whose subject is one — otherwise the selection
+      // would be made and nothing would change on screen. Field reports is
+      // exempt: that tab reads the selection deliberately, so the simulator
+      // stays pointed at whichever centre the map is on.
+      setMode((m) => (m === "field" ? m : "stock"));
       fly(p.lat, p.lng, Math.max(view.zoom, FACILITY_ZOOM + 2));
     },
     [fly, view.zoom],
@@ -623,7 +629,12 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
             // decision to look at the channels, and it still reads whichever
             // centre is selected on the map so the two stay in step.
             <FieldSimulator facilityId={selected ? selected.id : null} />
-          ) : selected ? (
+          ) : selected && mode === "stock" ? (
+            // Gated on the tab, not just on `selected`. Without the mode
+            // check this branch shadows every panel below it, so once a
+            // facility was picked on the map, Redistribution, Data trust,
+            // Movements and Federation all kept rendering this same drawer
+            // and looked like tabs that would not load.
             <FacilityPanel
               id={selected.id}
               sku={sku}
