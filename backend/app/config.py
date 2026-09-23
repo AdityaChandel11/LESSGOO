@@ -181,7 +181,16 @@ class Settings(BaseSettings):
     # the domain and API restrictions are what protect it.
     google_maps_browser_key: str = ""
     twilio_account_sid: str = ""
+    # The auth token is the account's master credential AND the key Twilio
+    # signs inbound webhooks with, so it is always required in live mode even
+    # when an API key is used for sending.
     twilio_auth_token: str = ""
+    # An API key pair is the credential Twilio recommends for sending: it is
+    # scoped, revocable on its own, and rotating it does not invalidate the
+    # webhook signatures the auth token verifies. Optional — sending falls
+    # back to the account SID and auth token when no key is configured.
+    twilio_api_key_sid: str = ""
+    twilio_api_key_secret: str = ""
     twilio_sms_number: str = ""
     twilio_whatsapp_number: str = ""
     twilio_voice_number: str = ""
@@ -317,6 +326,49 @@ class Settings(BaseSettings):
         return self.is_production if self.cookie_secure is None else self.cookie_secure
 
     @property
+    def comms_credential_problems(self) -> list[str]:
+        """What is missing before COMMS_MODE=live can do anything real.
+
+        Returned rather than raised so the same list serves the production
+        start-up guard and the /api/comms/status endpoint, which tells a
+        reader on screen exactly which credential is absent instead of
+        letting the first send fail with a 401 nobody sees.
+        """
+        if self.comms_mode != "live":
+            return []
+        missing: list[str] = []
+        if not self.twilio_account_sid:
+            missing.append("TWILIO_ACCOUNT_SID is required when COMMS_MODE=live")
+        if not self.twilio_auth_token:
+            missing.append(
+                "TWILIO_AUTH_TOKEN is required when COMMS_MODE=live: it is what "
+                "inbound webhook signatures are verified against"
+            )
+        if not (self.twilio_sms_number or self.twilio_whatsapp_number):
+            missing.append(
+                "TWILIO_SMS_NUMBER or TWILIO_WHATSAPP_NUMBER is required when "
+                "COMMS_MODE=live"
+            )
+        # A half-configured key pair would silently fall back to the auth
+        # token, which is not what anyone setting one of them intended.
+        if bool(self.twilio_api_key_sid) != bool(self.twilio_api_key_secret):
+            missing.append(
+                "TWILIO_API_KEY_SID and TWILIO_API_KEY_SECRET must be set together"
+            )
+        return missing
+
+    @property
+    def twilio_send_auth(self) -> tuple[str, str]:
+        """The credential pair used to authenticate a send.
+
+        The API key when one is configured, the account credentials otherwise.
+        Twilio accepts either as HTTP basic auth on the same endpoint.
+        """
+        if self.twilio_api_key_sid and self.twilio_api_key_secret:
+            return self.twilio_api_key_sid, self.twilio_api_key_secret
+        return self.twilio_account_sid, self.twilio_auth_token
+
+    @property
     def uses_external_services(self) -> bool:
         return (
             self.llm_mode == "live"
@@ -345,6 +397,7 @@ class Settings(BaseSettings):
             )
         if "postgres:postgres@" in self.database_url:
             problems.append("DATABASE_URL is still using the development credentials")
+        problems.extend(self.comms_credential_problems)
         if problems:
             raise ValueError("Refusing to start in production:\n  - " + "\n  - ".join(problems))
         return self

@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import pytest
 
-from app import vision
+from app import comms, vision
 from app.config import settings
 
 
@@ -42,6 +42,16 @@ from app.config import settings
 settings.llm_mode = "mock"
 settings.gemini_api_key = ""
 vision.block_live_calls(True)
+
+# The same three layers for Twilio, added when the live send landed. A message
+# costs real money and can reach a real handset, so a test that sends one is a
+# worse accident than a test that spends a model request.
+settings.comms_mode = "simulator"
+settings.twilio_account_sid = ""
+settings.twilio_auth_token = ""
+settings.twilio_api_key_sid = ""
+settings.twilio_api_key_secret = ""
+comms.block_live_calls(True)
 
 
 @pytest.fixture(autouse=True, scope="session")
@@ -56,3 +66,4 @@ def no_live_model_calls():
         yield
     finally:
         vision.block_live_calls(False)
+        comms.block_live_calls(False)

@@ -46,6 +46,17 @@ CREDENTIAL_OWNERS: dict[str, set[str]] = {
     # Twilio. Validation is implemented there by hand rather than through
     # the SDK, so it can be unit-tested with a known token and no account.
     "twilio_auth_token": {"comms.py"},
+    # The API key pair signs outbound sends only. It is read through
+    # `settings.twilio_send_auth` so that the choice between key and account
+    # credential lives in one place, and comms.py stays the only module that
+    # touches either.
+    "twilio_api_key_sid": {"comms.py"},
+    "twilio_api_key_secret": {"comms.py"},
+    "twilio_send_auth": {"comms.py"},
+    # Credential-shaped by name only: it returns the NAMES of missing
+    # environment variables and never a value, which is exactly what a status
+    # panel needs to tell a reader why live mode is not sending.
+    "comms_credential_problems": {"comms.py", "api.py"},
     "bhashini_api_key": set(),
 }
 

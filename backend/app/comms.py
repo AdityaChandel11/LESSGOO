@@ -69,7 +69,11 @@ class Sent:
     body: str
     provider_sid: str | None
     status: str
-    simulated: bool
+    simulated: bool = False
+    # Why a send failed, in the provider's own words. Carried so the screen can
+    # show "Twilio 21608: unverified number" rather than a bare "failed", which
+    # is the difference between a fixable demo and a mysterious one.
+    error: str | None = None
 
 
 def signature_payload(url: str, params: dict[str, str]) -> bytes:
@@ -177,15 +181,125 @@ async def send(
         )
         return Sent(channel, to_ref, body, None, "simulated", simulated=True)
 
-    # Live sending is deliberately not implemented yet: it needs credentials
-    # that Stage C is being built without, and a half-written live path is
-    # worse than an honest absence. When it lands it belongs here and nowhere
-    # else, so that test_api_boundary keeps holding.
-    raise CommsError(
-        "COMMS_MODE=live is not wired yet. Set COMMS_MODE=simulator, or "
-        "implement the Twilio send in app/comms.py — the only module allowed "
-        "to hold Twilio credentials."
+    problems = settings.comms_credential_problems
+    if problems:
+        # Refused before the request rather than after a 401, so the log row
+        # says which credential is absent instead of "authentication failed".
+        row = await record_outbound(
+            session, channel=channel, to_ref=to_ref, body=body,
+            provider_sid=None, status="failed",
+        )
+        return Sent(channel, to_ref, body, None, "failed", error="; ".join(problems))
+
+    try:
+        sid, status = await _twilio_send(channel=channel, to_ref=to_ref, body=body)
+    except CommsError as exc:
+        # Logged and returned, never raised past a caller that is acknowledging
+        # an inbound message: the reading has already been committed, and
+        # losing the acknowledgement must not undo it.
+        log.warning("twilio send failed on %s: %s", channel, exc)
+        await record_outbound(
+            session, channel=channel, to_ref=to_ref, body=body,
+            provider_sid=None, status="failed",
+        )
+        return Sent(channel, to_ref, body, None, "failed", error=str(exc))
+
+    await record_outbound(
+        session, channel=channel, to_ref=to_ref, body=body,
+        provider_sid=sid, status=status,
     )
+    return Sent(channel, to_ref, body, sid, status, simulated=False)
+
+
+# Twilio's REST API, called directly with httpx rather than through the SDK.
+# The SDK is synchronous, would need a thread pool inside an async request, and
+# brings a dependency chain this project has already been burned by. The
+# endpoint is one POST with form encoding; the signature verification above is
+# likewise hand-rolled, for the same reason and with the same tests behind it.
+TWILIO_API_ROOT = "https://api.twilio.com/2010-04-01"
+# Long enough for Twilio's median, short enough that an inbound webhook still
+# answers inside the provider's own 15-second limit while sending its reply.
+SEND_TIMEOUT_SECONDS = 8.0
+
+# Set by tests, and by conftest, so no test run can spend a real message.
+_blocked = False
+
+
+def block_live_calls(blocked: bool) -> None:
+    """Make a live send raise rather than reach Twilio. Tests only."""
+    global _blocked
+    _blocked = blocked
+
+
+def _from_number(channel: str) -> str:
+    """The number this channel sends from, in the form Twilio expects.
+
+    WhatsApp is the same REST endpoint with a `whatsapp:` prefix on both
+    parties — a different address space on one API, not a different API.
+    """
+    if channel == "whatsapp":
+        if not settings.twilio_whatsapp_number:
+            raise CommsError("TWILIO_WHATSAPP_NUMBER is not set")
+        return _whatsapp(settings.twilio_whatsapp_number)
+    if not settings.twilio_sms_number:
+        raise CommsError("TWILIO_SMS_NUMBER is not set")
+    return settings.twilio_sms_number
+
+
+def _whatsapp(number: str) -> str:
+    return number if number.startswith("whatsapp:") else "whatsapp:" + number
+
+
+async def _twilio_send(*, channel: str, to_ref: str, body: str) -> tuple[str, str]:
+    """POST one message and return (provider sid, provider status).
+
+    `to_ref` arrives masked or hashed everywhere this log is read, but the
+    number actually dialled has to be the real one, so the caller passes an
+    E.164 number here and the masked form is what gets written to the log.
+    """
+    if _blocked:
+        raise CommsError("Live comms are blocked in this process (test guard)")
+    # IVR is a call, not a message: the voice path places calls through the
+    # Calls resource with TwiML, which is a different shape and is not what
+    # this function is for. Sending it here would produce a Twilio 400 that
+    # reads like a credential problem.
+    if channel == "ivr":
+        raise CommsError(
+            "IVR is placed as a call, not sent as a message — use the voice "
+            "route rather than comms.send()"
+        )
+
+    import httpx
+
+    account = settings.twilio_account_sid
+    to = _whatsapp(to_ref) if channel == "whatsapp" else to_ref
+    payload = {"To": to, "From": _from_number(channel), "Body": body}
+
+    try:
+        async with httpx.AsyncClient(timeout=SEND_TIMEOUT_SECONDS) as client:
+            reply = await client.post(
+                "{0}/Accounts/{1}/Messages.json".format(TWILIO_API_ROOT, account),
+                data=payload,
+                auth=settings.twilio_send_auth,
+            )
+    except httpx.HTTPError as exc:
+        raise CommsError("Could not reach Twilio: {0}".format(exc)) from exc
+
+    if reply.status_code >= 400:
+        # Twilio returns a numbered error and a documentation link. Both are
+        # carried through, because "21608" and "63007" are the two failures a
+        # demo actually hits and each has a different fix.
+        try:
+            detail = reply.json()
+            message = "Twilio {0}: {1}".format(
+                detail.get("code", reply.status_code), detail.get("message", "")
+            )
+        except ValueError:
+            message = "Twilio HTTP {0}".format(reply.status_code)
+        raise CommsError(message)
+
+    sent = reply.json()
+    return sent.get("sid", ""), sent.get("status", "queued")
 
 
 # ================================================================ calls ===
