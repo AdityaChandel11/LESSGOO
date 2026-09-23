@@ -72,7 +72,11 @@ export function FieldSimulator({ facilityId }: { facilityId: string | null }) {
       .handsets(facilityId)
       .then((h) => {
         setHandsets(h);
-        setSender(h[0]?.number ?? "");
+        // Default to one the registry will actually answer. Offering a
+        // handset that cannot resolve is how "not registered to a facility"
+        // reads as a bug in the grammar rather than a gap in the registry.
+        const usable = h.find((x) => x.registered) ?? h[0];
+        setSender(usable?.number ?? "");
       })
       .catch(() => setHandsets([]));
   }, [facilityId]);
@@ -120,10 +124,23 @@ export function FieldSimulator({ facilityId }: { facilityId: string | null }) {
         {handsets.map((h) => (
           <option key={h.number} value={h.number}>
             {h.masked} · {h.role}
+            {h.registered ? "" : " · not in the registry"}
           </option>
         ))}
         <option value="9000000000">9000000000 · unregistered number</option>
       </select>
+
+      {handsets.length > 0 && !handsets.some((h) => h.registered) && (
+        <p className="mt-2 rounded-md border border-risk/30 bg-risk/5 px-3 py-2 text-[11.5px] leading-snug text-ink-2">
+          <span className="font-medium text-ink">
+            None of this centre's handsets is in the registry.
+          </span>{" "}
+          The registry stores a salted hash of each number, so contacts seeded
+          under a different <span className="font-mono">PHONE_HASH_SALT</span>{" "}
+          cannot be recognised. Every message below will be refused at the
+          identify stage until they are re-hashed.
+        </p>
+      )}
 
       <div role="tablist" aria-label="Channel" className="mt-3 flex gap-1">
         {CHANNELS.map((ch) => (

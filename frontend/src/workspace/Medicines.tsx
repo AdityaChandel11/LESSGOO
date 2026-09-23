@@ -25,6 +25,7 @@ import {
   formatDays,
 } from "../api";
 import Briefing from "./Briefing";
+import StockPhoto from "./StockPhoto";
 import FindSupply from "./FindSupply";
 import { both } from "./labels";
 
@@ -200,6 +201,35 @@ export default function Medicines({
   return (
     <>
       <Briefing facilityId={facilityId} computed={view.briefing} />
+
+      <StockPhoto facilityId={facilityId} onCommitted={onChanged} />
+
+      {/* The channels this centre's staff can use when they are not at a
+          screen. Nine in ten sub-centres have no reliable data connection, so
+          the phone paths are not a fallback — for many facilities they are the
+          only path. Said here, on the pharmacist's own screen, because that is
+          where somebody wonders how a colleague in the field reports. */}
+      <section
+        aria-label="Reporting without this app"
+        className="mb-3 rounded-lg border border-line bg-panel px-3.5 py-3"
+      >
+        <h2 className="text-[11px] font-semibold uppercase tracking-[0.09em] text-ink-3">
+          Away from a screen
+        </h2>
+        <p className="mt-1 text-[12.5px] leading-relaxed text-ink-2">
+          Staff can report stock, check in, and confirm a delivery by{" "}
+          <span className="font-medium text-ink">SMS, WhatsApp or a phone call</span> —
+          no app and no data connection. A text reading{" "}
+          <span className="font-mono text-[11.5px] text-ink">ORS 60</span> updates
+          this same shelf.
+        </p>
+        <a
+          href="/?view=field"
+          className="mt-2 inline-block min-h-11 text-[12.5px] font-medium text-brand underline"
+        >
+          See the field simulator
+        </a>
+      </section>
 
       <section
         aria-label="Data confidence"

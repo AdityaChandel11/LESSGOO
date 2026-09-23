@@ -14,6 +14,7 @@ import base64
 import binascii
 from uuid import uuid4
 from dataclasses import asdict
+from decimal import Decimal
 from datetime import date, datetime, timezone
 
 import logging
@@ -906,6 +907,179 @@ async def facility_briefing(
         body=written.en if lang == "en" else written.hi,
         lang=lang, source="gemini", ai=True, model=written.model,
         generated_at=datetime.now(timezone.utc), cached=False,
+    )
+
+
+class StockPhotoLineOut(BaseModel):
+    """One line the model read, and what became of it."""
+
+    medicine: str
+    quantity: float
+    sku_code: str | None
+    sku_name: str | None
+    match_score: int
+    committed: bool
+    # Why a line was not committed, when it was not. Shown to the pharmacist,
+    # because "three of four lines went in" without saying which is worse than
+    # refusing the lot.
+    reason: str | None = None
+
+
+class StockPhotoOut(BaseModel):
+    facility_id: str
+    model: str
+    # False whenever the deterministic mock produced this. The screen labels a
+    # real extraction with the model's name and this one as a mock; computed
+    # output is never presented as the model's work.
+    ai: bool
+    confidence: float
+    document_date: date | None
+    notes: str | None
+    lines: list[StockPhotoLineOut]
+    committed: int
+    verification: str
+
+
+class StockPhotoIn(BaseModel):
+    image_base64: str
+    image_mime: str = "image/jpeg"
+
+
+@router.post(
+    "/facilities/{facility_id}/stock-photo",
+    response_model=StockPhotoOut,
+    tags=["workspace"],
+)
+async def submit_stock_photo(
+    facility_id: str,
+    payload: StockPhotoIn,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> StockPhotoOut:
+    """Read a medicine bill or delivery slip and update the shelf from it.
+
+    The consumption half of spec 26.3, and the same bargain the ward photo
+    makes: the model turns an unstructured photograph into rows that the
+    reorder threshold, the forecast and the redistribution solver all read
+    next. That is exactly why it refuses more than it accepts.
+
+    A line is committed only when its medicine resolves to a SKU this facility
+    actually stocks, above the same fuzzy-match floor the SMS grammar uses. A
+    line that does not resolve is returned unchanged, uncommitted, with the
+    reason — inventing a quantity on a stock ledger is worse than reading
+    nothing, because nothing downstream can tell an invented row from a real
+    one.
+
+    The photograph itself is never stored. Only what was read from it is.
+    """
+    facility = await _facility_in_scope(session, facility_id, user)
+    if not can_submit_reading(
+        user,
+        facility_id=facility.id,
+        facility_state=facility.state_silo,
+        facility_district=facility.district,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="You can only report stock for facilities you are responsible for",
+        )
+
+    try:
+        image = base64.b64decode(payload.image_base64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Unreadable image data") from exc
+
+    try:
+        extraction = await vision.read_stock_photo(image, payload.image_mime)
+    except vision.VisionError as exc:
+        # Nothing is written and nothing is guessed. The pharmacist is told
+        # what happened and can re-take the photo or type the figures instead.
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    lookup = await ingest.sku_lookup(session)
+    names = {
+        s.code: s.name for s in (await session.execute(select(Sku))).scalars().all()
+    }
+    now = datetime.now(timezone.utc)
+    rows: list[StockPhotoLineOut] = []
+    committed = 0
+
+    for line in extraction.lines:
+        code, score = ingest.resolve_sku(line.medicine, lookup)
+        if code is None:
+            rows.append(
+                StockPhotoLineOut(
+                    medicine=line.medicine, quantity=line.quantity,
+                    sku_code=None, sku_name=None, match_score=score,
+                    committed=False,
+                    reason="No medicine in this centre's list matches that name.",
+                )
+            )
+            continue
+
+        session.add(
+            StockReading(
+                facility_id=facility.id,
+                sku_code=code,
+                qty_on_hand=Decimal(str(line.quantity)),
+                reported_at=now,
+                source="photo",
+                reporter_ref=f"user:{user.id}",
+                # The model's own confidence, carried through rather than
+                # replaced: a blurred bill must read as a doubtful row, and the
+                # trust layer widens this facility's warning thresholds for it.
+                confidence=Decimal(str(round(extraction.confidence, 2))),
+                raw_payload={
+                    "read_by": extraction.model,
+                    "as_printed": line.medicine,
+                    "match_score": score,
+                    "document_date": (
+                        extraction.document_date.isoformat()
+                        if extraction.document_date
+                        else None
+                    ),
+                },
+            )
+        )
+        committed += 1
+        rows.append(
+            StockPhotoLineOut(
+                medicine=line.medicine, quantity=line.quantity,
+                sku_code=code, sku_name=names.get(code, code),
+                match_score=score, committed=True,
+            )
+        )
+
+    if committed:
+        await session.commit()
+        await services.refresh_facility_state(session, facility.id)
+        await session.commit()
+        await events.record(
+            session,
+            events.READING_COMMITTED,
+            {
+                "facility_id": facility.id,
+                "facility_name": facility.name,
+                "source": "photo",
+                "lines": committed,
+                "read_by": extraction.model,
+            },
+            state_silo=facility.state_silo,
+        )
+
+    live = extraction.model != "mock"
+    return StockPhotoOut(
+        facility_id=facility.id,
+        model=extraction.model,
+        ai=live,
+        confidence=extraction.confidence,
+        document_date=extraction.document_date,
+        notes=extraction.notes,
+        lines=rows,
+        committed=committed,
+        # The same three words the bed report uses, and the same rule: a check
+        # that could not run is never reported as one that passed.
+        verification="verified" if live and committed else "unverified",
     )
 
 
@@ -1963,6 +2137,13 @@ class HandsetOut(BaseModel):
     role: str
     number: str
     masked: str
+    # Whether the registry actually answers this number. It is derived from
+    # the facility id, but the registry stores a *salted hash* of it — so a
+    # registry seeded under a different PHONE_HASH_SALT does not recognise
+    # numbers this endpoint would happily hand out. Reporting it here means
+    # the simulator cannot offer a handset that will fail, and a salt mismatch
+    # shows up immediately instead of as "not registered to a facility".
+    registered: bool
 
 
 @router.get(
@@ -1988,14 +2169,19 @@ async def facility_handsets(
     facility = await session.get(Facility, facility_id)
     if facility is None:
         raise HTTPException(status_code=404, detail="Facility not found")
-    return [
-        HandsetOut(
-            role=role,
-            number=ingest.demo_number(facility_id, role),
-            masked=ingest.mask_phone(ingest.demo_number(facility_id, role)),
+    out: list[HandsetOut] = []
+    for role in ("reporter", "supervisor"):
+        number = ingest.demo_number(facility_id, role)
+        contact = await ingest.identify(session, number)
+        out.append(
+            HandsetOut(
+                role=role,
+                number=number,
+                masked=ingest.mask_phone(number),
+                registered=contact is not None and contact.facility_id == facility_id,
+            )
         )
-        for role in ("reporter", "supervisor")
-    ]
+    return out
 
 
 @router.post("/ingest/simulate", response_model=SimulateOut, tags=["ingest"])

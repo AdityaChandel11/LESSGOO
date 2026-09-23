@@ -21,6 +21,7 @@ import base64
 import json
 import logging
 from dataclasses import dataclass
+from datetime import date
 
 import httpx
 
@@ -236,6 +237,74 @@ def _first_json_object(text: str) -> dict:
     return parsed
 
 
+async def _post_generate(
+    model: str,
+    body: dict,
+    *,
+    client: httpx.AsyncClient | None,
+    what: str,
+) -> dict:
+    """One generateContent call, with the guard, the retries and the honest
+    error messages that every caller in this module needs.
+
+    Extracted because there were two copies of this loop and a third was about
+    to be written. Three copies of a retry policy is three places for a quota
+    message to drift out of step with what actually happened.
+
+    `what` names the caller in the guard's refusal, so a blocked call says
+    which feature tried to make it.
+    """
+    _guard_real_client(client, what)
+    own = client is None
+    http = client or httpx.AsyncClient(timeout=REQUEST_TIMEOUT_S)
+    try:
+        for attempt in range(len(RETRY_BACKOFF_S) + 1):
+            try:
+                response = await http.post(
+                    f"{API_ROOT}/{model}:generateContent",
+                    # The key travels in a header, never in the URL where it
+                    # would be logged.
+                    headers={"x-goog-api-key": settings.gemini_api_key},
+                    json=body,
+                )
+                response.raise_for_status()
+                return response.json()
+            except httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status in RETRY_STATUSES and attempt < len(RETRY_BACKOFF_S):
+                    log.warning(
+                        "Gemini answered HTTP %s for %s; retrying in %.1fs",
+                        status, what, RETRY_BACKOFF_S[attempt],
+                    )
+                    await asyncio.sleep(RETRY_BACKOFF_S[attempt])
+                    continue
+                log.error(
+                    "Gemini refused the %s request (HTTP %s)%s",
+                    what, status, _quota_note(exc.response),
+                )
+                # Three different things, and sending somebody to re-take a
+                # photograph is only right for one of them. A spent quota does
+                # not recover in a moment, and neither says anything about the
+                # photo itself.
+                if status == 429:
+                    message = (
+                        "the model's request quota for today is used up — "
+                        "nothing was read"
+                    )
+                elif status in RETRY_STATUSES:
+                    message = "the model is busy right now — try again in a moment"
+                else:
+                    message = "the model rejected the request"
+                raise VisionError(message) from exc
+            except httpx.HTTPError as exc:
+                log.warning("Gemini call failed for %s: %s", what, type(exc).__name__)
+                raise VisionError("the model could not be reached") from exc
+    finally:
+        if own:
+            await http.aclose()
+    raise VisionError("the model could not be reached")
+
+
 async def _call_gemini(
     image: bytes, mime_type: str, *, client: httpx.AsyncClient | None = None
 ) -> BedExtraction:
@@ -263,55 +332,7 @@ async def _call_gemini(
             "temperature": 0.0,
         },
     }
-    _guard_real_client(client, "ward photo")
-    own = client is None
-    http = client or httpx.AsyncClient(timeout=REQUEST_TIMEOUT_S)
-    try:
-        for attempt in range(len(RETRY_BACKOFF_S) + 1):
-            try:
-                response = await http.post(
-                    f"{API_ROOT}/{model}:generateContent",
-                    # The key travels in a header, never in the URL where it
-                    # would be logged.
-                    headers={"x-goog-api-key": settings.gemini_api_key},
-                    json=body,
-                )
-                response.raise_for_status()
-                data = response.json()
-                break
-            except httpx.HTTPStatusError as exc:
-                status = exc.response.status_code
-                if status in RETRY_STATUSES and attempt < len(RETRY_BACKOFF_S):
-                    log.warning(
-                        "Gemini answered HTTP %s; retrying in %.1fs",
-                        status, RETRY_BACKOFF_S[attempt],
-                    )
-                    await asyncio.sleep(RETRY_BACKOFF_S[attempt])
-                    continue
-                log.error(
-                    "Gemini refused the request (HTTP %s)%s",
-                    status, _quota_note(exc.response),
-                )
-                # Three different things, and sending somebody to re-take a
-                # photograph is only right for one of them. A spent quota does
-                # not recover in a moment, and neither says anything about the
-                # photo itself.
-                if status == 429:
-                    message = (
-                        "The model's request quota for today is used up — the photo was not read"
-                    )
-                elif status in RETRY_STATUSES:
-                    message = "The model is busy right now — send the photo again in a moment"
-                else:
-                    message = "The photo service rejected the request"
-                raise VisionError(message) from exc
-            except httpx.HTTPError as exc:
-                log.warning("Gemini call failed: %s", type(exc).__name__)
-                raise VisionError("The photo service could not be reached") from exc
-    finally:
-        if own:
-            await http.aclose()
-
+    data = await _post_generate(model, body, client=client, what="ward photo")
     try:
         text = data["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError, TypeError) as exc:
@@ -445,48 +466,178 @@ async def write_briefing(
     }
 
     _guard_real_client(client, "briefing")
-    own = client is None
-    http = client or httpx.AsyncClient(timeout=REQUEST_TIMEOUT_S)
-    try:
-        for attempt in range(len(RETRY_BACKOFF_S) + 1):
-            try:
-                response = await http.post(
-                    f"{API_ROOT}/{model}:generateContent",
-                    headers={"x-goog-api-key": settings.gemini_api_key},
-                    json=body,
-                )
-                response.raise_for_status()
-                data = response.json()
-                break
-            except httpx.HTTPStatusError as exc:
-                status = exc.response.status_code
-                if status in RETRY_STATUSES and attempt < len(RETRY_BACKOFF_S):
-                    log.warning(
-                        "Briefing model answered HTTP %s; retrying in %.1fs",
-                        status, RETRY_BACKOFF_S[attempt],
-                    )
-                    await asyncio.sleep(RETRY_BACKOFF_S[attempt])
-                    continue
-                log.error(
-                    "Briefing model refused the request (HTTP %s)%s",
-                    status, _quota_note(exc.response),
-                )
-                # Deliberately not distinguished for the caller: every one of
-                # these ends in the same place, which is the deterministic line.
-                raise VisionError(
-                    "today's quota is used up"
-                    if status == 429
-                    else f"the briefing model refused the request (HTTP {status})"
-                ) from exc
-            except httpx.HTTPError as exc:
-                log.warning("Briefing call failed: %s", type(exc).__name__)
-                raise VisionError("the briefing model could not be reached") from exc
-    finally:
-        if own:
-            await http.aclose()
-
+    data = await _post_generate(model, body, client=client, what="briefing")
     try:
         text = data["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError, TypeError) as exc:
         raise VisionError("the model returned no readable answer") from exc
     return parse_briefing(_first_json_object(text), model=model)
+
+
+# ========================================================== stock photo ===
+# The consumption side of spec 26.3, and the second job this file does with a
+# camera. A ward photo answers "how many beds are occupied"; a bill or delivery
+# slip answers "what arrived, and how much of it".
+#
+# Same model as the ward photo, deliberately: it is the same kind of question
+# — read what is visibly written and report only that — and putting it on the
+# same model keeps one quota to reason about rather than two.
+#
+# What it must never do is guess. A bill that is creased, dark or half out of
+# frame produces a low confidence and a short line list, and the endpoint above
+# it refuses to commit anything it could not resolve to a known medicine. An
+# invented quantity on a stock ledger is worse than no reading at all: the
+# reading is what the reorder threshold, the forecast and the redistribution
+# solver all read next.
+
+STOCK_PROMPT = (
+    "This is a photograph of a medicine bill, delivery slip or stock register "
+    "page from an Indian primary health centre.\n"
+    "Report only what is legibly written:\n"
+    "- lines: one entry per medicine, each with `medicine` exactly as printed "
+    "and `quantity` as a number\n"
+    "- document_date: the date printed on the document in YYYY-MM-DD form, or "
+    "null if none is legible\n"
+    "- confidence: 0.0 to 1.0, how sure you are of the lines as a whole\n"
+    "- notes: anything that made it hard to read, in one short sentence\n"
+    "Do not infer a medicine that is not written. Do not convert units. Do not "
+    "total anything. If a quantity is unreadable, omit that line entirely."
+)
+
+STOCK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "lines": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "medicine": {"type": "string"},
+                    "quantity": {"type": "number"},
+                },
+                "required": ["medicine", "quantity"],
+            },
+        },
+        "document_date": {"type": "string", "nullable": True},
+        "confidence": {"type": "number"},
+        "notes": {"type": "string", "nullable": True},
+    },
+    "required": ["lines", "confidence"],
+}
+
+
+@dataclass(frozen=True)
+class StockLine:
+    medicine: str
+    quantity: float
+
+
+@dataclass(frozen=True)
+class StockExtraction:
+    lines: list[StockLine]
+    document_date: date | None
+    confidence: float
+    notes: str | None
+    model: str
+
+
+def parse_stock_extraction(payload: dict, *, model: str) -> StockExtraction:
+    """Validate the model's answer before any of it reaches a ledger.
+
+    Everything questionable is dropped rather than repaired. A line with no
+    medicine name, a quantity that is not a number, or a negative quantity is
+    not a line — and a document date that does not parse is simply absent,
+    because a wrong date on a stock reading silently corrupts the burn rate
+    that every forecast is computed from.
+    """
+    lines: list[StockLine] = []
+    for raw in payload.get("lines") or []:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("medicine") or "").strip()
+        try:
+            qty = float(raw.get("quantity"))
+        except (TypeError, ValueError):
+            continue
+        if not name or qty < 0:
+            continue
+        lines.append(StockLine(medicine=name, quantity=qty))
+
+    parsed_date: date | None = None
+    raw_date = payload.get("document_date")
+    if isinstance(raw_date, str) and raw_date.strip():
+        try:
+            parsed_date = date.fromisoformat(raw_date.strip()[:10])
+        except ValueError:
+            parsed_date = None
+
+    try:
+        confidence = float(payload.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    confidence = min(max(confidence, 0.0), 1.0)
+
+    notes = payload.get("notes")
+    return StockExtraction(
+        lines=lines,
+        document_date=parsed_date,
+        confidence=confidence,
+        notes=str(notes).strip() if notes else None,
+        model=model,
+    )
+
+
+def _mock_stock_extraction() -> StockExtraction:
+    """What the mock path returns. Labelled `model="mock"` on every row it
+    produces, and never presented as real inference."""
+    return StockExtraction(
+        lines=[StockLine(medicine="ORS", quantity=250.0)],
+        document_date=None,
+        confidence=settings.channel_confidence_floor,
+        notes="mock extraction — no model was called",
+        model="mock",
+    )
+
+
+async def read_stock_photo(
+    image: bytes | None,
+    mime_type: str = "image/jpeg",
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> StockExtraction:
+    """Read a medicine bill or delivery slip into structured lines."""
+    if settings.llm_mode != "live" or not settings.gemini_api_key:
+        return _mock_stock_extraction()
+    if not image:
+        raise VisionError("A photograph is required")
+    if len(image) > MAX_IMAGE_BYTES:
+        raise VisionError("Photo is too large; ask for a smaller one")
+
+    model = settings.gemini_model
+    body = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": STOCK_PROMPT},
+                    {
+                        "inline_data": {
+                            "mime_type": mime_type,
+                            "data": base64.b64encode(image).decode(),
+                        }
+                    },
+                ]
+            }
+        ],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": STOCK_SCHEMA,
+            # Quantities, not prose. No room for the model to round or reason.
+            "temperature": 0.0,
+        },
+    }
+    data = await _post_generate(model, body, client=client, what="stock photo")
+    try:
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise VisionError("The model returned no readable answer") from exc
+    return parse_stock_extraction(_first_json_object(text), model=model)

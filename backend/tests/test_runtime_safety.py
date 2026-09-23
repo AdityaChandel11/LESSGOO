@@ -24,6 +24,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -271,3 +272,80 @@ def _run(coro):
     import asyncio
 
     return asyncio.run(coro)
+
+
+# ================================================ bill / slip extraction ===
+# The consumption side of spec 26.3. Every rule here is about refusing rather
+# than repairing: an invented quantity on a stock ledger is worse than no
+# reading at all, because the reorder threshold, the forecast and the
+# redistribution solver all read it next and none of them can tell an invented
+# row from a real one.
+
+
+def test_clean_lines_are_read_through():
+    out = vision.parse_stock_extraction(
+        {"lines": [{"medicine": "ORS", "quantity": 250},
+                   {"medicine": "Paracetamol 500mg", "quantity": 1200}],
+         "confidence": 0.86, "document_date": "2026-09-20"},
+        model="test",
+    )
+    assert [l.medicine for l in out.lines] == ["ORS", "Paracetamol 500mg"]
+    assert out.lines[0].quantity == 250.0
+    assert out.document_date == datetime(2026, 9, 20).date()
+    assert out.confidence == 0.86
+
+
+@pytest.mark.parametrize("bad", [
+    {"medicine": "", "quantity": 10},
+    {"medicine": "ORS"},
+    {"medicine": "ORS", "quantity": "many"},
+    {"medicine": "ORS", "quantity": None},
+    {"medicine": "ORS", "quantity": -5},
+    "not-even-an-object",
+])
+def test_an_unusable_line_is_dropped_not_repaired(bad):
+    out = vision.parse_stock_extraction({"lines": [bad], "confidence": 0.9}, model="t")
+    assert out.lines == []
+
+
+def test_a_bad_date_becomes_no_date_rather_than_a_wrong_one():
+    """A wrong date on a stock reading silently corrupts the burn rate that
+    every forecast is computed from."""
+    for raw in ("20-09-2026", "yesterday", "", "2026-13-45"):
+        out = vision.parse_stock_extraction(
+            {"lines": [], "confidence": 0.5, "document_date": raw}, model="t"
+        )
+        assert out.document_date is None
+
+
+def test_confidence_is_clamped_to_a_probability():
+    for raw, expected in ((7, 1.0), (-2, 0.0), (None, 0.0), ("high", 0.0)):
+        out = vision.parse_stock_extraction(
+            {"lines": [], "confidence": raw}, model="t"
+        )
+        assert out.confidence == expected
+
+
+def test_a_zero_quantity_is_a_real_reading():
+    """Zero is the most important number on a stock ledger — it is what a
+    stock-out looks like — and must not be dropped as falsy."""
+    out = vision.parse_stock_extraction(
+        {"lines": [{"medicine": "ORS", "quantity": 0}], "confidence": 0.9}, model="t"
+    )
+    assert len(out.lines) == 1
+    assert out.lines[0].quantity == 0.0
+
+
+def test_the_mock_path_labels_itself_and_never_calls_out():
+    out = _run(vision.read_stock_photo(b"pretend-jpeg"))
+    assert out.model == "mock"
+    assert out.notes and "mock" in out.notes.lower()
+
+
+def test_a_live_stock_read_with_no_client_is_refused(monkeypatch):
+    """The same guard the ward photo has: an automated run cannot spend quota
+    through this new door either."""
+    monkeypatch.setattr(vision.settings, "llm_mode", "live")
+    monkeypatch.setattr(vision.settings, "gemini_api_key", "not-a-real-key")
+    with pytest.raises(vision.LiveCallBlocked):
+        _run(vision.read_stock_photo(b"pretend-jpeg"))

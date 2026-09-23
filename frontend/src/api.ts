@@ -318,6 +318,14 @@ export const api = {
     get<WorkspaceView>(`/facilities/${encodeURIComponent(facilityId)}/workspace`),
   supply: (facilityId: string, sku: string) =>
     get<Supply>(`/facilities/${encodeURIComponent(facilityId)}/supply`, { sku }),
+  stockPhoto: (
+    facilityId: string,
+    body: { image_base64: string; image_mime: string },
+  ) =>
+    post<StockPhotoResult>(
+      `/facilities/${encodeURIComponent(facilityId)}/stock-photo`,
+      body,
+    ),
   briefing: (facilityId: string, lang: "en" | "hi") =>
     post<Briefing>(
       `/facilities/${encodeURIComponent(facilityId)}/briefing?lang=${lang}`,
@@ -571,12 +579,39 @@ export interface StockRequest {
   assumptions: Record<string, number>;
 }
 
+export interface StockPhotoLine {
+  medicine: string;
+  quantity: number;
+  sku_code: string | null;
+  sku_name: string | null;
+  match_score: number;
+  committed: boolean;
+  reason: string | null;
+}
+
+export interface StockPhotoResult {
+  facility_id: string;
+  model: string;
+  /** False when the deterministic mock produced this. The screen must not put
+   *  a model's name or a confidence figure on output nothing computed. */
+  ai: boolean;
+  confidence: number;
+  document_date: string | null;
+  notes: string | null;
+  lines: StockPhotoLine[];
+  committed: number;
+  verification: string;
+}
+
 /* ------------------------------------------------------ field simulator --- */
 
 export interface Handset {
   role: string;
   number: string;
   masked: string;
+  /** Whether the registry answers this number. False means the contacts were
+   *  hashed under a different PHONE_HASH_SALT than the service is using. */
+  registered: boolean;
 }
 
 export interface SimulatedReading {

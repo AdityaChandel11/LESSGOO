@@ -23,11 +23,15 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import os
 import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from app.config import DEV_JWT_SECRET, DEV_PHONE_SALT  # noqa: E402
 
 BACKEND_ROOT = Path(__file__).resolve().parent.parent
 VARIABLE = "RENDER_DATABASE_URL_EXTERNAL"
@@ -48,6 +52,106 @@ COUNT_TABLES = (
     "federation_rounds",
     "users",
 )
+
+
+# Secrets whose value changes what a remote command *writes*, mapped to the
+# development default that must never reach the deployed database.
+#
+# This list exists because of a real failure. `facility_contacts` stores a
+# salted hash of each handset and nothing else. A reseed was run against the
+# deployed database from a laptop whose .env carried no PHONE_HASH_SALT, so
+# every row was hashed with DEV_PHONE_SALT while the deployed service hashes
+# with its own — and every registered handset became unreachable. Nothing
+# failed. The seed reported success, the table filled, and the ingestion spine
+# simply answered "this number is not registered to a facility" forever after.
+#
+# So a command that could write now has to say which salt it means. Inheriting
+# whatever happens to be in the local environment is exactly how a value that
+# belongs to one environment ends up baked into another's data.
+REMOTE_CRITICAL_SECRETS: dict[str, str] = {
+    "PHONE_HASH_SALT": DEV_PHONE_SALT,
+    "JWT_SECRET": DEV_JWT_SECRET,
+}
+
+
+def fingerprint(value: str) -> str:
+    """Eight characters identifying a secret without disclosing it, so the
+    operator can compare what is about to be used against what the deployed
+    service uses."""
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:8]
+
+
+def require_remote_secrets() -> dict[str, str]:
+    """Refuse to run a writing command without the deployed environment's own
+    secrets, and refuse just as loudly if they are still the dev defaults.
+
+    Returns the values, so the caller can pass exactly these and nothing else.
+    """
+    missing: list[str] = []
+    dev: list[str] = []
+    resolved: dict[str, str] = {}
+    source: dict[str, str] = {}
+
+    for name, dev_default in REMOTE_CRITICAL_SECRETS.items():
+        # The shell first: setting it inline for one command is the most
+        # deliberate way to say "this value is for this run". .env second,
+        # because that is where an operator reasonably keeps it — but which
+        # of the two answered is printed, so provenance is never a guess.
+        value = os.environ.get(name) or _dotenv_values().get(name, "")
+        if not value:
+            missing.append(name)
+        elif value == dev_default:
+            dev.append(name)
+        else:
+            resolved[name] = value
+            source[name] = 'shell' if os.environ.get(name) else '.env'
+
+    if missing or dev:
+        print()
+        print("  REFUSING: this command can write to the deployed database, and")
+        print("  the secrets that decide what it writes are not safe to guess.")
+        for name in missing:
+            print("    {0:<18} not set".format(name))
+        for name in dev:
+            print("    {0:<18} still the development default".format(name))
+        print()
+        print("  Set each to the value the deployed service uses — Render")
+        print("  dashboard, Environment — and run this again. They are never")
+        print("  printed; only an eight-character fingerprint is, so the value")
+        print("  here can be compared with the value there.")
+        raise SystemExit(
+            "missing or development-default secrets: {0}".format(
+                ", ".join(sorted(missing + dev))
+            )
+        )
+
+    print("\n  secrets (fingerprints, never values)")
+    for name, value in sorted(resolved.items()):
+        print("    {0:<18} {1}   from {2}".format(
+            name, fingerprint(value), source.get(name, "?")
+        ))
+    print("  Compare each fingerprint with the deployed service before writing.")
+    return resolved
+
+
+def _dotenv_values() -> dict[str, str]:
+    """Secrets as .env states them.
+
+    Read directly rather than through Settings, so this guard never
+    depends on the configuration it exists to guard.
+    """
+    found: dict[str, str] = {}
+    for candidate in (BACKEND_ROOT.parent / '.env', BACKEND_ROOT / '.env'):
+        if not candidate.is_file():
+            continue
+        for line in candidate.read_text(encoding='utf-8').splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith('#') or '=' not in stripped:
+                continue
+            key, _, value = stripped.partition('=')
+            if key.strip() in REMOTE_CRITICAL_SECRETS:
+                found.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+    return found
 
 
 def load_dsn() -> str:
@@ -513,6 +617,10 @@ def main() -> None:
             "--confirm once the host above is the one you meant."
         )
 
+    # Checked before anything is printed about running, so a refusal
+    # arrives before the operator has reason to think it started.
+    secrets = require_remote_secrets()
+
     cwd = BACKEND_ROOT if args.cwd is None else (BACKEND_ROOT / args.cwd)
     print("\n  interpreter : {0}".format(args.python))
     print("  working dir : {0}".format(cwd))
@@ -525,6 +633,7 @@ def main() -> None:
         PYTHONIOENCODING="utf-8",
         PYTHONUTF8="1",
         PYTHONPATH=str(cwd),
+        **secrets,
     )
     # Only the one the child was told to read. Setting both would mean a script
     # that reached for the wrong variable still found a live database.
