@@ -38,6 +38,20 @@ def test_only_the_last_four_digits_are_ever_shown():
         ("ORS: 60", [("ORS", 60.0)]),
         ("ORS 60 ZINC 20", [("ORS", 60.0), ("ZINC", 20.0)]),
         ("ओआरएस 60", [("ओआरएस", 60.0)]),
+        # A code that carries its own dose. PARA500 is a real SKU code and
+        # "Paracetamol 500mg" is a real SKU name, so the digits inside the
+        # medicine are not the quantity — the number after it is. Reading
+        # them the other way round wrote 500 to the shelf when the message
+        # said 120, which is worse than refusing the message, because a
+        # wrong figure is one the reorder threshold and the forecast both
+        # believe.
+        ("PARA500 120", [("PARA500", 120.0)]),
+        ("ORS 60 PARA500 120", [("ORS", 60.0), ("PARA500", 120.0)]),
+        ("Paracetamol 500mg 120", [("Paracetamol 500mg", 120.0)]),
+        ("AMOX250 75", [("AMOX250", 75.0)]),
+        # Still true, and the reason this cannot be fixed by loosening the
+        # pattern: glued digits with nothing after them are a quantity.
+        ("ORS60 ZINC 20", [("ORS", 60.0), ("ZINC", 20.0)]),
     ],
 )
 def test_the_grammar_forgives_how_a_keypad_types(text, expected):

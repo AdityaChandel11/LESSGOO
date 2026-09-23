@@ -47,9 +47,16 @@ CHANNELS = ("sms", "whatsapp", "ivr", "form", "voice")
 SKU_MATCH_FLOOR = 72
 
 # "ORS 60", "ORS60", "ORS-60", "ओआरएस 60" all mean the same thing on a keypad.
-_PAIR = re.compile(
-    r"([A-Za-zऀ-ॿ][A-Za-zऀ-ॿ .]*?)[\s:=\-_]*(\d+(?:\.\d+)?)"
-)
+#
+# This is read token by token rather than by one pattern, because a single
+# pattern cannot tell "ORS60" from "PARA500". Both are letters followed by
+# digits, but the first is a medicine and a quantity while the second is a
+# medicine whose own name carries its dose — PARA500 is a real SKU code, and
+# "Paracetamol 500mg" is a real SKU name. What separates them is what comes
+# next, so the parser has to be able to look.
+_TOKENS = re.compile(r"[\s:=\-_,;]+")
+_NUMBER = re.compile(r"^\d+(?:\.\d+)?$")
+_GLUED = re.compile(r"^(.*[A-Za-zऀ-ॿ.])(\d+(?:\.\d+)?)$")
 
 HELP_TEXT = (
     "Send: medicine and quantity, e.g. ORS 60 ZINC 20. "
@@ -169,8 +176,40 @@ async def identify(session: AsyncSession, sender_ref: str) -> FacilityContact | 
 
 
 def parse_pairs(text: str) -> list[tuple[str, float]]:
-    """Every name-and-number pair in the message, in the order they appear."""
-    return [(m.group(1).strip(), float(m.group(2))) for m in _PAIR.finditer(text or "")]
+    """Every name-and-number pair in the message, in the order they appear.
+
+    One rule, applied left to right: a token that is only digits is the
+    quantity for whatever name has been collected so far. A token that ends in
+    digits is split into name and quantity *only when nothing numeric follows
+    it* — because if a number does follow, those digits belong to the medicine
+    and the number after them is the quantity.
+
+    That is what makes "ORS60" sixty sachets of ORS and "PARA500 120" a
+    hundred and twenty of PARA500, from the same reader.
+    """
+    tokens = [t for t in _TOKENS.split(text or "") if t]
+    pairs: list[tuple[str, float]] = []
+    name: list[str] = []
+
+    for i, token in enumerate(tokens):
+        following = tokens[i + 1] if i + 1 < len(tokens) else None
+
+        if _NUMBER.match(token):
+            if name:
+                pairs.append((" ".join(name).strip(), float(token)))
+                name = []
+            continue
+
+        glued = _GLUED.match(token)
+        if glued and not (following and _NUMBER.match(following)):
+            name.append(glued.group(1))
+            pairs.append((" ".join(name).strip(), float(glued.group(2))))
+            name = []
+            continue
+
+        name.append(token)
+
+    return pairs
 
 
 def resolve_sku(needle: str, lookup: dict[str, str]) -> tuple[str | None, int]:
