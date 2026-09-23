@@ -16,7 +16,9 @@ from uuid import uuid4
 from dataclasses import asdict
 from datetime import date, datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -31,6 +33,7 @@ from . import (
     movements,
     redistribution,
     services,
+    comms,
     trust,
     vision,
     workspace,
@@ -46,7 +49,9 @@ from .auth import (
 from .config import settings
 from .db import get_session, ping
 from .models import (
+    CALL_OUTCOMES,
     LOC_METHODS,
+    CallLog,
     Facility,
     FederationRound,
     MedicineMovement,
@@ -68,6 +73,8 @@ DEMO_CHANNEL_SOURCES = frozenset({"sms", "ivr", "whatsapp"})
 # test_api_boundary.py pins that list, so widening it is a deliberate edit.
 router = APIRouter(dependencies=[Depends(current_user)])
 public_router = APIRouter()
+
+log = logging.getLogger(__name__)
 
 
 class SkuOut(BaseModel):
@@ -1927,6 +1934,45 @@ class SimulateOut(BaseModel):
     actions: list[str]
 
 
+class HandsetOut(BaseModel):
+    role: str
+    number: str
+    masked: str
+
+
+@router.get(
+    "/facilities/{facility_id}/handsets",
+    response_model=list[HandsetOut],
+    tags=["ingest"],
+)
+async def facility_handsets(
+    facility_id: str,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> list[HandsetOut]:
+    """The demo handsets registered to a facility, so the field simulator has
+    numbers to type.
+
+    Demo mode only, and these are not phone numbers in any real sense: they
+    are derived from the facility id by `ingest.demo_number` and never stored
+    — the registry holds only a salted hash of each. There is nothing here to
+    leak, which is the whole point of the design that produced them.
+    """
+    if not settings.demo_mode:
+        raise HTTPException(status_code=404, detail="Not found")
+    facility = await session.get(Facility, facility_id)
+    if facility is None:
+        raise HTTPException(status_code=404, detail="Facility not found")
+    return [
+        HandsetOut(
+            role=role,
+            number=ingest.demo_number(facility_id, role),
+            masked=ingest.mask_phone(ingest.demo_number(facility_id, role)),
+        )
+        for role in ("reporter", "supervisor")
+    ]
+
+
 @router.post("/ingest/simulate", response_model=SimulateOut, tags=["ingest"])
 async def ingest_simulate(
     payload: SimulateIn,
@@ -1959,3 +2005,176 @@ async def ingest_simulate(
         ],
         actions=outcome.actions,
     )
+
+
+# ==========================================================================
+# Inbound webhooks — spec 13, 14, and rule 1.9.
+#
+# These are the only unauthenticated write endpoints in the system, and they
+# are the only ones reachable from the public internet by a stranger. So the
+# rule is absolute and is enforced before anything else happens: **every
+# inbound webhook validates its provider signature before processing. No
+# exceptions.**
+#
+# That includes simulator mode. With no auth token configured there is no
+# signature that can validate, so these routes refuse everything — which is
+# correct rather than inconvenient. A door that opens for anyone "because we
+# are only testing" is a door. The field simulator drives
+# /api/ingest/simulate instead, behind a session like every other route.
+#
+# They live on `public_router` because Twilio has no session, and
+# test_api_boundary.py pins the exact list of routes that answer without one —
+# so adding these was a deliberate edit to that list, reviewed as a one-line
+# diff.
+# ==========================================================================
+
+
+class WebhookReply(BaseModel):
+    """What the adapter did. Twilio ignores the body when the status is 204;
+    this shape exists so the checks can assert on it."""
+
+    accepted: bool
+    stage: str
+    reply: str | None = None
+    facility_id: str | None = None
+    duplicate: bool = False
+
+
+async def _verified_form(request: Request) -> dict[str, str]:
+    """The POST parameters, once the request has proved it came from Twilio.
+
+    Raises 403 otherwise, and says nothing about why: a webhook that explains
+    which half of the signature was wrong is a webhook that helps somebody
+    guess the other half.
+    """
+    form = await request.form()
+    params = {k: str(v) for k, v in form.items()}
+    url = comms.webhook_url(
+        request.url.scheme,
+        request.headers.get("host", request.url.netloc),
+        request.url.path,
+        request.url.query,
+    )
+    if not comms.validate_signature(
+        url, params, request.headers.get("X-Twilio-Signature")
+    ):
+        raise HTTPException(status_code=403, detail="Signature check failed")
+    return params
+
+
+async def _ingest_and_reply(
+    session: AsyncSession, channel: str, params: dict[str, str]
+) -> WebhookReply:
+    """One inbound message through the spine, then the acknowledgement.
+
+    The reply is sent after the commit and its failure is swallowed: the
+    reading is already recorded, and losing an acknowledgement must never
+    undo it.
+    """
+    submission = ingest.RawSubmission(
+        channel=channel,
+        sender_ref=params.get("From", ""),
+        external_id=params.get("MessageSid") or params.get("SmsSid") or "",
+        text=params.get("Body"),
+        # Twilio hosts the media and gives a URL; the bytes are fetched by the
+        # adapter, read once, and never stored. Only this reference is kept.
+        media_ref=params.get("MediaUrl0"),
+    )
+    outcome = await ingest.process(session, submission)
+
+    try:
+        await comms.send(
+            session,
+            channel=channel,
+            to_ref=outcome.masked_sender or "unknown",
+            body=outcome.reply,
+        )
+        await session.commit()
+    except comms.CommsError as exc:
+        await session.rollback()
+        log.warning("inbound %s acknowledged but reply not sent: %s", channel, exc)
+
+    return WebhookReply(
+        accepted=outcome.accepted,
+        stage=outcome.stage,
+        reply=outcome.reply,
+        facility_id=outcome.facility_id,
+        duplicate=outcome.duplicate,
+    )
+
+
+@public_router.post("/webhooks/sms", response_model=WebhookReply, tags=["webhooks"])
+async def twilio_sms(
+    request: Request, session: AsyncSession = Depends(get_session)
+) -> WebhookReply:
+    """An SMS from a registered handset. Spec 13."""
+    params = await _verified_form(request)
+    return await _ingest_and_reply(session, "sms", params)
+
+
+@public_router.post("/webhooks/whatsapp", response_model=WebhookReply, tags=["webhooks"])
+async def twilio_whatsapp(
+    request: Request, session: AsyncSession = Depends(get_session)
+) -> WebhookReply:
+    """A WhatsApp message, which may carry a ward photo. Spec 14.
+
+    Twilio prefixes WhatsApp numbers with `whatsapp:`; the spine normalises
+    that away when it hashes the sender, so one handset is one contact however
+    it reached us.
+    """
+    params = await _verified_form(request)
+    return await _ingest_and_reply(session, "whatsapp", params)
+
+
+@public_router.post("/webhooks/voice/status", tags=["webhooks"])
+async def twilio_voice_status(
+    request: Request, session: AsyncSession = Depends(get_session)
+) -> dict:
+    """A call's final status. Spec 15.
+
+    Records a reference and an outcome and nothing else. No audio, no
+    transcript, no number: Twilio keeps the call record on its own side, and
+    duplicating it here would make this database a log of who rang whom.
+    """
+    params = await _verified_form(request)
+    call_ref = params.get("CallSid", "")
+    outcome = params.get("CallStatus", "")
+    if not call_ref or outcome not in CALL_OUTCOMES:
+        raise HTTPException(status_code=422, detail="Unusable call status")
+
+    contact = await ingest.identify(session, params.get("From", ""))
+    await comms.record_call(
+        session,
+        call_ref=call_ref,
+        outcome=outcome,
+        facility_id=contact.facility_id if contact else None,
+        direction=params.get("Direction", "inbound").startswith("outbound")
+        and "outbound"
+        or "inbound",
+    )
+    await session.commit()
+    return {"recorded": True, "call_ref": call_ref, "outcome": outcome}
+
+
+@router.get("/calls", tags=["webhooks"])
+async def list_calls(
+    limit: int = Query(default=50, le=200),
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> list[dict]:
+    """The call log, for the demo panel. Capped by the table itself."""
+    rows = (
+        await session.execute(
+            select(CallLog).order_by(CallLog.created_at.desc()).limit(limit)
+        )
+    ).scalars().all()
+    return [
+        {
+            "call_ref": r.call_ref,
+            "facility_id": r.facility_id,
+            "direction": r.direction,
+            "outcome": r.outcome,
+            "created_at": r.created_at,
+        }
+        for r in rows
+    ]

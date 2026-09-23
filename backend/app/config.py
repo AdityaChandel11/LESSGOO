@@ -161,6 +161,10 @@ class Settings(BaseSettings):
     # the composite primary key, but 3,510 facilities x 2 languages is 4 MB,
     # and this table is a cache: the oldest rows are evicted rather than kept.
     max_briefing_rows: int = 500
+    # Voice call references. Twilio keeps the call record and any recording;
+    # this table holds only enough to show a call happened. Capped for the
+    # same reason every demo-facing table here is capped.
+    max_call_log_rows: int = 200
     # Server key: Routes API only, restricted to this service. Never sent to a browser.
     google_maps_server_key: str = ""
     # Browser key: Map Tiles API only, restricted to the site's domains. It is

@@ -40,8 +40,12 @@ CREDENTIAL_OWNERS: dict[str, set[str]] = {
     # hashes an inbound number, and `phone_salt` is the property it reads.
     "phone_hash_salt": {"ingest.py"},
     "phone_salt": {"ingest.py"},
-    "twilio_account_sid": set(),
-    "twilio_auth_token": set(),
+    "twilio_account_sid": {"comms.py"},
+    # comms.py is the only module allowed to hold a Twilio credential, and
+    # the auth token is what proves an inbound webhook really came from
+    # Twilio. Validation is implemented there by hand rather than through
+    # the SDK, so it can be unit-tested with a known token and no account.
+    "twilio_auth_token": {"comms.py"},
     "bhashini_api_key": set(),
 }
 
@@ -192,6 +196,15 @@ PUBLIC_ROUTES = {
     ("GET", "/health"),
     ("GET", "/map/summary"),
     ("GET", "/map/states"),
+    # The three inbound webhooks. Twilio carries no session, so these cannot
+    # sit behind one — but they are not open: every one of them validates the
+    # provider signature before it does anything at all, and with no auth
+    # token configured that check refuses everything. They are the only
+    # unauthenticated *write* routes in the system, which is why they are
+    # listed here individually rather than by prefix.
+    ("POST", "/webhooks/sms"),
+    ("POST", "/webhooks/whatsapp"),
+    ("POST", "/webhooks/voice/status"),
 }
 
 

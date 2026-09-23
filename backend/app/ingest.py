@@ -96,6 +96,9 @@ class RawSubmission:
     text: str | None = None
     media: bytes | None = None
     media_mime: str = "image/jpeg"
+    # The provider's reference to its own copy of the media. The bytes are
+    # read once, in memory, and never stored: only this string is.
+    media_ref: str | None = None
     received_at: datetime | None = None
 
 
@@ -227,6 +230,62 @@ async def process(session: AsyncSession, submission: RawSubmission) -> Outcome:
     facility_id = contact.facility_id
     contact.last_seen_at = now
 
+    # 3. a photograph, before the text check — a WhatsApp message can carry a
+    # ward photo and no words at all, and refusing it for being wordless would
+    # throw away the one submission that can actually verify itself.
+    if submission.media:
+        facility = await session.get(Facility, facility_id)
+        try:
+            extraction = await vision.read_ward_photo(
+                submission.media, submission.media_mime
+            )
+        except vision.VisionError as exc:
+            # The photo is not stored and nothing is recorded. An unread photo
+            # is not a bed count, and inventing one from the caption would be
+            # exactly the fabrication this pipeline exists to prevent.
+            return Outcome(
+                False,
+                "Could not read that photo — {0}. Send it again with the day's "
+                "code clearly visible.".format(exc),
+                "vision",
+                facility_id,
+                masked,
+            )
+        report, checks = await beds.record_report(
+            session,
+            facility,
+            extraction,
+            ward="general",
+            source=submission.channel,
+            # A phone channel proves no location. A check that could not run
+            # must never be stored as one that passed.
+            loc_method=None,
+            loc_lat=None,
+            loc_lng=None,
+            loc_accuracy_m=None,
+            register_admissions=None,
+            # A reference to the provider's copy, never the bytes. Twilio hosts
+            # the media; one inbound photo inlined here would be ~200 KB of
+            # base64 in a JSONB column, on a 1 GB volume.
+            media_ref=submission.media_ref,
+            reported_at=now,
+        )
+        await session.commit()
+        verdict = {
+            "verified": "verified against today's code",
+            "unverified": "recorded but not verified",
+            "rejected": "rejected",
+        }.get(report.verification, report.verification)
+        return Outcome(
+            report.verification != "rejected",
+            "Ward photo {0}: {1} of {2} beds occupied.".format(
+                verdict, extraction.beds_occupied, extraction.beds_total
+            ),
+            "photo",
+            facility_id,
+            masked,
+            actions=["photo:{0}".format(report.verification)],
+        )
     text = (submission.text or "").strip()
     if not text:
         return Outcome(False, HELP_TEXT, "extract", facility_id, masked)

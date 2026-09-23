@@ -303,6 +303,17 @@ export const api = {
   ) => get<Pin[]>("/map/facilities", { ...bounds, sku, limit: 2500 }, signal),
   pinsInState: (state: string, sku: string | null, limit = 400) =>
     get<Pin[]>("/map/facilities", { state, sku, limit }),
+  handsets: (facilityId: string) =>
+    get<Handset[]>(`/facilities/${encodeURIComponent(facilityId)}/handsets`),
+  simulate: (body: {
+    channel: string;
+    sender: string;
+    text: string;
+    /** Omit and the server mints one, so each send is a new message. Repeat a
+     *  previous value to imitate a carrier retry and exercise the dedupe. */
+    external_id?: string;
+  }) => post<SimulateResult>("/ingest/simulate", body),
+  calls: (limit = 50) => get<CallRecord[]>("/calls", { limit }),
   workspace: (facilityId: string) =>
     get<WorkspaceView>(`/facilities/${encodeURIComponent(facilityId)}/workspace`),
   supply: (facilityId: string, sku: string) =>
@@ -558,6 +569,40 @@ export interface StockRequest {
   estimated_delivery: string;
   estimate_label: string;
   assumptions: Record<string, number>;
+}
+
+/* ------------------------------------------------------ field simulator --- */
+
+export interface Handset {
+  role: string;
+  number: string;
+  masked: string;
+}
+
+export interface SimulatedReading {
+  sku_code: string;
+  qty: number;
+  days_of_stock: number | null;
+  status: string | null;
+}
+
+export interface SimulateResult {
+  accepted: boolean;
+  stage: string;
+  reply: string;
+  facility_id: string | null;
+  masked_sender: string | null;
+  duplicate: boolean;
+  readings: SimulatedReading[];
+  actions: string[];
+}
+
+export interface CallRecord {
+  call_ref: string;
+  facility_id: string | null;
+  direction: string;
+  outcome: string;
+  created_at: string;
 }
 
 /* --------------------------------------------------------- movements --- */

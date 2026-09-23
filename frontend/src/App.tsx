@@ -35,11 +35,12 @@ import {
 import { LiveLoopPanel } from "./liveloop";
 import { ActivityFeed, FacilityPanel, NationalPanel, StatePanel } from "./panels";
 import { FederationPanel } from "./federation";
+import { FieldSimulator } from "./field";
 import { MovementsPanel } from "./movements";
 import { AuditQueuePanel } from "./trustpanel";
 import { RedistributionPanel, TransfersPrompt, type Trip, groupTrips } from "./transfers";
 
-type Mode = "stock" | "transfers" | "movements" | "trust" | "federation";
+type Mode = "stock" | "transfers" | "movements" | "trust" | "federation" | "field";
 
 const INDIA_VIEW = { lat: 22.8, lng: 81.5, zoom: 5 };
 
@@ -75,6 +76,8 @@ function readUrl(): UrlState {
             ? "trust"
             : q.get("view") === "federation"
               ? "federation"
+            : q.get("view") === "field"
+              ? "field"
             : "stock",
     sku: q.get("sku"),
     facility: q.get("facility"),
@@ -541,6 +544,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
                 ["movements", "Movements"],
                 ["trust", "Data trust"],
                 ["federation", "Federation"],
+                ["field", "Field reports"],
               ] as const
             ).map(([m, label]) => (
               <button
@@ -614,6 +618,11 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               }}
               onFocus={(lat, lng) => fly(lat, lng, Math.max(view.zoom, FACILITY_ZOOM + 2))}
             />
+          ) : mode === "field" ? (
+            // Ahead of the facility panel on purpose: choosing the tab is a
+            // decision to look at the channels, and it still reads whichever
+            // centre is selected on the map so the two stay in step.
+            <FieldSimulator facilityId={selected ? selected.id : null} />
           ) : selected ? (
             <FacilityPanel
               id={selected.id}

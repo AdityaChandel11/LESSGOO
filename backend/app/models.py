@@ -43,6 +43,12 @@ TRANSFER_STATUSES = ("proposed", "approved", "rejected", "completed")
 MOVEMENT_STATUSES = ("in_transit", "received", "short", "over", "cancelled")
 DISPATCH_SOURCES = ("warehouse", "transfer", "seed")
 RECEIPT_CHANNELS = ("form", "sms", "ivr", "whatsapp", "photo")
+# Twilio's own call statuses, plus the two we set ourselves. Constrained so a
+# typo in a status callback cannot quietly become a new category.
+CALL_OUTCOMES = (
+    "queued", "ringing", "in-progress", "completed",
+    "busy", "no-answer", "failed", "canceled",
+)
 VERIFICATION_STATES = ("verified", "unverified", "rejected")
 TRUST_BANDS = ("good", "watch", "audit")
 # What produced a location, recorded on every geofenced row so the UI can say
@@ -573,6 +579,50 @@ class Forecast(Base):
     model_version: Mapped[str] = mapped_column(Text, nullable=False)
     computed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
+class CallLog(Base):
+    """One voice call, reduced to the least this system needs to know.
+
+    Deliberately almost empty. Twilio already keeps the call record and any
+    recording on its own side, under its own retention, and duplicating that
+    here would mean this database held a log of who rang whom — which is the
+    thing the salted-hash design across the rest of the schema exists to
+    prevent. So: no audio, no transcript, no phone number, not even a hash of
+    one. A reference id that means something to Twilio, what happened, when,
+    which facility it concerned, and which way it went.
+
+    `call_ref` is Twilio's own CallSid and is the primary key, so a status
+    callback delivered twice — which Twilio does, deliberately, on retry —
+    updates one row instead of appending a second.
+
+    Capped at `max_call_log_rows`, oldest first. This is a demonstration log,
+    not a record anyone will audit, and a judge pressing a button must not be
+    able to grow a 1 GB volume.
+    """
+
+    __tablename__ = "call_logs"
+
+    call_ref: Mapped[str] = mapped_column(Text, primary_key=True)
+    facility_id: Mapped[str | None] = mapped_column(
+        Text, ForeignKey("facilities.id", ondelete="SET NULL")
+    )
+    # 'inbound'  — the field rang us (IVR stock report)
+    # 'outbound' — we rang the field (a critical-stock callout)
+    direction: Mapped[str] = mapped_column(Text, nullable=False)
+    outcome: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "direction IN ('inbound', 'outbound')", name="ck_call_logs_direction"
+        ),
+        CheckConstraint(f"outcome IN {CALL_OUTCOMES}", name="ck_call_logs_outcome"),
+        # Read by the eviction sweep and by the demo panel; nothing else.
+        Index("ix_call_logs_created_at", "created_at"),
     )
 
 
