@@ -26,6 +26,7 @@ import {
 } from "../api";
 import Briefing from "./Briefing";
 import StockPhoto from "./StockPhoto";
+import Team from "./Team";
 import FindSupply from "./FindSupply";
 import { both } from "./labels";
 
@@ -230,6 +231,8 @@ export default function Medicines({
           See the field simulator
         </a>
       </section>
+
+      <Team facilityId={facilityId} refreshKey={refreshKey} />
 
       <section
         aria-label="Data confidence"

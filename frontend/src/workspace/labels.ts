@@ -31,6 +31,10 @@ export const L = {
   notYetReported: ["Not yet reported", "अभी तक दर्ज नहीं"],
   dataConfidence: ["Data confidence", "डेटा विश्वसनीयता"],
 
+  // Today's team
+  todaysTeam: ["Today's team", "आज की टीम"],
+  patientsLogged: ["Patients logged today", "आज दर्ज मरीज़"],
+
   // Actions
   findSupply: ["Find supply", "आपूर्ति खोजें"],
   requestStock: ["Request stock", "स्टॉक माँगें"],
