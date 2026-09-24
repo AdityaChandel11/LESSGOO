@@ -103,7 +103,17 @@ as not measured rather than guessing.
 
 ## What is not built
 
-`federation_rounds` exists as a table, but the per-round inspector that writes
-measured bytes, tensor shapes and a weights hash to it (spec §28 B3) was built
-and then removed in the 2026-09-20 rollback. `SPEC_DIGEST.md` §5 is the status
-of record.
+The per-round inspector (spec §28 B3) is built: `pytorchexample/inspector.py`
+checks every reply before aggregation and writes measured bytes, tensor
+shapes, a weights hash and the asserted facility-row count to
+`federation_rounds` (migration `a1c4e77b90d2`). What does not exist yet:
+
+- **Differential privacy and secure aggregation.** Silos send plain weights.
+  Federation here is privacy-enhancing, not privacy-guaranteed (spec §20).
+- **Encrypted, authenticated links.** The SuperLink and SuperNodes above run
+  `--insecure`; a real deployment needs TLS and SuperNode authentication.
+- **More than four training states.** Only `SILOS` (MH, KL, BR, UP) train.
+  `publish_forecast.py --states` can publish the shared model's forecasts to
+  other states, but those states contribute nothing to training.
+- **Live rounds on the deployed site.** "Run next round" works only where
+  these processes run; production shows the recorded rounds.
