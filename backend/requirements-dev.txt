@@ -3,3 +3,5 @@ pytest>=8.3
 # Fixture generation only: draws the synthetic ward whiteboard that the live
 # Gemini vision check reads. Never imported by the app.
 pillow>=11
+# Parses IDSP Weekly Outbreak Report PDFs in scripts/idsp_ingest.py. Never imported by the app.
+pypdf>=5

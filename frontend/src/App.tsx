@@ -38,6 +38,7 @@ import { FederationPanel } from "./federation";
 import { FieldSimulator } from "./field";
 import { MovementsPanel } from "./movements";
 import { AuditQueuePanel } from "./trustpanel";
+import { OutbreakWarnings } from "./outbreaks";
 import { RedistributionPanel, TransfersPrompt, type Trip, groupTrips } from "./transfers";
 
 type Mode = "stock" | "transfers" | "movements" | "trust" | "federation" | "field";
@@ -802,6 +803,8 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               />
             )
           ) : activeState ? (
+            <>
+            <OutbreakWarnings state={activeState} stateLabel={stateName(activeState)} />
             <StatePanel
               key={`${activeState}:${sku ?? "all"}`}
               stateCode={activeState}
@@ -813,7 +816,10 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               onPickDistrict={(b) => fly(b.lat, b.lng, FACILITY_ZOOM + 1)}
               onPickFacility={pickFacility}
             />
+            </>
           ) : (
+            <>
+            <OutbreakWarnings state={null} stateLabel="India" />
             <NationalPanel
               summary={summary}
               states={states}
@@ -821,6 +827,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               skus={skus}
               onPickState={(b) => fly(b.lat, b.lng, Math.max(b.zoom, DISTRICT_ZOOM + 0.5))}
             />
+            </>
           )}
           <ActivityFeed
             events={events}
