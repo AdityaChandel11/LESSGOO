@@ -178,31 +178,17 @@ export function FederationPanel({
     void loadInspector().finally(() => setLoading(false));
   }, [refreshKey, loadInspector]);
 
-  useEffect(() => {
-    if (!canTrain) return;
-    api.federationLive().then(setLive).catch(() => setLive(null));
-  }, [canTrain, refreshKey]);
-
-  const stopLivePoll = () => {
+  const stopLivePoll = useCallback(() => {
     if (livePoll.current) window.clearInterval(livePoll.current);
     livePoll.current = null;
-  };
-  useEffect(() => stopLivePoll, []);
+  }, []);
+  useEffect(() => stopLivePoll, [stopLivePoll]);
 
-  // A real round: the server starts `flwr run`, and each phase shown below is
-  // a line the aggregator printed. The new row comes from the database once
-  // the round has written it, never from this component.
-  const runNextRound = async () => {
-    setLiveError(null);
-    setFreshRound(null);
-    try {
-      const job = await api.startFederationRound();
-      setLive((l) => ({ available: true, reason: null, ...(l ?? {}), job }));
-    } catch (e) {
-      setLiveError(e instanceof ApiError ? e.message : "Could not start the round");
-      return;
-    }
-    stopLivePoll();
+  // Follow a running round until it settles. Used after a press and also when
+  // the tab is opened while a round is already running — a round keeps
+  // training on the server whether or not this panel is on screen.
+  const followRound = useCallback(() => {
+    if (livePoll.current) return;
     livePoll.current = window.setInterval(async () => {
       try {
         const state = await api.federationLive();
@@ -219,6 +205,34 @@ export function FederationPanel({
         // One missed poll is not a failed round; the next tick asks again.
       }
     }, LIVE_POLL_MS);
+  }, [loadInspector, stopLivePoll]);
+
+  useEffect(() => {
+    if (!canTrain) return;
+    api
+      .federationLive()
+      .then((state) => {
+        setLive(state);
+        if (state.job?.status === "running") followRound();
+      })
+      .catch(() => setLive(null));
+  }, [canTrain, refreshKey, followRound]);
+
+  // A real round: the server starts `flwr run`, and each phase shown below is
+  // a line the aggregator printed. The new row comes from the database once
+  // the round has written it, never from this component.
+  const runNextRound = async () => {
+    setLiveError(null);
+    setFreshRound(null);
+    try {
+      const job = await api.startFederationRound();
+      setLive((l) => ({ available: true, reason: null, ...(l ?? {}), job }));
+    } catch (e) {
+      setLiveError(e instanceof ApiError ? e.message : "Could not start the round");
+      return;
+    }
+    stopLivePoll();
+    followRound();
   };
 
   const job = live?.job ?? null;
