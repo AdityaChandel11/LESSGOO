@@ -665,6 +665,8 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               // replacement request is still in flight.
               key={user.state_silo ?? activeState ?? "national"}
               state={user.state_silo ?? activeState}
+              states={states}
+              onPickState={goState}
               stateLabel={
                 user.state_silo
                   ? stateName(user.state_silo)

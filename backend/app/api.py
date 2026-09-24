@@ -2020,6 +2020,13 @@ async def audit_queue(
         state, district = user.state_silo, user.district
     elif user.role == "state_officer":
         state = user.state_silo
+    if not state and not district:
+        # Scoring the whole country live measured 46s (docs/STORAGE_NOTES.md),
+        # and the panel's live refresh piled those requests on each other.
+        raise HTTPException(
+            status_code=400,
+            detail="Choose a state first: the audit queue is scored live, one state at a time.",
+        )
 
     rows = await trust.audit_queue(session, state=state, district=district, limit=limit)
     return [

@@ -12,12 +12,13 @@
  * trusting it in the other direction.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
   SIGNAL_LABEL,
   TRUST_BAND,
   type AuditRow,
+  type Bucket,
   type Trust,
   type TrustComponent,
   api,
@@ -146,46 +147,181 @@ export function TrustBlock({
   );
 }
 
+const SEARCH_CLASS =
+  "w-full rounded-md border border-line bg-canvas px-2.5 py-1.5 text-[12.5px] text-ink placeholder:text-ink-3 focus:border-brand focus:bg-panel focus:outline-none";
+
 export function AuditQueuePanel({
+  stateLabel,
+  state,
+  states,
+  refreshKey,
+  onPick,
+  onPickState,
+}: {
+  stateLabel: string;
+  /** The scope actually requested, so the heading and the rows agree. Null is
+   *  national, which only an administrator can be. */
+  state: string | null;
+  states: Bucket[];
+  refreshKey: number;
+  onPick: (row: AuditRow) => void;
+  onPickState: (code: string) => void;
+}) {
+  // Scoring every facility in the country live took 46s against the deployed
+  // database, so national asks for a state instead of scoring one.
+  if (state == null) return <PickState states={states} onPickState={onPickState} />;
+  return <AuditQueue state={state} stateLabel={stateLabel} refreshKey={refreshKey} onPick={onPick} />;
+}
+
+function PickState({
+  states,
+  onPickState,
+}: {
+  states: Bucket[];
+  onPickState: (code: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const shown = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return states
+      .filter((s) => !q || s.label.toLowerCase().includes(q))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [states, query]);
+
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+      <div className="border-b border-line px-3 py-2.5">
+        <h2 className="text-[13px] font-semibold text-ink">
+          Where to look first · कहाँ पहले देखें
+        </h2>
+        <p className="mt-0.5 text-[12px] text-ink-2">
+          The audit queue is scored live from each facility&rsquo;s last 14 days of records, one
+          state at a time, so the ranking is never older than the rows behind it. Choose a state to
+          score it.
+        </p>
+      </div>
+      <div className="px-3 pt-2.5 pb-2">
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search states"
+          aria-label="Search states"
+          className={SEARCH_CLASS}
+        />
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto pb-2">
+        {shown.map((s) => (
+          <button
+            key={s.key}
+            onClick={() => onPickState(s.key)}
+            className="flex w-full items-baseline justify-between gap-2 px-3 py-2 text-left hover:bg-canvas"
+          >
+            <span className="truncate text-[13px] font-medium text-ink">{s.label}</span>
+            <span className="shrink-0 font-mono text-[11px] text-ink-3 tabular-nums">
+              {s.total.toLocaleString("en-IN")} facilities
+            </span>
+          </button>
+        ))}
+        {shown.length === 0 && (
+          <p className="px-3 py-6 text-center text-[12px] text-ink-3">No states match.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+type SortKey = "confidence" | "district" | "name";
+
+function AuditQueue({
   stateLabel,
   state,
   refreshKey,
   onPick,
 }: {
   stateLabel: string;
-  /** The scope actually requested, so the heading and the rows agree. Null is
-   *  national, which only an administrator can be. */
-  state: string | null;
+  state: string;
   refreshKey: number;
   onPick: (row: AuditRow) => void;
 }) {
   const [rows, setRows] = useState<AuditRow[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState<SortKey>("confidence");
+  const inFlight = useRef(false);
+  const again = useRef(false);
+  const alive = useRef(true);
 
-  const load = useCallback(() => {
-    setLoading(true);
-    api
-      .trustQueue(state)
-      .then((r) => {
-        setRows(r);
-        setError(null);
-      })
-      .catch((e) =>
-        setError(e instanceof ApiError ? e.message : "Could not load the audit queue"),
-      )
-      .finally(() => setLoading(false));
-  }, [state]);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+
+  // The live feed bumps refreshKey every few seconds while scoring takes
+  // longer than that; a bump mid-request becomes one follow-up, not a pile-up.
+  const load = useCallback(
+    function run() {
+      if (inFlight.current) {
+        again.current = true;
+        return;
+      }
+      inFlight.current = true;
+      setLoading(true);
+      api
+        .trustQueue(state)
+        .then((r) => {
+          if (!alive.current) return;
+          setRows(r);
+          setError(null);
+          setLoaded(true);
+        })
+        .catch((e) => {
+          if (!alive.current) return;
+          setError(e instanceof ApiError ? e.message : "Could not load the audit queue");
+        })
+        .finally(() => {
+          inFlight.current = false;
+          if (!alive.current) return;
+          setLoading(false);
+          if (again.current) {
+            again.current = false;
+            run();
+          }
+        });
+    },
+    [state],
+  );
 
   useEffect(load, [load, refreshKey]);
+
+  const shown = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const hit = q
+      ? rows.filter(
+          (r) => r.facility_name.toLowerCase().includes(q) || r.district.toLowerCase().includes(q),
+        )
+      : rows;
+    // The server's order is the spec's: lowest confidence first, larger
+    // facilities first within a tie.
+    if (sort === "confidence") return hit;
+    const key = (r: AuditRow) =>
+      sort === "district" ? `${r.district} ${r.facility_name}` : r.facility_name;
+    return [...hit].sort((a, b) => key(a).localeCompare(key(b)));
+  }, [rows, query, sort]);
 
   const audit = rows.filter((r) => r.band === "audit").length;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="border-b border-line px-3 py-2.5">
-        <h2 className="text-[13px] font-semibold text-ink">Where to look first — {stateLabel}</h2>
+        <div className="flex items-baseline justify-between gap-2">
+          <h2 className="text-[13px] font-semibold text-ink">Where to look first — {stateLabel}</h2>
+          {loading && loaded && <span className="shrink-0 text-[11px] text-ink-3">Updating…</span>}
+        </div>
         <p className="mt-0.5 text-[12px] text-ink-2">
           Facilities whose own signals disagree with each other: attendance against patients seen,
           ward photos against the register, deliveries against confirmations. Ranked so a visit
@@ -198,19 +334,58 @@ export function AuditQueuePanel({
               : `${audit} facilities need a visit before their numbers can be relied on.`}
           </p>
         )}
+        {error && rows.length > 0 && (
+          <p className="mt-1.5 text-[12px] text-crit">Could not refresh: {error}</p>
+        )}
       </div>
 
+      {rows.length > 0 && (
+        <div className="border-b border-line px-3 pt-2.5 pb-2">
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search facility or district"
+            aria-label="Search the audit queue"
+            className={SEARCH_CLASS}
+          />
+          <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-ink-3">
+            <span>
+              {shown.length === rows.length
+                ? `${rows.length} flagged`
+                : `${shown.length} of ${rows.length} flagged`}
+              {rows.length >= 50 && " · the 50 lowest"}
+            </span>
+            <label className="flex items-center gap-1.5">
+              Sort
+              <select
+                value={sort}
+                onChange={(e) => setSort(e.target.value as SortKey)}
+                className="h-6 rounded border border-line bg-panel px-1 text-[11px] text-ink focus:border-brand focus:outline-none"
+              >
+                <option value="confidence">Lowest confidence first</option>
+                <option value="district">District A–Z</option>
+                <option value="name">Facility A–Z</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      )}
+
       <div className="min-h-0 flex-1 overflow-y-auto">
-        {error ? (
+        {error && rows.length === 0 ? (
           <p className="p-3 text-[12.5px] text-crit">{error}</p>
-        ) : loading && rows.length === 0 ? (
-          <p className="p-3 text-[12.5px] text-ink-3">Scoring facilities…</p>
+        ) : !loaded ? (
+          <p className="p-3 text-[12.5px] text-ink-3">
+            Scoring {stateLabel}&rsquo;s facilities from the last 14 days of records…
+          </p>
         ) : rows.length === 0 ? (
           <p className="p-3 text-[12.5px] text-ink-2">
             Nothing to review — every facility's signals currently agree with each other.
           </p>
+        ) : shown.length === 0 ? (
+          <p className="px-3 py-6 text-center text-[12px] text-ink-3">No facilities match.</p>
         ) : (
-          rows.map((r) => {
+          shown.map((r) => {
             const band = TRUST_BAND[r.band];
             const isOpen = expanded === r.facility_id;
             return (
