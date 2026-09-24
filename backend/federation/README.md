@@ -64,6 +64,33 @@ python publish_forecast.py
 The environment variable must be set **before** the SuperLink starts: the
 SuperLink spawns the ServerApp, which inherits its environment.
 
+flwr 1.37 serves its control API over HTTP on `127.0.0.1:8000` by default,
+which is also the backend's port. Start the SuperLink with `--port 9093` to
+keep them apart; `~/.flwr/config.toml` then points `local-deployment` at
+`127.0.0.1:9093`. The SuperLink also spawns `flower-superexec` by name, so the
+federation interpreter's `bin/` has to be on `PATH` when it starts.
+
+## Run next round, from the Federation page
+
+The page can continue the latest recorded run by one real round. The web
+service does not train: it starts `flwr run` with the federation interpreter
+and shows the phases the aggregator prints. It is off in production and
+until all of these hold locally:
+
+- `FEDERATION_PYTHON` in `.env` points at this directory's interpreter;
+- the SuperLink and the four SuperNodes are running as above;
+- a full training saved its weights where the button resumes from:
+
+```bash
+flwr run . local-deployment --stream \
+  --run-config "model-path='$PWD/runs/latest_global.pt'"
+```
+
+Each press passes `resume-run-id`, `start-round` and that `model-path`. The
+ServerApp refuses to resume unless the saved weights hash to exactly what the
+run's last recorded round wrote, so a new row always continues the row above
+it. `runs/` is gitignored.
+
 `local-deployment` lives in `~/.flwr/config.toml`, not in `pyproject.toml` —
 flwr 1.37 moved federation configuration out of the project file.
 
@@ -76,7 +103,17 @@ as not measured rather than guessing.
 
 ## What is not built
 
-`federation_rounds` exists as a table, but the per-round inspector that writes
-measured bytes, tensor shapes and a weights hash to it (spec §28 B3) was built
-and then removed in the 2026-09-20 rollback. `SPEC_DIGEST.md` §5 is the status
-of record.
+The per-round inspector (spec §28 B3) is built: `pytorchexample/inspector.py`
+checks every reply before aggregation and writes measured bytes, tensor
+shapes, a weights hash and the asserted facility-row count to
+`federation_rounds` (migration `a1c4e77b90d2`). What does not exist yet:
+
+- **Differential privacy and secure aggregation.** Silos send plain weights.
+  Federation here is privacy-enhancing, not privacy-guaranteed (spec §20).
+- **Encrypted, authenticated links.** The SuperLink and SuperNodes above run
+  `--insecure`; a real deployment needs TLS and SuperNode authentication.
+- **More than four training states.** Only `SILOS` (MH, KL, BR, UP) train.
+  `publish_forecast.py --states` can publish the shared model's forecasts to
+  other states, but those states contribute nothing to training.
+- **Live rounds on the deployed site.** "Run next round" works only where
+  these processes run; production shows the recorded rounds.

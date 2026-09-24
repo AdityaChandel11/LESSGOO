@@ -14,7 +14,15 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, api, type FederationInspector, type FederationRound } from "./api";
+import {
+  ApiError,
+  api,
+  type FederationInspector,
+  type FederationRound,
+  type LiveRoundState,
+} from "./api";
+
+const LIVE_POLL_MS = 1000;
 
 function mae(value: number | null | undefined): string {
   return typeof value === "number" ? value.toFixed(4) : "—";
@@ -23,6 +31,28 @@ function mae(value: number | null | undefined): string {
 function bytes(value: number | null | undefined): string {
   if (typeof value !== "number") return "—";
   return value < 1024 ? `${value} B` : `${(value / 1024).toFixed(1)} KB`;
+}
+
+/** Exact, because a rounded figure is what makes a measured one look typed in. */
+function exactBytes(value: number | null | undefined): string {
+  return typeof value === "number" ? `${value.toLocaleString("en-IN")} B` : "—";
+}
+
+function clock(iso: string): string {
+  return new Date(iso).toLocaleTimeString("en-IN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
+function day(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-IN", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
 }
 
 /**
@@ -111,30 +141,110 @@ export function FederationPanel({
   refreshKey,
   onSilos,
   stateName,
+  canTrain = false,
 }: {
   refreshKey: number;
   /** Reports the silo states upward so the map can ring them. */
   onSilos?: (states: string[]) => void;
   /** The rounds store two-letter codes; a reader wants the state. */
   stateName?: (code: string) => string;
+  /** Whether this account may start a real round (administrators). */
+  canTrain?: boolean;
 }) {
   const named = (code: string) => stateName?.(code) ?? code;
   const [data, setData] = useState<FederationInspector | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   // null: the finished run, as recorded. A number: the round a replay has
-  // reached. Nothing here re-trains anything — the rows are already written.
+  // reached. The replay re-trains nothing — the rows are already written.
   const [replayAt, setReplayAt] = useState<number | null>(null);
   const timer = useRef<number | null>(null);
+  const [live, setLive] = useState<LiveRoundState | null>(null);
+  const [liveError, setLiveError] = useState<string | null>(null);
+  const [freshRound, setFreshRound] = useState<number | null>(null);
+  const livePoll = useRef<number | null>(null);
+
+  const loadInspector = useCallback(
+    () =>
+      api
+        .federationInspector()
+        .then(setData)
+        .catch((e) => setError(e instanceof ApiError ? e.message : "Could not load the inspector")),
+    [],
+  );
 
   useEffect(() => {
     setLoading(true);
+    void loadInspector().finally(() => setLoading(false));
+  }, [refreshKey, loadInspector]);
+
+  const stopLivePoll = useCallback(() => {
+    if (livePoll.current) window.clearInterval(livePoll.current);
+    livePoll.current = null;
+  }, []);
+  useEffect(() => stopLivePoll, [stopLivePoll]);
+
+  // Follow a running round until it settles. Used after a press and also when
+  // the tab is opened while a round is already running — a round keeps
+  // training on the server whether or not this panel is on screen.
+  const followRound = useCallback(() => {
+    if (livePoll.current) return;
+    livePoll.current = window.setInterval(async () => {
+      try {
+        const state = await api.federationLive();
+        setLive(state);
+        if (state.job && state.job.status !== "running") {
+          stopLivePoll();
+          if (state.job.status === "done") {
+            await loadInspector();
+            setReplayAt(null);
+            setFreshRound(state.job.round_no);
+          }
+        }
+      } catch {
+        // One missed poll is not a failed round; the next tick asks again.
+      }
+    }, LIVE_POLL_MS);
+  }, [loadInspector, stopLivePoll]);
+
+  useEffect(() => {
+    if (!canTrain) return;
     api
-      .federationInspector()
-      .then(setData)
-      .catch((e) => setError(e instanceof ApiError ? e.message : "Could not load the inspector"))
-      .finally(() => setLoading(false));
-  }, [refreshKey]);
+      .federationLive()
+      .then((state) => {
+        setLive(state);
+        if (state.job?.status === "running") followRound();
+      })
+      .catch(() => setLive(null));
+  }, [canTrain, refreshKey, followRound]);
+
+  // A real round: the server starts `flwr run`, and each phase shown below is
+  // a line the aggregator printed. The new row comes from the database once
+  // the round has written it, never from this component.
+  const runNextRound = async () => {
+    setLiveError(null);
+    setFreshRound(null);
+    try {
+      const job = await api.startFederationRound();
+      setLive((l) => ({ available: true, reason: null, ...(l ?? {}), job }));
+    } catch (e) {
+      setLiveError(e instanceof ApiError ? e.message : "Could not start the round");
+      return;
+    }
+    stopLivePoll();
+    followRound();
+  };
+
+  const job = live?.job ?? null;
+  const training = job?.status === "running";
+
+  // Bring the round that just landed into view: it is the thing to watch.
+  useEffect(() => {
+    if (freshRound == null) return;
+    document
+      .querySelector(`[data-round="${freshRound}"]`)
+      ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [freshRound, data]);
 
   const rounds = data?.rounds ?? NO_ROUNDS;
 
@@ -184,6 +294,13 @@ export function FederationPanel({
       ? data?.raw_rows_transmitted ?? 0
       : rounds.slice(0, replayAt + 1).reduce((n, r) => n + r.raw_rows_transmitted, 0);
   const weighting = shown ? mostDownWeighted(shown.per_silo) : null;
+  // Counted from the recorded tensor shapes, so bytes ÷ numbers is a check on
+  // the measurement rather than an assumption about it.
+  const params = shapes.reduce((n, [, shape]) => n + shape.reduce((a, b) => a * b, 1), 0);
+  const bytesPerNumber =
+    params > 0 && typeof data?.bytes_per_round === "number" ? data.bytes_per_round / params : null;
+  const oneDay =
+    rounds.length > 0 && rounds.every((r) => day(r.completed_at) === day(rounds[0].completed_at));
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -223,6 +340,58 @@ export function FederationPanel({
               Replay of the recorded run, not a new training. The rounds below were written by the
               aggregator when the run happened; pressing this re-reads them in order.
             </p>
+
+            {canTrain && live && (
+              <div className="mt-2 border-t border-line pt-2">
+                {live.available || training ? (
+                  <>
+                    <button
+                      onClick={runNextRound}
+                      disabled={training}
+                      className="h-8 rounded-md bg-brand px-3 text-[12.5px] font-medium text-white hover:bg-brand/90 focus:ring-2 focus:ring-brand/30 focus:outline-none disabled:opacity-60"
+                    >
+                      {training ? `Training round ${job?.round_no}…` : "Run next round"}
+                    </button>
+                    <p className="mt-1 text-[11px] leading-snug text-ink-3">
+                      A real round: the four state silos train on their own rows and send back
+                      weights, which are checked, averaged and scored. It takes about two minutes.
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-[11px] leading-snug text-ink-3">
+                    <span className="font-medium text-ink-2">Run next round is off here.</span>{" "}
+                    {live.reason}
+                  </p>
+                )}
+                {liveError && <p className="mt-1 text-[11.5px] text-crit">{liveError}</p>}
+                {job && (training || job.status !== "running") && (
+                  <ol className="mt-1.5 space-y-0.5" aria-live="polite">
+                    {job.phases.map((p) => (
+                      <li key={p.label} className="flex items-baseline justify-between gap-2 text-[11.5px]">
+                        <span className="text-ink-2">
+                          <span className="text-ok" aria-hidden="true">✓</span> {p.label}
+                        </span>
+                        <span className="shrink-0 font-mono text-[10.5px] text-ink-3">+{p.at_s.toFixed(1)}s</span>
+                      </li>
+                    ))}
+                    {training && (
+                      <li className="text-[11.5px] text-ink-3">
+                        <span className="live-dot mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-brand" />
+                        Working…
+                      </li>
+                    )}
+                    {job.status === "done" && (
+                      <li className="text-[11.5px] font-medium text-ok">
+                        Round {job.round_no} recorded — see the highlighted row below.
+                      </li>
+                    )}
+                    {job.status === "failed" && (
+                      <li className="text-[11.5px] text-crit">The round stopped: {job.error}</li>
+                    )}
+                  </ol>
+                )}
+              </div>
+            )}
           </>
         )}
       </div>
@@ -245,13 +414,14 @@ export function FederationPanel({
               <Curve rounds={data.rounds} baseline={data.baseline_mae} upTo={replayAt} />
               <Row
                 label={replayAt == null ? "Model error now (MAE)" : `Model error at round ${shown?.round_no}`}
-                value={mae(replayAt == null ? data.best_mae : shown?.global_val_mae)}
+                value={mae(shown?.global_val_mae)}
                 strong
               />
               <Row label="Burn rate, same held-out weeks" value={mae(data.baseline_mae)} />
               <Row label="Error at round one" value={mae(data.first_mae)} />
+              <Row label="Best round" value={mae(data.best_mae)} />
               <Row
-                label="Better than the burn rate by"
+                label="Best round beats the burn rate by"
                 value={data.improvement_pct == null ? "—" : `${data.improvement_pct}%`}
                 strong
               />
@@ -268,13 +438,33 @@ export function FederationPanel({
                     {rowsSoFar}
                   </span>
                 </div>
+                <p className="mt-0.5 text-[11px] leading-snug text-ink-2">
+                  0 rows per round. What each silo sent instead:{" "}
+                  <span className="font-mono">{exactBytes(data.bytes_per_round)}</span> of model
+                  weights
+                  {params > 0 && bytesPerNumber != null && (
+                    <>
+                      {" "}
+                      — {params.toLocaleString("en-IN")} numbers × {bytesPerNumber} bytes
+                    </>
+                  )}
+                  .
+                </p>
                 <p className="mt-0.5 text-[11px] leading-snug text-ink-3">
                   Asserted by the aggregator before each round was recorded — a reply carrying
                   anything but weights and scalar numbers stops the round.
                 </p>
               </div>
               <div className="mt-1.5">
-                <Row label="Weights per round" value={bytes(data.bytes_per_round)} strong />
+                <Row
+                  label="Weights per round"
+                  value={`${exactBytes(data.bytes_per_round)} (${bytes(data.bytes_per_round)})`}
+                  strong
+                />
+                <p className="text-[11px] leading-snug text-ink-3">
+                  The same every round because the model&rsquo;s shape never changes. The hash
+                  changes every round because the numbers inside it do.
+                </p>
                 <Row label="Across the whole run" value={bytes(data.total_bytes)} />
                 <Row label="Tensors in the payload" value={String(shapes.length)} />
                 <Row label="Silos reporting" value={String(last?.silos_reporting ?? "—")} />
@@ -353,36 +543,59 @@ export function FederationPanel({
               <div className="text-[10.5px] font-semibold tracking-[0.09em] text-ink-3 uppercase">
                 Round by round
               </div>
-              <div className="mt-1.5 space-y-0.5">
-                {data.rounds.map((r, i) => (
-                  <div
-                    key={r.round_no}
-                    className={`flex items-baseline justify-between gap-2 border-t border-line py-1 first:border-t-0 ${
-                      replayAt != null && i > replayAt ? "opacity-35" : ""
-                    }`}
-                  >
-                    <span className="text-[11.5px] text-ink-2">Round {r.round_no}</span>
-                    <span className="font-mono text-[11.5px] tabular-nums text-ink-2">
-                      MAE {mae(r.global_val_mae)} · {bytes(r.bytes_transmitted)}
-                      {" · "}
-                      {/* The zero is the result this whole subsystem exists to
-                          produce, so it is written as a finding rather than as
-                          an empty column. "0 rows", set in the same grey as the
-                          numbers beside it, reads like a figure nobody filled
-                          in; the assertion is that no facility row left its
-                          state, and it was checked before the round was
-                          written. */}
-                      {r.raw_rows_transmitted === 0 ? (
-                        <span className="text-ok">no rows left the state</span>
-                      ) : (
-                        <span className="text-crit">
-                          {r.raw_rows_transmitted.toLocaleString("en-IN")} rows left the state
-                        </span>
-                      )}
-                    </span>
-                  </div>
-                ))}
-              </div>
+              <p className="mt-1 text-[11px] text-ink-3">
+                {oneDay
+                  ? `Each row written by the aggregator as its round finished, ${day(rounds[0].completed_at)}, your local time.`
+                  : "Each row written by the aggregator as its round finished, your local time."}
+              </p>
+              <table className="mt-1.5 w-full font-mono text-[11px] tabular-nums">
+                <thead>
+                  <tr className="text-left font-sans text-ink-3">
+                    <th className="py-1 font-medium">Round</th>
+                    <th className="py-1 font-medium">Finished</th>
+                    <th className="py-1 text-right font-medium">MAE</th>
+                    <th className="py-1 text-right font-medium">Weights</th>
+                    <th className="py-1 pl-2 font-medium">Hash</th>
+                    <th className="py-1 text-right font-medium">Rows</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.rounds.map((r, i) => (
+                    <tr
+                      key={r.round_no}
+                      data-round={r.round_no}
+                      className={`border-t border-line text-ink-2 ${
+                        replayAt != null && i > replayAt ? "opacity-35" : ""
+                      } ${r.round_no === freshRound ? "bg-ok/10 font-semibold text-ink" : ""}`}
+                    >
+                      <td className="py-1">{r.round_no}</td>
+                      <td className="py-1" title={new Date(r.completed_at).toString()}>
+                        {oneDay ? clock(r.completed_at) : `${day(r.completed_at)} ${clock(r.completed_at)}`}
+                      </td>
+                      <td className="py-1 text-right">{mae(r.global_val_mae)}</td>
+                      <td className="py-1 text-right">{exactBytes(r.bytes_transmitted)}</td>
+                      <td className="py-1 pl-2 text-ink-3" title={r.weights_sha256 ?? undefined}>
+                        {r.weights_sha256?.slice(0, 8) ?? "—"}
+                      </td>
+                      {/* The zero is the finding this subsystem exists to
+                          produce, so it is set in the success colour rather
+                          than the grey of a column nobody filled in. */}
+                      <td
+                        className={`py-1 text-right font-semibold ${
+                          r.raw_rows_transmitted === 0 ? "text-ok" : "text-crit"
+                        }`}
+                        title={
+                          r.raw_rows_transmitted === 0
+                            ? "No facility row left its state this round"
+                            : "Facility rows left the state this round"
+                        }
+                      >
+                        {r.raw_rows_transmitted.toLocaleString("en-IN")}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </>
         )}

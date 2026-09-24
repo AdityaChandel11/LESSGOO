@@ -31,7 +31,13 @@ app = ServerApp()
 # What the current round has learned about itself, filled in as the replies
 # arrive and written out once the round is scored. Module state because
 # Flower's evaluate callback takes only a round number and the weights.
-_ROUND: dict = {"run_id": "", "strategy": "", "per_silo": {}, "raw_rows": 0}
+_ROUND: dict = {
+    "run_id": "", "strategy": "", "per_silo": {}, "raw_rows": 0, "round_offset": 0,
+}
+
+
+class ResumeRefused(RuntimeError):
+    """The saved model is not the one the run's last recorded round describes."""
 
 
 def _capture_train(records: list, weighting_metric_name: str):
@@ -67,9 +73,28 @@ def main(grid: Grid, context: Context) -> None:
     num_rounds: int = context.run_config["num-server-rounds"]
     lr: float = context.run_config["learning-rate"]
     proximal_mu: float = context.run_config["proximal-mu"]
+    # Continuing a recorded run rather than starting one. Empty means new.
+    resume_run_id: str = str(context.run_config.get("resume-run-id", "") or "")
+    start_round: int = int(context.run_config.get("start-round", 0) or 0)
+    model_path: str = str(context.run_config.get("model-path", "") or "") or "final_model.pt"
 
     # Load global model
     global_model = DemandLSTM()
+    if resume_run_id:
+        # Only resume from exactly the weights the last recorded round hashed:
+        # otherwise the "next" round would continue some other model and the
+        # table would join two runs that never met.
+        state = torch.load(model_path, map_location="cpu")
+        _, _, loaded_sha = inspector.summarise_state_dict(state)
+        expected = inspector.recorded_sha(resume_run_id, start_round)
+        if expected != loaded_sha:
+            raise ResumeRefused(
+                "saved model hashes {0}, but round {1} of run {2} recorded {3}".format(
+                    loaded_sha[:12], start_round, resume_run_id, (expected or "nothing")[:12]
+                )
+            )
+        global_model.load_state_dict(state)
+        print(f"  resuming      : run {resume_run_id} after round {start_round} (sha {loaded_sha[:12]})")
     arrays = ArrayRecord(global_model.state_dict())
 
     weights = sum(p.numel() for p in global_model.parameters())
@@ -90,8 +115,9 @@ def main(grid: Grid, context: Context) -> None:
         proximal_mu=proximal_mu,
         train_metrics_aggr_fn=_capture_train,
     )
-    _ROUND["run_id"] = str(getattr(context, "run_id", "") or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
+    _ROUND["run_id"] = resume_run_id or str(getattr(context, "run_id", "") or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"))
     _ROUND["strategy"] = "FedProx(mu={0})".format(proximal_mu)
+    _ROUND["round_offset"] = start_round if resume_run_id else 0
 
     result = strategy.start(
         grid=grid,
@@ -104,7 +130,7 @@ def main(grid: Grid, context: Context) -> None:
     if context.run_config["save-model"]:
         print("\nSaving final model to disk...")
         state_dict = result.arrays.to_torch_state_dict()
-        torch.save(state_dict, "final_model.pt")
+        torch.save(state_dict, model_path)
 
 
 def global_evaluate(server_round: int, arrays: ArrayRecord) -> MetricRecord:
@@ -127,12 +153,18 @@ def global_evaluate(server_round: int, arrays: ArrayRecord) -> MetricRecord:
         f"burn-rate baseline {baseline_mae:.4f}  ({improvement:+.1f}%)"
     )
 
+    # A resumed run's round 0 is the previous run's last round, already
+    # recorded with its silo table; writing it again would blank that table.
+    if _ROUND["round_offset"] and server_round == 0:
+        return MetricRecord({"loss": mse, "mae": mae, "baseline_mae": baseline_mae,
+                             "improvement_pct": improvement})
+
     # One row per round: the accuracy, and the evidence for what crossed the
     # wire to produce it. Written here because this is the only place that has
     # both the round number and the aggregated weights.
     inspector.record_round(
         run_id=_ROUND["run_id"],
-        round_no=server_round,
+        round_no=_ROUND["round_offset"] + server_round,
         strategy=_ROUND["strategy"],
         arrays=arrays,
         global_val_mae=mae,

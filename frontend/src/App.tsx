@@ -32,7 +32,7 @@ import {
   POLL_VISIBLE_MS,
   useLiveUpdates,
 } from "./api";
-import { LiveLoopPanel } from "./liveloop";
+import { LiveLoopPanel, SANDBOX, pickSku } from "./liveloop";
 import { ActivityFeed, FacilityPanel, NationalPanel, StatePanel } from "./panels";
 import { FederationPanel } from "./federation";
 import { FieldSimulator } from "./field";
@@ -129,7 +129,7 @@ function UserMenu({ user, onSignOut }: { user: User; onSignOut: () => void }) {
         <span className="flex h-7 w-7 items-center justify-center rounded-full bg-brand text-[11px] font-semibold text-white">
           {initials || "?"}
         </span>
-        <span className="hidden text-left leading-tight xl:block">
+        <span className="hidden text-left leading-tight 2xl:block">
           <span className="block max-w-[160px] truncate text-[12.5px] font-medium text-ink">{user.name}</span>
           <span className="block text-[10.5px] text-ink-3">{ROLE_LABEL[user.role]}</span>
         </span>
@@ -195,6 +195,10 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
   // The judge-driven loop takes the panel over while it runs; the map stays
   // visible beside it, which is the half they are meant to be watching.
   const [loopFor, setLoopFor] = useState<FacilityDetail | null>(null);
+  // Set when the loop was opened by "Simulate emergency", which starts it too.
+  const [loopAuto, setLoopAuto] = useState(false);
+  const [emergencyBusy, setEmergencyBusy] = useState(false);
+  const [emergencyError, setEmergencyError] = useState<string | null>(null);
   // Which states train the shared model, reported by the federation panel so
   // the map can ring them while that tab is open.
   const [siloStates, setSiloStates] = useState<string[]>([]);
@@ -427,6 +431,40 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
     if (b) fly(b.lat, b.lng, Math.max(b.zoom, DISTRICT_ZOOM + 0.5));
   };
 
+  // Demo-only: the whole emergency chain in one click, confined to the
+  // sandbox district and offered only to someone who may write there.
+  const sandbox = { state: SANDBOX.state, district: SANDBOX.district };
+  const canRunEmergency =
+    session.demo_mode &&
+    can.report(user, { id: "", state_silo: SANDBOX.state, district: SANDBOX.district }) &&
+    can.decideTransfer(user, sandbox, sandbox);
+
+  const startEmergency = async () => {
+    setEmergencyBusy(true);
+    setEmergencyError(null);
+    try {
+      // The healthiest facilities first: the drop is largest and most honest
+      // where there was the most cover to lose.
+      const pins = (await api.pinsInState(SANDBOX.state, null, 400))
+        .filter((p) => p.district === SANDBOX.district)
+        .sort((a, b) => (b.min_days ?? 0) - (a.min_days ?? 0));
+      for (const pin of pins.slice(0, 5)) {
+        const detail = await api.facility(pin.id);
+        if (pickSku(detail.skus)) {
+          setSelected(null);
+          setLoopAuto(true);
+          setLoopFor(detail);
+          return;
+        }
+      }
+      setEmergencyError(`No facility in ${SANDBOX.label} has a medicine with cover left to lose.`);
+    } catch (e) {
+      setEmergencyError(e instanceof ApiError ? e.message : "Could not start the drill");
+    } finally {
+      setEmergencyBusy(false);
+    }
+  };
+
   // Demo-only: sends an SMS-shaped report through the real pipeline. Offered
   // only when the server is in demo mode, and only for a facility this
   // person is allowed to report for.
@@ -501,21 +539,25 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
   return (
     <div className="flex h-full flex-col bg-canvas font-sans text-ink">
       {/* ------------------------------------------------------ top bar --- */}
-      <header className="z-[1100] flex h-14 shrink-0 items-center gap-5 border-b border-line bg-panel px-4">
-        <div className="flex items-center gap-2.5">
-          <svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true">
-            <rect width="26" height="26" rx="6" fill="#0b3d5c" />
-            <path d="M13 6v14M6 13h14" stroke="#fff" strokeWidth="3" strokeLinecap="round" />
-            <circle cx="19.5" cy="6.5" r="3" fill="#e0900e" stroke="#0b3d5c" strokeWidth="1.5" />
+      <header className="z-[1100] flex h-14 shrink-0 items-center gap-3 border-b-2 border-brand bg-panel pr-4 min-[1360px]:gap-5">
+        {/* The mark sits on a solid brand block — flat, no gradient — so the
+            product reads as one identity before any data does. */}
+        <div className="flex h-full shrink-0 items-center gap-2.5 bg-brand pr-4 pl-4 whitespace-nowrap text-white">
+          <svg width="28" height="28" viewBox="0 0 26 26" aria-hidden="true">
+            <rect width="26" height="26" rx="6" fill="#fff" />
+            <path d="M13 6v14M6 13h14" stroke="#0b3d5c" strokeWidth="3" strokeLinecap="round" />
+            <circle cx="19.5" cy="6.5" r="3" fill="#e0900e" stroke="#fff" strokeWidth="1.5" />
           </svg>
           <div className="leading-tight">
-            <div className="text-[14.5px] font-semibold tracking-tight text-ink">SwasthSetu</div>
-            <div className="text-[10.5px] text-ink-3">National Health Supply Command</div>
+            <div className="text-[15.5px] font-semibold tracking-tight">
+              SwasthSetu{" "}
+              <span className="ml-0.5 text-[13px] font-medium text-white/85">स्वस्थसेतु</span>
+            </div>
+            <div className="text-[10.5px] text-white/80">National Health Supply Command</div>
           </div>
         </div>
 
         <nav aria-label="Location" className="flex min-w-0 items-center gap-1.5 text-[13px]">
-          <span className="text-line">|</span>
           <button
             onClick={goNational}
             className={`rounded px-1.5 py-0.5 hover:bg-canvas ${activeState ? "text-brand" : "font-medium text-ink"}`}
@@ -541,7 +583,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
           )}
         </nav>
 
-        <div className="ml-auto flex items-center gap-3">
+        <div className="ml-auto flex items-center gap-2 min-[1360px]:gap-3">
           <div role="tablist" aria-label="View" className="flex rounded-md border border-line bg-canvas p-0.5">
             {(
               [
@@ -558,7 +600,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
                 role="tab"
                 aria-selected={mode === m}
                 onClick={() => setMode(m)}
-                className={`h-7 rounded px-3 text-[12.5px] font-medium ${
+                className={`h-7 rounded px-2 text-[12px] font-medium whitespace-nowrap min-[1360px]:px-2.5 min-[1360px]:text-[12.5px] ${
                   mode === m ? "bg-panel text-ink shadow-sm" : "text-ink-3 hover:text-ink-2"
                 }`}
               >
@@ -568,11 +610,11 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
           </div>
 
           <label className="flex items-center gap-2 text-[12px] text-ink-2">
-            Medicine
+            <span className="sr-only 2xl:not-sr-only">Medicine</span>
             <select
               value={sku ?? ""}
               onChange={(e) => setSku(e.target.value || null)}
-              className="h-8 min-w-[210px] rounded-md border border-line bg-panel px-2 text-[12.5px] font-medium text-ink focus:border-brand focus:outline-none"
+              className="h-8 min-w-[150px] rounded-md min-[1360px]:min-w-[190px] 2xl:min-w-[210px] border border-line bg-panel px-2 text-[12.5px] font-medium text-ink focus:border-brand focus:outline-none"
             >
               <option value="">All medicines (lowest stocked)</option>
               {skus.map((s) => (
@@ -584,7 +626,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
           </label>
 
           <span
-            className="rounded-md border border-line px-2 py-1 text-[11px] text-ink-2"
+            className="rounded-md border border-line px-2 py-1 text-[11px] whitespace-nowrap text-ink-2"
             title="District locations are real. Facility positions and stock levels are simulated, covering roughly 12% of the national PHC network."
           >
             Simulated data
@@ -614,10 +656,21 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
         <aside className="z-[1000] flex w-[400px] shrink-0 flex-col border-r border-line bg-panel">
           {loopFor ? (
             <LiveLoopPanel
+              key={`${loopFor.id}:${loopAuto}`}
               facility={loopFor}
+              autoStart={loopAuto}
               user={user}
               events={events}
-              onClose={() => setLoopFor(null)}
+              onClose={() => {
+                setLoopFor(null);
+                setLoopAuto(false);
+              }}
+              onOpenFederation={() => {
+                setLoopFor(null);
+                setLoopAuto(false);
+                setSelected(null);
+                setMode("federation");
+              }}
               onChanged={() => {
                 setRefreshKey((k) => k + 1);
                 pollNow();
@@ -654,7 +707,12 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               onBack={() => setSelected(null)}
             />
           ) : mode === "federation" ? (
-            <FederationPanel refreshKey={refreshKey} onSilos={setSiloStates} stateName={stateName} />
+            <FederationPanel
+              refreshKey={refreshKey}
+              onSilos={setSiloStates}
+              stateName={stateName}
+              canTrain={user.role === "admin"}
+            />
           ) : mode === "trust" ? (
             <AuditQueuePanel
               // One value decides both the request and the heading. An
@@ -665,6 +723,8 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               // replacement request is still in flight.
               key={user.state_silo ?? activeState ?? "national"}
               state={user.state_silo ?? activeState}
+              states={states}
+              onPickState={goState}
               stateLabel={
                 user.state_silo
                   ? stateName(user.state_silo)
@@ -795,14 +855,33 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
             </div>
           </div>
 
-          {view.tier !== "state" && (
-            <button
-              onClick={goNational}
-              className="absolute top-3 right-3 z-[900] rounded-lg border border-line bg-panel px-3 py-1.5 text-[12px] font-medium text-ink shadow-sm hover:bg-canvas"
-            >
-              Back to all of India
-            </button>
-          )}
+          <div className="absolute top-3 right-3 z-[900] flex flex-col items-end gap-1.5">
+            <div className="flex items-center gap-2">
+              {canRunEmergency && !loopFor && (
+                <button
+                  onClick={startEmergency}
+                  disabled={emergencyBusy}
+                  title={`Drops one medicine at a ${SANDBOX.label} facility below the critical line and carries it through detection, Gemini, the optimiser, approval and receipt. Writes stay in the sandbox.`}
+                  className="rounded-lg bg-crit px-3 py-1.5 text-[12px] font-semibold text-white shadow-sm hover:bg-crit/90 focus:ring-2 focus:ring-crit/30 focus:outline-none disabled:opacity-60"
+                >
+                  {emergencyBusy ? "Choosing a facility…" : "Simulate emergency"}
+                </button>
+              )}
+              {view.tier !== "state" && (
+                <button
+                  onClick={goNational}
+                  className="rounded-lg border border-line bg-panel px-3 py-1.5 text-[12px] font-medium text-ink shadow-sm hover:bg-canvas"
+                >
+                  Back to all of India
+                </button>
+              )}
+            </div>
+            {emergencyError && (
+              <p role="alert" className="max-w-[280px] rounded-md bg-panel px-2 py-1 text-[11.5px] text-crit shadow-sm">
+                {emergencyError}
+              </p>
+            )}
+          </div>
 
           {toast && (
             <div

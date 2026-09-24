@@ -21,7 +21,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,6 +31,7 @@ from . import (
     attendance,
     beds,
     events,
+    federation_live,
     movements,
     redistribution,
     services,
@@ -490,6 +491,70 @@ async def get_transfers(
         session, state=state, statuses=statuses, limit=limit
     )
     return [TransferOut.model_validate(r) for r in rows]
+
+
+class ExplanationOut(BaseModel):
+    """A plain-language "why" for something already on screen.
+
+    `ai` is the only thing the screen may use to put a model's name on it. When
+    the model is off, out of quota, or its answer failed a check, the fixed
+    sentence comes back with `source="rules"` and `ai=False`.
+    """
+
+    text: str
+    source: str  # "gemini" | "rules"
+    ai: bool
+    model: str | None
+    latency_ms: int | None
+    cached: bool
+    note: str | None = None
+
+
+def _rules_explanation(text: str, note: str | None = None) -> ExplanationOut:
+    return ExplanationOut(
+        text=text, source="rules", ai=False, model=None, latency_ms=None,
+        cached=False, note=note,
+    )
+
+
+async def _explain_or_rules(make, fallback: str) -> ExplanationOut:
+    """One model attempt, then the fixed sentence. POST, and only from a click:
+    the free tier allows 20 generate requests a day per model."""
+    if not vision.explanation_available():
+        return _rules_explanation(fallback)
+    try:
+        answer = await make()
+    except vision.VisionError as exc:
+        return _rules_explanation(fallback, "Showing the computed line — {0}.".format(exc))
+    return ExplanationOut(
+        text=answer.text, source="gemini", ai=True, model=answer.model,
+        latency_ms=answer.latency_ms, cached=answer.cached,
+    )
+
+
+class TripExplainIn(BaseModel):
+    transfer_ids: list[int] = Field(min_length=1, max_length=20)
+
+
+@router.post("/transfers/explain", response_model=ExplanationOut, tags=["transfers"])
+async def explain_trip(
+    body: TripExplainIn,
+    session: AsyncSession = Depends(get_session),
+) -> ExplanationOut:
+    """Why this trip, worded from the solver's own figures. The solver decided;
+    this only says it in a sentence (spec 1.7)."""
+    wanted = set(body.transfer_ids)
+    items = await redistribution.list_transfers(session, ids=list(wanted))
+    if len(items) != len(wanted):
+        raise HTTPException(status_code=404, detail="Transfer not found")
+    if len({(t["from"]["id"], t["to"]["id"]) for t in items}) != 1:
+        raise HTTPException(
+            status_code=422, detail="Transfers on one trip share a donor and a receiver"
+        )
+    rows = redistribution.why_rows(items, settings.critical_days)
+    return await _explain_or_rules(
+        lambda: vision.explain_transfer(rows=rows), redistribution.rules_why(items)
+    )
 
 
 async def _decide(
@@ -2020,6 +2085,13 @@ async def audit_queue(
         state, district = user.state_silo, user.district
     elif user.role == "state_officer":
         state = user.state_silo
+    if not state and not district:
+        # Scoring the whole country live measured 46s (docs/STORAGE_NOTES.md),
+        # and the panel's live refresh piled those requests on each other.
+        raise HTTPException(
+            status_code=400,
+            detail="Choose a state first: the audit queue is scored live, one state at a time.",
+        )
 
     rows = await trust.audit_queue(session, state=state, district=district, limit=limit)
     return [
@@ -2058,6 +2130,35 @@ async def facility_trust(
         components=[TrustComponentOut(**c) for c in score.as_rows()],
         computed_at=datetime.now(timezone.utc),
         warning_multiplier=trust.warning_multiplier(score.score),
+    )
+
+
+@router.post(
+    "/facilities/{facility_id}/trust/explain", response_model=ExplanationOut, tags=["trust"]
+)
+async def explain_facility_trust(
+    facility_id: str,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> ExplanationOut:
+    """How this facility's disagreeing signals relate, as a reason to look.
+
+    The rules computed the score; the model only words how the flagged
+    sentences fit together, about the facility and never a person (12.6).
+    """
+    facility = await _facility_in_scope(session, facility_id, user)
+    score = await trust.for_facility(session, facility.id)
+    if score is None:
+        raise HTTPException(status_code=404, detail="Nothing has been reported here to score yet")
+    rows = trust.why_rows(score)
+    fallback = trust.rules_why(score)
+    if not rows:
+        return _rules_explanation(fallback)
+    return await _explain_or_rules(
+        lambda: vision.explain_trust(
+            facility_name=facility.name, score=round(score.score * 100), rows=rows
+        ),
+        fallback,
     )
 
 
@@ -2175,6 +2276,79 @@ async def federation_inspector(
         raw_rows_transmitted=sum(r.raw_rows_transmitted for r in rows),
         tensor_shapes=next((r.tensor_shapes for r in reversed(rows) if r.tensor_shapes), {}),
     )
+
+
+class LivePhaseOut(BaseModel):
+    label: str
+    at_s: float
+
+
+class LiveRoundOut(BaseModel):
+    run_id: str
+    round_no: int
+    status: str  # running | done | failed
+    started_at: datetime
+    finished_at: datetime | None
+    phases: list[LivePhaseOut]
+    error: str | None
+
+
+class LiveRoundStateOut(BaseModel):
+    """Whether one more real round can be started from here, and why not."""
+
+    available: bool
+    reason: str | None
+    job: LiveRoundOut | None
+
+
+def _live_out(job: federation_live.LiveRound | None) -> LiveRoundOut | None:
+    if job is None:
+        return None
+    return LiveRoundOut(
+        run_id=job.run_id, round_no=job.round_no, status=job.status,
+        started_at=job.started_at, finished_at=job.finished_at,
+        phases=[LivePhaseOut(label=label, at_s=at) for label, at in job.phases],
+        error=job.error,
+    )
+
+
+@router.get("/federation/live", response_model=LiveRoundStateOut, tags=["federation"])
+async def federation_live_state() -> LiveRoundStateOut:
+    reason = await federation_live.unavailable_reason()
+    return LiveRoundStateOut(
+        available=reason is None, reason=reason, job=_live_out(federation_live.current())
+    )
+
+
+@router.post(
+    "/federation/live", response_model=LiveRoundOut, status_code=202, tags=["federation"]
+)
+async def federation_live_start(
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> LiveRoundOut:
+    """Continue the latest recorded run by one real round (local only).
+
+    The web service starts `flwr run` and reads its output; the training, the
+    hash check on resume and the new row all happen in the ServerApp.
+    """
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only an administrator can start a training round")
+    latest = await session.scalar(
+        select(FederationRound.run_id).order_by(FederationRound.completed_at.desc()).limit(1)
+    )
+    if latest is None:
+        raise HTTPException(status_code=409, detail="There is no recorded run to continue")
+    last_round = await session.scalar(
+        select(func.max(FederationRound.round_no)).where(FederationRound.run_id == latest)
+    )
+    try:
+        job = await federation_live.start(run_id=latest, last_round=int(last_round or 0))
+    except federation_live.AlreadyRunning:
+        raise HTTPException(status_code=409, detail="A round is already running") from None
+    except federation_live.Unavailable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    return _live_out(job)  # type: ignore[return-value]
 
 
 # ==================================================== the ingestion spine ===

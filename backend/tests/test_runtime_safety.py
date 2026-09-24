@@ -164,12 +164,23 @@ def test_a_child_printing_hindi_is_read_back_intact():
 
 
 def test_the_naive_call_still_loses_the_output():
-    """The negative control. If this ever stops reproducing, the environment
-    changed and the test above has stopped proving anything."""
+    """The negative control. If this ever stops reproducing, the test above has
+    stopped proving anything.
+
+    The defect needs a parent that decodes with a non-UTF-8 codec. Windows
+    gives it cp1252 by default; a UTF-8 Linux host does not, so the codec is
+    pinned here rather than taken from whichever machine runs the suite.
+    Windows decodes in subprocess's reader thread and swallows the error
+    (stdout comes back None); POSIX decodes in the caller and raises. The
+    output is lost either way, which is the point.
+    """
     child = "import sys; sys.stdout.reconfigure(encoding='utf-8'); print({0!r})".format(HINDI)
-    result = subprocess.run(
-        [sys.executable, "-c", child], capture_output=True, text=True
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", child], capture_output=True, text=True, encoding="cp1252"
+        )
+    except UnicodeDecodeError:
+        return
     assert result.returncode == 0
     assert result.stdout is None or HINDI not in result.stdout
 

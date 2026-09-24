@@ -292,9 +292,29 @@ export interface FederationInspector {
   note: string | null;
 }
 
+/** One real round started from the page; phases are lines Flower printed. */
+export interface LiveRound {
+  run_id: string;
+  round_no: number;
+  status: "running" | "done" | "failed";
+  started_at: string;
+  finished_at: string | null;
+  phases: { label: string; at_s: number }[];
+  error: string | null;
+}
+
+export interface LiveRoundState {
+  available: boolean;
+  /** Why the button is off here, e.g. on the deployed site. */
+  reason: string | null;
+  job: LiveRound | null;
+}
+
 export const api = {
   health: () => get<Health>("/health"),
   federationInspector: () => get<FederationInspector>("/federation/inspector"),
+  federationLive: () => get<LiveRoundState>("/federation/live"),
+  startFederationRound: () => post<LiveRound>("/federation/live"),
   clientConfig: () => get<ClientConfig>("/client-config"),
   skus: () => get<Sku[]>("/skus"),
   summary: (sku: string | null, state?: string | null) =>
@@ -383,7 +403,23 @@ export const api = {
    */
   trustQueue: (state: string | null = null, limit = 50) =>
     get<AuditRow[]>("/trust/queue", { state, limit }),
+  explainTrip: (transferIds: number[]) =>
+    post<Explanation>("/transfers/explain", { transfer_ids: transferIds }),
+  explainTrust: (facilityId: string) =>
+    post<Explanation>(`/facilities/${encodeURIComponent(facilityId)}/trust/explain`),
 };
+
+/** A plain-language "why". Only `ai` may put a model's name on screen. */
+export interface Explanation {
+  text: string;
+  source: "gemini" | "rules";
+  ai: boolean;
+  model: string | null;
+  /** How long the model took, measured on the server. */
+  latency_ms: number | null;
+  cached: boolean;
+  note: string | null;
+}
 
 /* --------------------------------------------------------- attendance --- */
 

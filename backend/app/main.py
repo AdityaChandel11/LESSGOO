@@ -109,8 +109,6 @@ if cors_origins:
 
 # Sources the browser may load from. Map tiles and fonts are the only third
 # parties; Google's origins are listed ahead of MAPS_MODE=google.
-# KEEP IN SYNC with the Content-Security-Policy header in firebase.json, which
-# applies when Firebase Hosting serves the site instead of this process.
 CSP = "; ".join(
     [
         "default-src 'self'",

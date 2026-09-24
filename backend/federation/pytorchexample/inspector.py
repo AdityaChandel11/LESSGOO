@@ -82,7 +82,23 @@ def assert_weights_only(replies: Iterable[Any]) -> int:
 
 def weight_summary(arrays: Any) -> tuple[int, dict[str, list[int]], str]:
     """Measured bytes, tensor shapes and a hash of the weights on the wire."""
-    state_dict = arrays.to_torch_state_dict()
+    return summarise_state_dict(arrays.to_torch_state_dict())
+
+
+def recorded_sha(run_id: str, round_no: int) -> str | None:
+    """The weights hash the aggregator wrote for one round, or None."""
+    with psycopg.connect(silo.dsn(), connect_timeout=10) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT weights_sha256 FROM federation_rounds WHERE run_id = %s AND round_no = %s",
+            (run_id, round_no),
+        )
+        row = cur.fetchone()
+    return row[0] if row else None
+
+
+def summarise_state_dict(state_dict: Any) -> tuple[int, dict[str, list[int]], str]:
+    """Bytes, shapes and hash of a state dict — the one definition both a live
+    round and a resumed model are measured by, so their hashes compare."""
     shapes: dict[str, list[int]] = {}
     total_bytes = 0
     digest = hashlib.sha256()

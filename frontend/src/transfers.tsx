@@ -7,9 +7,11 @@ import {
   type Sku,
   type Transfer,
   STATUS_COLOR,
+  api,
   formatDays,
 } from "./api";
 import { StackBar } from "./panels";
+import { WhyLine } from "./why";
 
 /* ================================================================ trips === */
 
@@ -159,7 +161,21 @@ export function TransfersPrompt({
 
 /* ================================================================ panel === */
 
-type View = "open" | "approved" | "all";
+type View = "impact" | "open" | "approved" | "all";
+
+/** Under this many days of stock is "critical" (backend settings.critical_days). */
+const CRITICAL_DAYS = 3;
+const HIGH_IMPACT_LIMIT = 10;
+
+/** An open trip that, on its own, takes a critical receiver out of critical. */
+function isHighImpact(trip: Trip): boolean {
+  return trip.items.some(
+    (i) =>
+      i.status === "proposed" &&
+      i.rationale.recipient_status === "critical" &&
+      (i.rationale.recipient_days_after_this ?? 0) >= CRITICAL_DAYS,
+  );
+}
 
 export function RedistributionPanel({
   stateLabel,
@@ -206,11 +222,15 @@ export function RedistributionPanel({
     return groupTrips(scoped);
   }, [transfers, sku]);
 
+  // Trips arrive sorted most urgent first, so the first ten are the ten to show.
+  const impact = useMemo(() => trips.filter(isHighImpact).slice(0, HIGH_IMPACT_LIMIT), [trips]);
+
   const shown = useMemo(() => {
+    if (view === "impact") return impact;
     if (view === "open") return trips.filter((t) => t.status === "proposed" || t.status === "mixed");
     if (view === "approved") return trips.filter((t) => t.status === "approved" || t.status === "mixed");
     return trips;
-  }, [trips, view]);
+  }, [trips, view, impact]);
 
   const counts = useMemo(
     () => ({
@@ -300,9 +320,10 @@ export function RedistributionPanel({
       </div>
 
       {trips.length > 0 && (
-        <div className="flex items-center gap-1 border-b border-line px-3 pt-2">
+        <div className="flex items-center gap-0.5 overflow-x-auto border-b border-line px-2 pt-2">
           {(
             [
+              ["impact", "High impact", impact.length],
               ["open", `To decide`, counts.open],
               ["approved", "Approved", counts.approved],
               ["all", "All", trips.length],
@@ -314,18 +335,24 @@ export function RedistributionPanel({
                 setView(v);
                 setVisibleCount(40);
               }}
-              className={`-mb-px border-b-2 px-2.5 pb-2 text-[12.5px] font-medium ${
+              className={`-mb-px shrink-0 border-b-2 px-2 pb-2 text-[12.5px] font-medium whitespace-nowrap ${
                 view === v ? "border-brand text-ink" : "border-transparent text-ink-3 hover:text-ink-2"
               }`}
             >
               {label}
-              <span className="ml-1.5 font-mono text-[11px] text-ink-3">{n}</span>
+              <span className="ml-1 font-mono text-[11px] text-ink-3">{n}</span>
             </button>
           ))}
         </div>
       )}
 
       <div className="min-h-0 flex-1 overflow-y-auto">
+        {view === "impact" && trips.length > 0 && (
+          <p className="border-b border-line bg-canvas px-4 py-2 text-[11.5px] text-ink-2">
+            Receivers under {CRITICAL_DAYS} days of stock that this trip alone lifts to{" "}
+            {CRITICAL_DAYS} days or more. Most urgent first, top {HIGH_IMPACT_LIMIT}.
+          </p>
+        )}
         {shown.slice(0, visibleCount).map((trip) => (
           <TripCard
             key={trip.id}
@@ -481,6 +508,11 @@ function TripCard({
           );
         })}
       </ul>
+
+      <WhyLine
+        key={trip.items.map((i) => i.id).join(",")}
+        load={() => api.explainTrip(trip.items.map((i) => i.id))}
+      />
 
       {open.length > 0 && !mayDecide && (
         <p className="mt-2 text-right text-[11px] text-ink-3">
