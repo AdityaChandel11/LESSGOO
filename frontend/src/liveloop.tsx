@@ -468,8 +468,11 @@ export function LiveLoopPanel({
     );
   }, [events, phase, facility.id, transfer]);
 
-  // In the sandbox, whoever may report there acts for the donor centre too.
-  const mayWrite = can.report(user, facility);
+  // The backend's sandbox override (api.py's _decide) lets an admin or an
+  // officer accept on the donor centre's behalf here; a facility_user is
+  // never the donor in this drill (the drill's facility is the receiver), so
+  // showing them an Approve button that will 403 is worse than not showing it.
+  const mayWrite = can.report(user, facility) && user.role !== "facility_user";
 
   return (
     <div className="flex h-full min-h-0 flex-col">
