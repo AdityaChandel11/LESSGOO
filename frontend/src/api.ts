@@ -405,6 +405,7 @@ export const api = {
     get<AuditRow[]>("/trust/queue", { state, limit }),
   explainTrip: (transferIds: number[]) =>
     post<Explanation>("/transfers/explain", { transfer_ids: transferIds }),
+  outbreaks: (state: string | null) => get<Outbreaks>("/outbreaks", { state }),
   explainTrust: (facilityId: string) =>
     post<Explanation>(`/facilities/${encodeURIComponent(facilityId)}/trust/explain`),
 };
@@ -1104,4 +1105,31 @@ export function formatLatency(ms: number): string {
 
 export function pct(n: number, total: number): string {
   return total ? `${Math.round((100 * n) / total)}%` : "0%";
+}
+
+/** One row of the IDSP Weekly Outbreak Report, as published. */
+export interface Outbreak {
+  unique_id: string;
+  year: number;
+  week: number;
+  state: string;
+  state_code: string | null;
+  district: string;
+  disease: string;
+  cases: number;
+  deaths: number;
+  start_date: string | null;
+  reported_date: string | null;
+  /** null where the report's "reported late" section gives no status. */
+  status: string | null;
+  /** Whether this network has facilities in that district. */
+  in_network: boolean;
+}
+
+export interface Outbreaks {
+  source: string;
+  source_url: string;
+  columns: string[];
+  reports: { year: number; week: number; rows: number }[];
+  rows: Outbreak[];
 }

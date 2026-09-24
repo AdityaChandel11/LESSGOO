@@ -32,6 +32,7 @@ from . import (
     beds,
     events,
     federation_live,
+    idsp,
     movements,
     redistribution,
     services,
@@ -2349,6 +2350,46 @@ async def federation_live_start(
     except federation_live.Unavailable as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
     return _live_out(job)  # type: ignore[return-value]
+
+
+class OutbreakOut(BaseModel):
+    unique_id: str
+    year: int
+    week: int
+    state: str
+    state_code: str | None
+    district: str
+    disease: str
+    cases: int
+    deaths: int
+    start_date: str | None
+    reported_date: str | None
+    status: str | None
+    in_network: bool
+
+
+class OutbreaksOut(BaseModel):
+    source: str
+    source_url: str
+    columns: list[str]
+    reports: list[dict]
+    rows: list[OutbreakOut]
+
+
+@router.get("/outbreaks", response_model=OutbreaksOut, tags=["outbreaks"])
+async def outbreaks(state: str | None = None) -> OutbreaksOut:
+    """Outbreaks from the IDSP Weekly Outbreak Report, parsed once from the
+    published PDFs into a committed file. No database read, no polling."""
+    data = idsp.load()
+    ours = idsp.network_districts()
+    return OutbreaksOut(
+        source=data["source"], source_url=data["source_url"], columns=data["columns"],
+        reports=data["reports"],
+        rows=[
+            OutbreakOut(**r, in_network=(r["state_code"], r["district"].lower()) in ours)
+            for r in idsp.outbreaks(state)
+        ],
+    )
 
 
 # ==================================================== the ingestion spine ===
