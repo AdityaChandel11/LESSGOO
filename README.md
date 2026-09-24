@@ -228,7 +228,7 @@ only its own state), reproduced for this README:
 
 Rounds 4 and 5 were started from the **Run next round** button. Each continued only after the saved
 weights hashed to what the previous row recorded. The deployed database holds an earlier run,
-recorded in [`SPEC_DIGEST.md`](SPEC_DIGEST.md) §5 on 2026-09-20: nine rounds, MAE 1.0674 → 0.1106
+recorded in [`SPEC_DIGEST.md`](docs/specs/SPEC_DIGEST.md) §5 on 2026-09-20: nine rounds, MAE 1.0674 → 0.1106
 against a 0.1494 burn rate.
 
 ## Run it locally
@@ -352,6 +352,8 @@ against a real project.
 | [`backend/scripts/`](backend/scripts) | Seed, trust, demo users, key checks, the guarded remote runner |
 | [`backend/alembic/`](backend/alembic) | Database migrations |
 | [`frontend/src/`](frontend/src) | Map, dashboard panels, emergency drill, federation inspector |
-| [`docs/`](docs) | Storage measurements and planning notes |
+| [`docs/specs/`](docs/specs) | Build specifications, the spec digest and the hackathon rules |
+| [`docs/planning/`](docs/planning) | Planning notes from the build |
+| [`docs/STORAGE_NOTES.md`](docs/STORAGE_NOTES.md) | Measurements behind the deployed database's size rules |
 | `render.yaml`, `Dockerfile` | The deployed service |
-| `CLAUDE.md`, `SPEC_DIGEST.md`, `masterbuildspec-*.md` | Working agreement and build specifications |
+| `CLAUDE.md` | Working agreement and operational rules |
