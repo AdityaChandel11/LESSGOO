@@ -593,6 +593,24 @@ async def for_facility(session: AsyncSession, facility_id: str) -> Score | None:
     return scores[0] if scores else None
 
 
+def why_rows(score: Score) -> list[str]:
+    """The signals that disagree, as the sentences the panel already shows."""
+    return [
+        f"{c.signal.replace('_', ' ')}: {c.reason}"
+        for c in score.components
+        if c.penalty >= 0.05
+    ]
+
+
+def rules_why(score: Score) -> str:
+    """The same finding without a model: the two clearest sentences, verbatim."""
+    flagged = [c for c in score.components if c.penalty >= 0.05]
+    if not flagged:
+        return "Its signals agree with each other."
+    text = " ".join(c.reason for c in flagged[:2])
+    return f"{text} Worth checking the registers on a visit."
+
+
 def warning_multiplier(score: float | None) -> float:
     """How much earlier this facility's stock warning should trip — spec 12.6.
 

@@ -23,6 +23,7 @@ import {
   type TrustComponent,
   api,
 } from "./api";
+import { WhyLine } from "./why";
 
 function Bar({
   c,
@@ -114,6 +115,14 @@ export function TrustBlock({
           {band.label}
         </span>
       </div>
+
+      {trust.components.some((c) => c.penalty >= 0.05) && (
+        <WhyLine
+          key={`${facilityId}:${refreshKey}`}
+          load={() => api.explainTrust(facilityId)}
+          label="Why do these signals disagree?"
+        />
+      )}
 
       <p className="mt-1 text-[11.5px] text-ink-2">
         {widened ? (
@@ -414,6 +423,11 @@ function AuditQueue({
                 <p className="mt-1 text-[12px] text-ink-2">
                   {r.components[0]?.reason ?? "Signals disagree."}
                 </p>
+
+                <WhyLine
+                  load={() => api.explainTrust(r.facility_id)}
+                  label="Why do these signals disagree?"
+                />
 
                 {isOpen && (
                   <ul className="mt-1.5">

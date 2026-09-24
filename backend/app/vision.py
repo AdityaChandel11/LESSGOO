@@ -18,9 +18,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
-from dataclasses import dataclass
+import re
+import time
+from collections import OrderedDict
+from dataclasses import dataclass, replace
 from datetime import date
 
 import httpx
@@ -486,6 +490,208 @@ async def write_briefing(
     except (KeyError, IndexError, TypeError) as exc:
         raise VisionError("the model returned no readable answer") from exc
     return parse_briefing(_first_json_object(text), model=model)
+
+
+# ======================================================= plain-language why ===
+# Two places where a screen already shows the figures but a person still has to
+# work out what they add up to: a proposed transfer an officer must approve, and
+# a facility whose records disagree with each other. The model writes that
+# sentence from the same figures the screen shows and nothing else.
+#
+# The decision stays with the rules either way. The solver chose the transfer
+# and the trust rules scored the facility (spec 1.7); this only words them.
+#
+# Clicked, never loaded: the free tier is 20 requests a day per model, so each
+# answer is cached by its exact inputs and the same question is never paid for
+# twice while the process lives.
+
+EXPLAIN_MAX_TOKENS = 300
+EXPLAIN_CACHE_SIZE = 512
+
+TRANSFER_PROMPT = (
+    "You explain one proposed medicine transfer between two public health "
+    "facilities in India to the district officer who must approve or reject it.\n"
+    "Rules:\n"
+    "- Use ONLY the figures given below. Never invent a number, a place or a "
+    "medicine. Do not calculate percentages or any new figure.\n"
+    "- One or two plain sentences, under 50 words in total.\n"
+    "- Say why the receiver needs it and why the donor can spare it.\n"
+    "- Do not tell the officer what to decide. No clinical or dosing advice.\n"
+    "Transfer:\n{rows}\n"
+)
+
+TRUST_PROMPT = (
+    "You explain to a district health officer why one health facility's own "
+    "records disagree with each other, so they can judge whether a visit is "
+    "worth making.\n"
+    "Rules:\n"
+    "- Use ONLY the findings given below. Never invent a number. Do not "
+    "calculate percentages or any new figure.\n"
+    "- Two plain sentences, under 60 words in total: how the findings relate "
+    "to each other, then the most likely ordinary explanation, such as "
+    "registers not being filled in.\n"
+    "- Talk about the facility and its records only. Never mention or guess "
+    "at any person.\n"
+    "- Never accuse anyone. Never use the words fraud, theft, corruption, "
+    "fake or cheating.\n"
+    "Facility: {facility}\n"
+    "Data confidence: {score} out of 100\n"
+    "Findings:\n{rows}\n"
+)
+
+EXPLAIN_SCHEMA = {
+    "type": "object",
+    "properties": {"text": {"type": "string"}},
+    "required": ["text"],
+}
+
+# Spec 12.6: the trust layer is never described as fraud detection and never
+# points at a person. A sentence that reads as an accusation is not shown.
+ACCUSATORY = re.compile(
+    r"\b(fraud\w*|theft|thie(f|ves)|steal\w*|stole\w*|corrupt\w*|fake\w*|"
+    r"cheat\w*|embezzl\w*|scam\w*|misconduct|dishonest\w*|lying|liars?)\b",
+    re.IGNORECASE,
+)
+
+_NUMBER = re.compile(r"\d+(?:,\d{2,3})*(?:\.\d+)?")
+
+
+@dataclass(frozen=True)
+class Explanation:
+    text: str
+    model: str
+    latency_ms: int
+    cached: bool = False
+
+
+def _figure(value: float) -> str:
+    return "{0:g}".format(value)
+
+
+def ungrounded_figures(text: str, sources: list[str]) -> list[str]:
+    """Numbers in `text` that appear nowhere in `sources`, allowing rounding.
+
+    "0.62 days" in the inputs may come back as "0.6" or "1"; a number the
+    inputs never contained, or a percentage worked out from them, may not.
+    """
+    allowed: set[str] = set()
+    for raw in _NUMBER.findall(" ".join(sources)):
+        value = float(raw.replace(",", ""))
+        allowed |= {_figure(value), _figure(round(value)), _figure(round(value, 1))}
+    return [
+        raw for raw in _NUMBER.findall(text)
+        if _figure(float(raw.replace(",", ""))) not in allowed
+    ]
+
+
+def parse_explanation(
+    payload: dict,
+    *,
+    model: str,
+    sources: list[str],
+    latency_ms: int,
+    forbid_accusation: bool = False,
+) -> Explanation:
+    """Validate what came back before any of it reaches a screen."""
+    text = (payload.get("text") or "").strip()
+    if not text:
+        raise VisionError("the model returned an empty explanation")
+    if forbid_accusation and ACCUSATORY.search(text):
+        raise VisionError("the model's wording read as an accusation, so it was not shown")
+    if ungrounded_figures(text, sources):
+        raise VisionError("the model used a figure that is not in the data, so it was not shown")
+    return Explanation(text=text, model=model, latency_ms=latency_ms)
+
+
+_explain_cache: "OrderedDict[str, Explanation]" = OrderedDict()
+
+
+def clear_explanation_cache() -> None:
+    _explain_cache.clear()
+
+
+def explanation_available() -> bool:
+    return settings.llm_mode == "live" and bool(settings.gemini_api_key)
+
+
+async def _explain(
+    prompt: str,
+    *,
+    sources: list[str],
+    what: str,
+    forbid_accusation: bool,
+    client: httpx.AsyncClient | None,
+) -> Explanation:
+    if not explanation_available():
+        raise VisionError("the explanation model is not configured")
+    model = settings.gemini_text_model
+    key = hashlib.sha256(f"{model}\n{prompt}".encode()).hexdigest()
+    hit = _explain_cache.get(key)
+    if hit is not None:
+        _explain_cache.move_to_end(key)
+        return replace(hit, cached=True)
+
+    body = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": EXPLAIN_SCHEMA,
+            "temperature": 0.2,
+            "maxOutputTokens": EXPLAIN_MAX_TOKENS,
+        },
+    }
+    started = time.perf_counter()
+    data = await _post_generate(model, body, client=client, what=what)
+    latency_ms = round((time.perf_counter() - started) * 1000)
+    try:
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise VisionError("the model returned no readable answer") from exc
+    answer = parse_explanation(
+        _first_json_object(text),
+        model=model,
+        sources=sources,
+        latency_ms=latency_ms,
+        forbid_accusation=forbid_accusation,
+    )
+    _explain_cache[key] = answer
+    while len(_explain_cache) > EXPLAIN_CACHE_SIZE:
+        _explain_cache.popitem(last=False)
+    return answer
+
+
+async def explain_transfer(
+    *, rows: list[str], client: httpx.AsyncClient | None = None
+) -> Explanation:
+    """Why this trip, in one or two sentences, from the solver's own figures."""
+    if not rows:
+        raise VisionError("there is no transfer to explain")
+    return await _explain(
+        TRANSFER_PROMPT.format(rows="\n".join(rows)),
+        sources=rows,
+        what="transfer explanation",
+        forbid_accusation=False,
+        client=client,
+    )
+
+
+async def explain_trust(
+    *,
+    facility_name: str,
+    score: int,
+    rows: list[str],
+    client: httpx.AsyncClient | None = None,
+) -> Explanation:
+    """How a facility's disagreeing signals relate, worded as a reason to look."""
+    if not rows:
+        raise VisionError("there is no disagreement to explain")
+    return await _explain(
+        TRUST_PROMPT.format(facility=facility_name, score=score, rows="\n".join(rows)),
+        sources=[facility_name, f"{score} out of 100", *rows],
+        what="trust explanation",
+        forbid_accusation=True,
+        client=client,
+    )
 
 
 # ========================================================== stock photo ===

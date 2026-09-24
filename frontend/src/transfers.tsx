@@ -7,9 +7,11 @@ import {
   type Sku,
   type Transfer,
   STATUS_COLOR,
+  api,
   formatDays,
 } from "./api";
 import { StackBar } from "./panels";
+import { WhyLine } from "./why";
 
 /* ================================================================ trips === */
 
@@ -506,6 +508,11 @@ function TripCard({
           );
         })}
       </ul>
+
+      <WhyLine
+        key={trip.items.map((i) => i.id).join(",")}
+        load={() => api.explainTrip(trip.items.map((i) => i.id))}
+      />
 
       {open.length > 0 && !mayDecide && (
         <p className="mt-2 text-right text-[11px] text-ink-3">

@@ -383,7 +383,23 @@ export const api = {
    */
   trustQueue: (state: string | null = null, limit = 50) =>
     get<AuditRow[]>("/trust/queue", { state, limit }),
+  explainTrip: (transferIds: number[]) =>
+    post<Explanation>("/transfers/explain", { transfer_ids: transferIds }),
+  explainTrust: (facilityId: string) =>
+    post<Explanation>(`/facilities/${encodeURIComponent(facilityId)}/trust/explain`),
 };
+
+/** A plain-language "why". Only `ai` may put a model's name on screen. */
+export interface Explanation {
+  text: string;
+  source: "gemini" | "rules";
+  ai: boolean;
+  model: string | null;
+  /** How long the model took, measured on the server. */
+  latency_ms: number | null;
+  cached: boolean;
+  note: string | null;
+}
 
 /* --------------------------------------------------------- attendance --- */
 

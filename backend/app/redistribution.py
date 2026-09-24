@@ -603,6 +603,61 @@ async def list_transfers(
     return out
 
 
+def _days(value) -> str:
+    """Days as the trip card writes them: under one is "less than 1 day", never 0."""
+    value = float(value)
+    if value < 1:
+        return "less than 1 day"
+    return "{0:g} days".format(round(value, 1))
+
+
+def why_rows(items: list[dict], critical_days: float) -> list[str]:
+    """One trip's figures, exactly as its card shows them, for the explanation.
+
+    `items` are rows from `list_transfers` sharing one donor and one receiver.
+    Nothing is read that the card does not already display.
+    """
+    first = items[0]
+    rows = [
+        f"Donor: {first['from']['name']}, {first['from']['district']} district",
+        f"Receiver: {first['to']['name']}, {first['to']['district']} district",
+        f"Road distance: about {round(first['route_km'])} km",
+        f"Under {critical_days:g} days of stock counts as critical.",
+    ]
+    for t in items:
+        r = t["rationale"]
+        parts = [f"{t['sku_name']}: send {round(t['qty'])} {t['unit']}."]
+        if r.get("recipient_days_before") is not None:
+            parts.append(f"Receiver has {_days(r['recipient_days_before'])} of stock now")
+            if r.get("recipient_days_after_this") is not None:
+                parts[-1] += f", {_days(r['recipient_days_after_this'])} after this transfer."
+            else:
+                parts[-1] += "."
+        if r.get("donor_days_after_plan") is not None:
+            parts.append(f"Donor keeps at least {_days(r['donor_days_after_plan'])} of stock.")
+        rows.append(" ".join(parts))
+    return rows
+
+
+def rules_why(items: list[dict]) -> str:
+    """The same reason in a fixed sentence, for when no model answers."""
+    worst = min(items, key=lambda t: t["rationale"].get("recipient_days_before", 1e9))
+    r = worst["rationale"]
+    receiver, donor = worst["to"]["name"], worst["from"]["name"]
+    if r.get("recipient_days_before") is None or r.get("recipient_days_after_this") is None:
+        text = f"{receiver} is short of {worst['sku_name']} and {donor} has stock to spare."
+    else:
+        text = (
+            f"{receiver} has {_days(r['recipient_days_before'])} of {worst['sku_name']} "
+            f"left; this trip brings it to {_days(r['recipient_days_after_this'])}."
+        )
+    if r.get("donor_days_after_plan") is not None:
+        text += f" {donor} keeps at least {_days(r['donor_days_after_plan'])}."
+    if len(items) > 1:
+        text += f" {len(items)} medicines travel on this trip."
+    return text
+
+
 class TransferConflict(Exception):
     """The transfer can no longer be carried out as proposed."""
 

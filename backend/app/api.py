@@ -492,6 +492,70 @@ async def get_transfers(
     return [TransferOut.model_validate(r) for r in rows]
 
 
+class ExplanationOut(BaseModel):
+    """A plain-language "why" for something already on screen.
+
+    `ai` is the only thing the screen may use to put a model's name on it. When
+    the model is off, out of quota, or its answer failed a check, the fixed
+    sentence comes back with `source="rules"` and `ai=False`.
+    """
+
+    text: str
+    source: str  # "gemini" | "rules"
+    ai: bool
+    model: str | None
+    latency_ms: int | None
+    cached: bool
+    note: str | None = None
+
+
+def _rules_explanation(text: str, note: str | None = None) -> ExplanationOut:
+    return ExplanationOut(
+        text=text, source="rules", ai=False, model=None, latency_ms=None,
+        cached=False, note=note,
+    )
+
+
+async def _explain_or_rules(make, fallback: str) -> ExplanationOut:
+    """One model attempt, then the fixed sentence. POST, and only from a click:
+    the free tier allows 20 generate requests a day per model."""
+    if not vision.explanation_available():
+        return _rules_explanation(fallback)
+    try:
+        answer = await make()
+    except vision.VisionError as exc:
+        return _rules_explanation(fallback, "Showing the computed line — {0}.".format(exc))
+    return ExplanationOut(
+        text=answer.text, source="gemini", ai=True, model=answer.model,
+        latency_ms=answer.latency_ms, cached=answer.cached,
+    )
+
+
+class TripExplainIn(BaseModel):
+    transfer_ids: list[int] = Field(min_length=1, max_length=20)
+
+
+@router.post("/transfers/explain", response_model=ExplanationOut, tags=["transfers"])
+async def explain_trip(
+    body: TripExplainIn,
+    session: AsyncSession = Depends(get_session),
+) -> ExplanationOut:
+    """Why this trip, worded from the solver's own figures. The solver decided;
+    this only says it in a sentence (spec 1.7)."""
+    wanted = set(body.transfer_ids)
+    items = await redistribution.list_transfers(session, ids=list(wanted))
+    if len(items) != len(wanted):
+        raise HTTPException(status_code=404, detail="Transfer not found")
+    if len({(t["from"]["id"], t["to"]["id"]) for t in items}) != 1:
+        raise HTTPException(
+            status_code=422, detail="Transfers on one trip share a donor and a receiver"
+        )
+    rows = redistribution.why_rows(items, settings.critical_days)
+    return await _explain_or_rules(
+        lambda: vision.explain_transfer(rows=rows), redistribution.rules_why(items)
+    )
+
+
 async def _decide(
     transfer_id: int, decision: str, session: AsyncSession, user: Principal
 ) -> TransferOut:
@@ -2065,6 +2129,35 @@ async def facility_trust(
         components=[TrustComponentOut(**c) for c in score.as_rows()],
         computed_at=datetime.now(timezone.utc),
         warning_multiplier=trust.warning_multiplier(score.score),
+    )
+
+
+@router.post(
+    "/facilities/{facility_id}/trust/explain", response_model=ExplanationOut, tags=["trust"]
+)
+async def explain_facility_trust(
+    facility_id: str,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> ExplanationOut:
+    """How this facility's disagreeing signals relate, as a reason to look.
+
+    The rules computed the score; the model only words how the flagged
+    sentences fit together, about the facility and never a person (12.6).
+    """
+    facility = await _facility_in_scope(session, facility_id, user)
+    score = await trust.for_facility(session, facility.id)
+    if score is None:
+        raise HTTPException(status_code=404, detail="Nothing has been reported here to score yet")
+    rows = trust.why_rows(score)
+    fallback = trust.rules_why(score)
+    if not rows:
+        return _rules_explanation(fallback)
+    return await _explain_or_rules(
+        lambda: vision.explain_trust(
+            facility_name=facility.name, score=round(score.score * 100), rows=rows
+        ),
+        fallback,
     )
 
 
