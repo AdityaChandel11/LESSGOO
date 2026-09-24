@@ -32,7 +32,7 @@ import {
   POLL_VISIBLE_MS,
   useLiveUpdates,
 } from "./api";
-import { LiveLoopPanel } from "./liveloop";
+import { LiveLoopPanel, SANDBOX, pickSku } from "./liveloop";
 import { ActivityFeed, FacilityPanel, NationalPanel, StatePanel } from "./panels";
 import { FederationPanel } from "./federation";
 import { FieldSimulator } from "./field";
@@ -195,6 +195,10 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
   // The judge-driven loop takes the panel over while it runs; the map stays
   // visible beside it, which is the half they are meant to be watching.
   const [loopFor, setLoopFor] = useState<FacilityDetail | null>(null);
+  // Set when the loop was opened by "Simulate emergency", which starts it too.
+  const [loopAuto, setLoopAuto] = useState(false);
+  const [emergencyBusy, setEmergencyBusy] = useState(false);
+  const [emergencyError, setEmergencyError] = useState<string | null>(null);
   // Which states train the shared model, reported by the federation panel so
   // the map can ring them while that tab is open.
   const [siloStates, setSiloStates] = useState<string[]>([]);
@@ -427,6 +431,40 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
     if (b) fly(b.lat, b.lng, Math.max(b.zoom, DISTRICT_ZOOM + 0.5));
   };
 
+  // Demo-only: the whole emergency chain in one click, confined to the
+  // sandbox district and offered only to someone who may write there.
+  const sandbox = { state: SANDBOX.state, district: SANDBOX.district };
+  const canRunEmergency =
+    session.demo_mode &&
+    can.report(user, { id: "", state_silo: SANDBOX.state, district: SANDBOX.district }) &&
+    can.decideTransfer(user, sandbox, sandbox);
+
+  const startEmergency = async () => {
+    setEmergencyBusy(true);
+    setEmergencyError(null);
+    try {
+      // The healthiest facilities first: the drop is largest and most honest
+      // where there was the most cover to lose.
+      const pins = (await api.pinsInState(SANDBOX.state, null, 400))
+        .filter((p) => p.district === SANDBOX.district)
+        .sort((a, b) => (b.min_days ?? 0) - (a.min_days ?? 0));
+      for (const pin of pins.slice(0, 5)) {
+        const detail = await api.facility(pin.id);
+        if (pickSku(detail.skus)) {
+          setSelected(null);
+          setLoopAuto(true);
+          setLoopFor(detail);
+          return;
+        }
+      }
+      setEmergencyError(`No facility in ${SANDBOX.label} has a medicine with cover left to lose.`);
+    } catch (e) {
+      setEmergencyError(e instanceof ApiError ? e.message : "Could not start the drill");
+    } finally {
+      setEmergencyBusy(false);
+    }
+  };
+
   // Demo-only: sends an SMS-shaped report through the real pipeline. Offered
   // only when the server is in demo mode, and only for a facility this
   // person is allowed to report for.
@@ -618,10 +656,21 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
         <aside className="z-[1000] flex w-[400px] shrink-0 flex-col border-r border-line bg-panel">
           {loopFor ? (
             <LiveLoopPanel
+              key={`${loopFor.id}:${loopAuto}`}
               facility={loopFor}
+              autoStart={loopAuto}
               user={user}
               events={events}
-              onClose={() => setLoopFor(null)}
+              onClose={() => {
+                setLoopFor(null);
+                setLoopAuto(false);
+              }}
+              onOpenFederation={() => {
+                setLoopFor(null);
+                setLoopAuto(false);
+                setSelected(null);
+                setMode("federation");
+              }}
               onChanged={() => {
                 setRefreshKey((k) => k + 1);
                 pollNow();
@@ -801,14 +850,33 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
             </div>
           </div>
 
-          {view.tier !== "state" && (
-            <button
-              onClick={goNational}
-              className="absolute top-3 right-3 z-[900] rounded-lg border border-line bg-panel px-3 py-1.5 text-[12px] font-medium text-ink shadow-sm hover:bg-canvas"
-            >
-              Back to all of India
-            </button>
-          )}
+          <div className="absolute top-3 right-3 z-[900] flex flex-col items-end gap-1.5">
+            <div className="flex items-center gap-2">
+              {canRunEmergency && !loopFor && (
+                <button
+                  onClick={startEmergency}
+                  disabled={emergencyBusy}
+                  title={`Drops one medicine at a ${SANDBOX.label} facility below the critical line and carries it through detection, Gemini, the optimiser, approval and receipt. Writes stay in the sandbox.`}
+                  className="rounded-lg bg-crit px-3 py-1.5 text-[12px] font-semibold text-white shadow-sm hover:bg-crit/90 focus:ring-2 focus:ring-crit/30 focus:outline-none disabled:opacity-60"
+                >
+                  {emergencyBusy ? "Choosing a facility…" : "Simulate emergency"}
+                </button>
+              )}
+              {view.tier !== "state" && (
+                <button
+                  onClick={goNational}
+                  className="rounded-lg border border-line bg-panel px-3 py-1.5 text-[12px] font-medium text-ink shadow-sm hover:bg-canvas"
+                >
+                  Back to all of India
+                </button>
+              )}
+            </div>
+            {emergencyError && (
+              <p role="alert" className="max-w-[280px] rounded-md bg-panel px-2 py-1 text-[11.5px] text-crit shadow-sm">
+                {emergencyError}
+              </p>
+            )}
+          </div>
 
           {toast && (
             <div

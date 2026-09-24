@@ -60,15 +60,21 @@ interface Step {
   at: number | null;
   detail: string | null;
   note: string | null;
+  /** Set only on the two model steps: true when the server says Gemini wrote
+   *  the text, false when it fell back to the computed line. */
+  ai: boolean | null;
 }
 
 const STEP_TITLES: [string, string][] = [
   ["reading", "Reading committed"],
   ["recompute", "Days of stock recomputed"],
   ["flip", "Condition re-evaluated"],
+  ["brief", "Gemini explains the risk"],
   ["plan", "Optimiser proposes a transfer"],
+  ["why", "Gemini explains the transfer"],
   ["approve", "Officer approves"],
-  ["moved", "Stock moves"],
+  ["moved", "Donor dispatches"],
+  ["receipt", "Receiver confirms arrival"],
   ["feed", "Activity feed"],
 ];
 
@@ -81,7 +87,25 @@ const freshSteps = (): Step[] =>
     at: null,
     detail: null,
     note: null,
+    ai: null,
   }));
+
+function seconds(ms: number): string {
+  return `${(ms / 1000).toFixed(1)} s`;
+}
+
+/** One facility's stock of the moved medicine, read from the facility itself. */
+interface Holding {
+  name: string;
+  qty: number;
+  days: number | null;
+}
+
+async function holding(id: string, sku: string): Promise<Holding> {
+  const d = await api.facility(id);
+  const s = d.skus.find((x) => x.sku_code === sku);
+  return { name: d.name, qty: s?.qty_on_hand ?? 0, days: s?.days_of_stock ?? null };
+}
 
 const STATUS_WORD: Record<Status, string> = {
   healthy: "adequate",
@@ -99,7 +123,7 @@ function qty(n: number, unit: string): string {
 }
 
 /** The medicine with the most cover, so the drop is the largest true one. */
-function pickSku(skus: SkuStock[]): SkuStock | null {
+export function pickSku(skus: SkuStock[]): SkuStock | null {
   const usable = skus.filter(
     (s) =>
       // A controlled drug is excluded from the solver by design, so choosing
@@ -135,23 +159,34 @@ export function LiveLoopPanel({
   facility,
   user,
   events,
+  autoStart = false,
   onClose,
   onChanged,
   onFocus,
+  onOpenFederation,
 }: {
   facility: FacilityDetail;
   user: User;
-  /** The app's own poll, so step seven reports the feed rather than a copy. */
+  /** The app's own poll, so the last step reports the feed rather than a copy. */
   events: LiveEvent[];
+  /** Start the chain on open, for the one-click "Simulate emergency". */
+  autoStart?: boolean;
   onClose: () => void;
   /** Ask the map and the panels to re-read after a write. */
   onChanged: () => void;
   onFocus: (lat: number, lng: number) => void;
+  onOpenFederation?: () => void;
 }) {
   const [steps, setSteps] = useState<Step[]>(freshSteps);
-  const [phase, setPhase] = useState<"idle" | "running" | "awaiting" | "done" | "failed">("idle");
+  const [phase, setPhase] = useState<
+    "idle" | "running" | "awaiting" | "receiving" | "done" | "failed"
+  >("idle");
   const [transfer, setTransfer] = useState<Transfer | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Donor and receiver, read from the facilities themselves before the
+  // approval and after the receipt, so the two views can be compared.
+  const [before, setBefore] = useState<{ donor: Holding; here: Holding } | null>(null);
+  const [after, setAfter] = useState<{ donor: Holding; here: Holding } | null>(null);
   const started = useRef<number>(0);
   const sinceRef = useRef<string>("");
 
@@ -181,6 +216,8 @@ export function LiveLoopPanel({
     setSteps(freshSteps());
     setTransfer(null);
     setError(null);
+    setBefore(null);
+    setAfter(null);
     setPhase("running");
     onFocus(facility.lat, facility.lng);
 
@@ -233,11 +270,34 @@ export function LiveLoopPanel({
       detail: committed.status_changed
         ? `This facility went from ${STATUS_WORD[committed.status_before]} to ${STATUS_WORD[committed.status_after]}.`
         : `${target.sku_name} is now critical. The facility was already ${STATUS_WORD[committed.status_before]} on another medicine, so its dot does not change colour.`,
-      note: "A dot carries the facility's worst medicine, which is why one can move without the other.",
+      note: "Flagged by the rule — under 3 days of stock is critical — not by a model. A dot carries the facility's worst medicine, which is why one can move without the other.",
     });
     onChanged();
 
-    // ------------------------------------------------------ 4. the plan ---
+    // ------------------------------------------- 4. Gemini reads the risk ---
+    // The rule decided; Gemini says what it means for the people there. A
+    // model failure never stops the chain: the endpoint falls back to the
+    // computed line and says so.
+    mark("brief", {
+      state: "running",
+      call: `POST /api/facilities/${facility.id}/briefing`,
+    });
+    const briefStarted = performance.now();
+    try {
+      const b = await api.briefing(facility.id, "en");
+      mark("brief", {
+        state: "done",
+        ai: b.ai,
+        detail: b.body,
+        note: b.ai
+          ? `${b.model} · ${seconds(performance.now() - briefStarted)} round trip${b.cached ? " · cached answer for the same stock position" : ""}`
+          : `Computed line, not Gemini${b.note ? ` — ${b.note}` : ""}`,
+      });
+    } catch (e) {
+      mark("brief", { state: "skipped", detail: e instanceof ApiError ? e.message : String(e) });
+    }
+
+    // ------------------------------------------------------ 5. the plan ---
     mark("plan", {
       state: "running",
       call: `POST /api/transfers/plan {state: "${SANDBOX.state}", sku: "${target.sku_code}"}`,
@@ -267,6 +327,22 @@ export function LiveLoopPanel({
     } catch (e) {
       return fail("plan", e);
     }
+
+    // ------------------------------------- 6. Gemini explains the proposal ---
+    mark("why", { state: "running", call: "POST /api/transfers/explain" });
+    try {
+      const w = await api.explainTrip([proposal.id]);
+      mark("why", {
+        state: "done",
+        ai: w.ai,
+        detail: w.text,
+        note: w.ai
+          ? `${w.model} · ${seconds(w.latency_ms ?? 0)}${w.cached ? " · cached answer for the same figures" : ""}`
+          : `Computed line, not Gemini${w.note ? ` — ${w.note}` : ""}`,
+      });
+    } catch (e) {
+      mark("why", { state: "skipped", detail: e instanceof ApiError ? e.message : String(e) });
+    }
     setPhase("awaiting");
     onChanged();
   }, [facility, mark, fail, onChanged, onFocus]);
@@ -274,6 +350,14 @@ export function LiveLoopPanel({
   const approve = useCallback(async () => {
     if (!transfer) return;
     setPhase("running");
+    try {
+      setBefore({
+        donor: await holding(transfer.from.id, transfer.sku_code),
+        here: await holding(facility.id, transfer.sku_code),
+      });
+    } catch {
+      setBefore(null);
+    }
     mark("approve", { state: "running", call: `POST /api/transfers/${transfer.id}/approve` });
     let decided: Transfer;
     try {
@@ -287,26 +371,73 @@ export function LiveLoopPanel({
       note: "The donor is re-checked against its stock now, not its stock when the plan was made — a stale plan is refused here.",
     });
 
-    // ------------------------------------------------ 6. the stock moves ---
+    // -------------------------------------------- 8. the donor dispatches ---
     mark("moved", { state: "running", call: `GET /api/facilities/${transfer.from.id}` });
     try {
       const [donor, here] = await Promise.all([
-        api.facility(transfer.from.id),
-        api.facility(facility.id),
+        holding(transfer.from.id, transfer.sku_code),
+        holding(facility.id, transfer.sku_code),
       ]);
-      const donorSku = donor.skus.find((s) => s.sku_code === transfer.sku_code);
-      const hereSku = here.skus.find((s) => s.sku_code === transfer.sku_code);
       mark("moved", {
         state: "done",
-        detail: `${donor.name} is down to ${qty(donorSku?.qty_on_hand ?? 0, transfer.unit)}; batch TRF-${decided.id} is in transit.`,
-        note: `Here: still ${qty(hereSku?.qty_on_hand ?? 0, transfer.unit)} — the recipient is credited when the delivery is confirmed, not when the lorry leaves.`,
+        detail: `${donor.name} is down to ${qty(donor.qty, transfer.unit)}; batch TRF-${decided.id} is in transit.`,
+        note: `Here: still ${qty(here.qty, transfer.unit)} — the recipient is credited when the delivery is confirmed, not when the lorry leaves.`,
       });
     } catch (e) {
       return fail("moved", e);
     }
     onChanged();
-    setPhase("done");
+    setPhase("receiving");
   }, [transfer, user.name, facility.id, mark, fail, onChanged]);
+
+  // ------------------------------------------- 9. the receiver confirms ---
+  // A second person at the other end, in the real system. Kept as its own
+  // click so the two-sided ledger (spec 26.3) is visible rather than implied.
+  const confirmArrival = useCallback(async () => {
+    if (!transfer) return;
+    setPhase("running");
+    mark("receipt", { state: "running", call: `GET /api/movements?facility=${facility.id}` });
+    try {
+      const ledger = await api.movements({
+        facility: facility.id,
+        sku: transfer.sku_code,
+        view: "all",
+        limit: 50,
+      });
+      const batch = ledger.movements.find((m) => m.transfer_id === transfer.id);
+      if (!batch) {
+        mark("receipt", {
+          state: "failed",
+          detail: `No batch for transfer ${transfer.id} is on ${facility.name}'s ledger yet.`,
+        });
+        setPhase("failed");
+        return;
+      }
+      mark("receipt", { state: "running", call: `POST /api/movements/${batch.id}/receipt` });
+      const r = await api.confirmReceipt(batch.id, batch.qty_dispatched, "Confirmed in the emergency drill");
+      const [donor, here] = await Promise.all([
+        holding(transfer.from.id, transfer.sku_code),
+        holding(facility.id, transfer.sku_code),
+      ]);
+      setAfter({ donor, here });
+      mark("receipt", {
+        state: "done",
+        detail: `${qty(r.movement.qty_received ?? batch.qty_dispatched, transfer.unit)} received at ${facility.name}; it now holds ${qty(r.qty_on_hand, transfer.unit)}.`,
+        note: "Dispatch and receipt are logged independently, so a short delivery would surface on the Movements tab rather than being assumed away.",
+      });
+    } catch (e) {
+      return fail("receipt", e);
+    }
+    onChanged();
+    setPhase("done");
+  }, [transfer, facility.id, facility.name, mark, fail, onChanged]);
+
+  const autoRan = useRef(false);
+  useEffect(() => {
+    if (!autoStart || autoRan.current) return;
+    autoRan.current = true;
+    void run();
+  }, [autoStart, run]);
 
   // ------------------------------------------------------- 7. the feed ---
   // Read from the app's own poll rather than a second request, so what is
@@ -350,11 +481,11 @@ export function LiveLoopPanel({
           ← {facility.name}
         </button>
         <h2 className="mt-2 text-[13px] font-semibold text-ink">
-          Simulate a stock-out · स्टॉक-आउट का पूर्वाभ्यास
+          Simulate an emergency · आपात स्थिति का पूर्वाभ्यास
         </h2>
         <p className="mt-0.5 text-[12px] text-ink-2">
-          One pass through the whole chain, on real endpoints. Each step shows what it called and
-          what came back.
+          A stock-out at {facility.name}, carried through the whole chain on real endpoints. Each
+          step shows what it called and what came back; the two decisions stay with a person.
         </p>
         <p className="mt-1.5 text-[11px] leading-snug text-ink-3">
           Writes are confined to {SANDBOX.label}. <code className="font-mono">scripts/reset_nashik.py</code>{" "}
@@ -382,6 +513,16 @@ export function LiveLoopPanel({
                     }`}
                   >
                     {i + 1}. {s.title}
+                    {s.ai === true && (
+                      <span className="ml-1.5 rounded border border-brand/30 bg-brand/[0.06] px-1 py-px text-[10px] font-semibold text-brand">
+                        <span aria-hidden="true">⚡</span> Gemini
+                      </span>
+                    )}
+                    {s.ai === false && (
+                      <span className="ml-1.5 rounded border border-line bg-canvas px-1 py-px text-[10px] font-semibold text-ink-2">
+                        Rule-based
+                      </span>
+                    )}
                   </span>
                   <span className="shrink-0 font-mono text-[11px] tabular-nums text-ink-3">
                     {stamp(s.at)}
@@ -421,6 +562,79 @@ export function LiveLoopPanel({
           </div>
         )}
 
+        {phase === "receiving" && transfer && (
+          <div className="mt-3 rounded-md border border-brand/30 bg-brand/[0.04] px-2.5 py-2.5">
+            <p className="text-[12.5px] leading-snug text-ink">
+              The batch is on the road. {facility.name} is credited only when someone there confirms
+              what arrived.
+            </p>
+            <button
+              onClick={confirmArrival}
+              className="mt-2 h-9 w-full rounded-md bg-brand text-[13px] font-medium text-white hover:bg-brand/90 focus:ring-2 focus:ring-brand/30 focus:outline-none"
+            >
+              Confirm arrival at {facility.name}
+            </button>
+          </div>
+        )}
+
+        {before && after && transfer && (
+          <div className="mt-3 rounded-md border border-line px-2.5 py-2">
+            <div className="text-[10.5px] font-semibold tracking-[0.09em] text-ink-3 uppercase">
+              {transfer.sku_name}, read from each facility
+            </div>
+            <table className="mt-1 w-full text-[11.5px]">
+              <thead>
+                <tr className="text-ink-3">
+                  <th className="py-1 text-left font-medium">Facility</th>
+                  <th className="py-1 text-right font-medium">Before</th>
+                  <th className="py-1 text-right font-medium">After</th>
+                </tr>
+              </thead>
+              <tbody className="font-mono tabular-nums">
+                {(
+                  [
+                    ["Donor", before.donor, after.donor],
+                    ["Receiver", before.here, after.here],
+                  ] as const
+                ).map(([role, b, a]) => (
+                  <tr key={role} className="border-t border-line">
+                    <td className="py-1 font-sans">
+                      <div className="text-ink">{a.name}</div>
+                      <div className="text-[10.5px] text-ink-3">{role}</div>
+                    </td>
+                    <td className="py-1 text-right text-ink-2">
+                      {qty(b.qty, transfer.unit)}
+                      <div className="text-[10.5px] text-ink-3">{formatDays(b.days)}</div>
+                    </td>
+                    <td className="py-1 text-right text-ink">
+                      {qty(a.qty, transfer.unit)}
+                      <div className="text-[10.5px] text-ink-3">{formatDays(a.days)}</div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {phase === "done" && (
+          <div className="mt-3 rounded-md border border-line bg-canvas px-2.5 py-2">
+            <p className="text-[12px] leading-snug text-ink-2">
+              {SANDBOX.district} is in Maharashtra, one of the four state silos that train the
+              shared forecasting model. This reading is now in the rows that silo trains on; it reaches the
+              shared model at the next round, and only as weights.
+            </p>
+            {onOpenFederation && (
+              <button
+                onClick={onOpenFederation}
+                className="mt-1.5 text-[12px] font-medium text-brand hover:underline"
+              >
+                Open the Federation tab →
+              </button>
+            )}
+          </div>
+        )}
+
         {error && phase === "failed" && (
           <p role="alert" className="mt-3 text-[12px] text-crit">
             {error}
@@ -431,7 +645,7 @@ export function LiveLoopPanel({
       <div className="shrink-0 border-t border-line px-3 py-2.5">
         <button
           onClick={run}
-          disabled={phase === "running" || !mayWrite}
+          disabled={phase === "running" || phase === "receiving" || !mayWrite}
           className="h-9 w-full rounded-md bg-brand text-[13px] font-medium text-white hover:bg-brand/90 focus:ring-2 focus:ring-brand/30 focus:outline-none disabled:opacity-55"
         >
           {phase === "idle"
