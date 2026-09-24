@@ -1,300 +1,357 @@
-# SwasthSetu — राष्ट्रीय स्वास्थ्य आपूर्ति सेतु
+# SwasthSetu · स्वस्थसेतु
 
-**A federated AI platform for medicine, bed and staffing visibility across India's PHC and CHC
-network. Four state health departments train one shared demand-forecasting model without a single
-facility record leaving the state it belongs to, and the platform turns those forecasts into
-stock-out warnings and cross-district transfer proposals that a human must approve.**
+**Four states train one medicine-demand model without sharing a single facility record, and the
+platform turns its forecasts into stock-out warnings and transfer proposals that a person approves.**
 
----
+The track asks for *"a federated AI platform for national-scale health resource and supply chain
+management"*, with *"real-time visibility into medicine stocks, bed availability and medical
+personnel attendance across India's PHC network; demand forecasting; early warnings for stock-outs
+during health emergencies; automated cross-district resource redistribution; and shared predictive
+modelling across states."* SwasthSetu is a working prototype of exactly that loop, from a report
+arriving at a primary health centre to a medicine arriving at the one that ran out.
 
-## ⚠️ All data here is synthetic
+> [!IMPORTANT]
+> **All data is synthetic.** Every facility, stock figure, bed count, check-in and consignment is
+> generated. Districts and coordinates are real places so the map is honest about geography, but
+> no real patient or facility record exists anywhere in this system, and the schema has nowhere to
+> put patient data.
+>
+> **Generalisation, not training.** Only four states train the model: Maharashtra, Kerala, Bihar
+> and Uttar Pradesh. Forecasts shown for any other state or union territory, including
+> **Lakshadweep (LD)** and **Dadra & Nagar Haveli and Daman & Diu (DH)**, are the shared model
+> generalising to regions it never saw. The model reads a 28-day consumption window and calendar
+> features, not a state identifier, so this is a real property of it; it is still generalisation,
+> not training.
 
-Every facility, stock figure, bed count, staff check-in and consignment in this repository and in
-the live demo is **generated**. Districts and coordinates are real places so the map is
-geographically honest, but **no real patient or facility record exists anywhere in this system**,
-and none ever has. The platform holds no patient-level data at all, by design — see
-[Privacy](#privacy-and-honest-limits).
+## Contents
 
----
+- [Try it](#try-it)
+- [How this maps to the judging criteria](#how-this-maps-to-the-judging-criteria)
+- [Key features](#key-features)
+- [Where Google AI does the work](#where-google-ai-does-the-work)
+- [Architecture](#architecture)
+- [The federated result](#the-federated-result)
+- [Run it locally](#run-it-locally)
+- [Tests](#tests)
+- [Deploy](#deploy)
+- [Privacy](#privacy)
+- [Known limitations and roadmap](#known-limitations-and-roadmap)
+- [Repository layout](#repository-layout)
 
 ## Try it
 
 **<https://swasthsetu-m4x5.onrender.com>**
 
-| | |
-|---|---|
-| Email | `admin@demo.swasthsetu.in` |
-| Password | `SwasthSetu-Demo-2026` |
+On the sign-in page, press **Continue →** next to **Maharashtra NHM Officer · State officer**. No
+password is needed. This account sees Maharashtra's data, can run the emergency drill and approve
+transfers, and cannot see other states' audit queues. The server enforces that, not the interface.
 
-Or press any **Continue →** button on the sign-in page to enter as a state officer, a district
-logistics officer or a facility pharmacist — no password needed. Each role sees only what that
-person is allowed to see.
+> [!NOTE]
+> **The first load takes about a minute.** The demo runs on a free instance that sleeps when idle,
+> and it applies database migrations before answering. A "Waking the server" screen shows progress;
+> every page after that is immediate.
 
-> **The first load takes about a minute.** The demo runs on a free instance that stops when nobody
-> is using it, and the container applies its database migrations before it answers. A "Waking the
-> server" screen shows the progress. Every page after the first is immediate.
+**A two-minute path:** press **Simulate emergency** on the map → watch the chain run → press
+**Approve** → press **Confirm arrival** → open **Redistribution → High impact** → open
+**Federation**.
 
----
+## How this maps to the judging criteria
 
-## What it does
+| Criterion | What is in the prototype | Proof |
+|---|---|---|
+| **AI / Technical Execution** (25%) | Gemini reads ward photos into verified bed counts and writes the "why" behind each transfer and trust flag. A PyTorch LSTM trains across four state silos on Flower's deployment engine. | [`vision.py`](backend/app/vision.py) · [`test_explanations.py`](backend/tests/test_explanations.py) · [`test_beds.py`](backend/tests/test_beds.py) · [`checks/federation.py`](backend/checks/federation.py) (21/21) |
+| **Problem-Solution Fit** (20%) | One loop covers the track: stock, beds and attendance in; forecast; early warning; a transfer proposal; a human approval; a confirmed receipt. | **Simulate emergency** button ([`liveloop.tsx`](frontend/src/liveloop.tsx)) · [`redistribution.py`](backend/app/redistribution.py) · [`test_redistribution.py`](backend/tests/test_redistribution.py) |
+| **Depth & Reach** (20%) | 3,510 facilities in 157 districts across all 28 states and 8 union territories. Four state health departments train the shared model. English and Hindi throughout. | [`test_seed_geography.py`](backend/tests/test_seed_geography.py) · [`geo.py`](backend/app/geo.py) · **Federation** tab |
+| **Deployability** (20%) | One Docker service; migrations run at start. Every external service has a no-credential fallback. Production refuses to boot with unsafe settings. Four roles are scoped by the server. | [`render.yaml`](render.yaml) · [`checks/platform.py`](backend/checks/platform.py) (29/29) · [`test_api_boundary.py`](backend/tests/test_api_boundary.py) · [`test_auth.py`](backend/tests/test_auth.py) |
+| **Impact** (15%) | Officers see a stock-out days before it happens, and audit visits go where the records disagree rather than at random. **No figure for lives or money saved is claimed:** synthetic data cannot support one. | [`trust.py`](backend/app/trust.py) · [`test_trust.py`](backend/tests/test_trust.py) · **Data trust** tab |
 
-Three steps, and the whole product is the loop between them.
+## Key features
 
-**1 · A facility reports.** Stock, beds or attendance arrive through one ingestion pipeline,
-whatever the channel — the web app, an SMS in a forgiving grammar (`ORS 60 ZINC 20`), or a ward
-photograph. Every channel normalises into the same `StockReading` through one
-dedupe → identify → extract → resolve → validate → score → commit → recompute → emit → confirm
-spine, so a new channel adds an adapter and nothing else.
+Each line says what the feature does today. Screen names are tabs in the app.
 
-**2 · A shared model forecasts the run-out.** Four state silos train one LSTM on their own rows.
-Only weights move. The dashboard reads pre-computed predictions from a table — the trained model
-never runs inside the web service, so a bad training run degrades to the burn-rate rule instead of
-taking the site down.
+**Live national map.** Every facility is coloured by its worst medicine, with state and district
+roll-ups. Days of stock come from the last 28 days of readings, or from the federated forecast when
+one is fresh (`FORECAST_MODE`). Under 3 days is critical, and 3 to 7 is at risk.
+<!-- screenshot: docs/screenshots/map.png -->
 
-**3 · A transfer is proposed, and a human approves it.** An OR-Tools min-cost-flow solver matches
-surplus to deficit over road distances, never proposing to take a donor below its own safety
-stock. **Nothing auto-executes.** Controlled substances are excluded from the solver entirely and
-routed to a manual queue.
+**Simulate emergency.** One click drops a medicine at a Nashik facility below the critical line and
+carries it through the real endpoints:
+1. The stock recomputes, and the rule flags the facility as critical.
+2. Gemini explains the risk.
+3. OR-Tools proposes a donor, and Gemini explains why.
+4. **You approve.** The donor dispatches.
+5. **The receiver confirms arrival.**
+6. Both facilities' stock is shown side by side, before and after.
 
-Underneath all three sits a **trust layer**: six weighted, explainable signals — never an opaque
-model — that cross-reference attendance against patient footfall, dispatches against receipts, and
-bed photos against the register. A facility whose numbers disagree with each other is flagged for
-audit, and its silo contributes proportionally less to the national model in the very round its
-paperwork degrades.
+Stock writes stay inside the Nashik sandbox; the plan step also re-solves Maharashtra's proposals
+for that one medicine. [`reset_nashik.py`](backend/scripts/reset_nashik.py) restores the sandbox.
+<!-- screenshot: docs/screenshots/emergency.png -->
 
----
+**Redistribution.** A min-cost-flow solver (OR-Tools, with a greedy fallback) matches surplus to
+deficit. It never takes a donor below its own 14-day floor, and never plans controlled substances,
+which go to a manual review list instead. Trips are grouped by vehicle run.
+- **High impact** shows the ten most urgent trips that alone lift a critical facility out of
+  critical.
+- **Nothing is ever executed without an officer's approval**, which re-checks the donor's stock at
+  that moment.
+<!-- screenshot: docs/screenshots/redistribution.png -->
 
-## Where Google AI does real work
+**Two-sided medicine ledger.** A dispatch is logged at the source and the receipt is confirmed at
+the destination, separately. A short or unconfirmed delivery surfaces on **Movements**, not only in
+an audit. A receiver's stock rises on confirmation, not when the vehicle leaves.
+<!-- screenshot: docs/screenshots/movements.png -->
 
-**Gemini vision is load-bearing, not decorative.** Remove it and bed capture stops working.
+**Data trust.** Six weighted rules check each facility's own signals against each other:
+- attendance against patients seen
+- stock movement against footfall
+- the Gemini bed count against the admission register
+- delivery confirmations
+- implausibly smooth figures
+- how much of what it reports can be verified
 
-A facility photographs its ward whiteboard, which carries a **rotating four-character code** issued
-that morning and expiring at midnight. Gemini reads the photograph and returns, in one pass: the
-total beds, how many are occupied, and the code it can see written on the board. The platform then
-checks that code against the one it issued, and the photograph's location against the facility's
-registered coordinates. A report only reaches `verified` if both halves pass — an old photograph
-re-uploaded fails on the code, and a photograph taken elsewhere fails on the geofence.
+It is scored live, one state at a time. A low score makes that facility's stock warning trip
+earlier, and ranks a searchable audit queue. It is worded as a reason to visit, never an
+accusation, and it attaches to facilities, never to people.
+<!-- screenshot: docs/screenshots/trust.png -->
 
-That is genuine multimodal reasoning turning an unstructured image into a verifiable database row,
-not OCR for its own sake. It runs live in production (`LLM_MODE=live`). Vision uses
-`gemini-3.1-flash-lite` and the plain-language briefings use `gemini-3.5-flash-lite` — two
-different models on purpose, because the free tier counts requests per day *per model*, so a
-day of ward photographs cannot exhaust the briefings or the reverse.
+**Bed capture.** A ward photo must show that day's rotating code.
+- Gemini returns the total beds, the occupied beds and the code it reads.
+- A report is marked `verified` only if the code matches and the photo's location passes the
+  facility geofence.
+<!-- screenshot: docs/screenshots/beds.png -->
 
-**Google Maps** does two separate jobs when `GOOGLE_MAPS_SERVER_KEY` is set: road distances from
-the Routes API feed the redistribution solver's cost function, because straight-line distance is a
-poor proxy on rural road networks; and geofence verification checks where a check-in or
-photograph actually happened.
+**Federation.** Each round's row shows when it finished, its error, the exact bytes sent and a
+weights hash.
+- **0 facility rows transmitted** is asserted by the aggregator before each round is written.
+- The size is 22,788 bytes every round because the model is 5,697 numbers × 4 bytes. The hash is
+  what changes.
+- **Run next round** trains one real round on the four silos. It is local only: see
+  [limitations](#known-limitations-and-roadmap).
+<!-- screenshot: docs/screenshots/federation.png -->
 
-The public demo runs **without** a Maps key, on the tested `MAPS_MODE=osm` fallback: a haversine
-distance multiplied by 1.3 to approximate a road route. Every screen that shows one of those
-distances says "straight-line estimate" next to it and draws the route as a dashed line, because a
-check that did not run must never be displayed as one that passed. That is the same rule the
-geofence, the rotating code and the bill reader all follow.
+**One ingestion pipeline.** The web form, SMS in a forgiving keypad grammar (`ORS 60 ZINC 20`),
+WhatsApp and IVR all normalise into the same stock reading. On the demo, phone channels run through
+the built-in simulator (**Field reports**).
 
----
+## Where Google AI does the work
 
-## What works, and what does not
+| Google AI | What it does | Where it is load-bearing |
+|---|---|---|
+| **Gemini vision** (`gemini-3.1-flash-lite`) | Reads a ward photo into total beds, occupied beds and the rotating code in one pass | Bed capture. Without it, no bed report can be verified. |
+| **Gemini text** (`gemini-3.5-flash-lite`) | Writes a facility's daily briefing in English and Hindi, and the "why" behind a proposed trip or a trust flag | Emergency drill steps 4 and 6, trip cards, **Data trust** |
+| **Google Maps** Routes API and Map Tiles | Road distances for the solver, and the basemap | Behind `MAPS_MODE=google`. The public demo runs the tested `osm` fallback and labels those distances as straight-line estimates. |
 
-Measured against the track's stated use case. Nothing below is aspirational.
+Three rules keep the Gemini text honest, all enforced in [`vision.py`](backend/app/vision.py) and
+tested in [`test_explanations.py`](backend/tests/test_explanations.py):
+- **No invented numbers.** An answer containing any number that is not in its inputs is discarded.
+- **No accusations.** Trust wording that reads as an accusation is discarded.
+- **Honest labels.** The screen says "⚡ Gemini" only when the model actually wrote the text, and
+  "Rule-based" otherwise.
 
-| Capability | Status |
-|---|---|
-| Real-time medicine stock visibility | **Working** — 3,510 facilities, 2.48M readings |
-| Bed availability | **Working** — Gemini vision, rotating code, geofence |
-| Personnel attendance | **Working** — cell-ID/GPS geofence, footfall cross-check |
-| Demand forecasting | **Working** — 21,019 published forecasts |
-| Early stock-out warning | **Working** — reorder floor, trust-widened thresholds |
-| Cross-district redistribution | **Working** — OR-Tools, human approval, safety floors |
-| Shared modelling across states | **Working** — 4 silos, 0 raw rows transmitted |
-| Scale across India | **Working** — 28 states + 8 union territories, 157 districts |
-| **Emergency demand surge** | **Roadmap** — outbreak pre-positioning is designed but not built |
-| **Multilingual / voice** | **Partial** — Hindi labels throughout; no voice input yet |
-
-### The federated result
-
-Nine rounds, four silos, `FedProx(mu=0.01)` on Flower's real deployment engine — a live SuperLink
-and four SuperNode processes, not a simulation.
-
-| | |
-|---|---|
-| Model error (MAE) | **1.0674 → 0.1106** |
-| Burn-rate rule, same held-out weeks | 0.1494 |
-| Weights per round | 22,788 bytes (8 tensors, 5,697 parameters) |
-| **Facility rows transmitted** | **0** |
-
-That zero is **asserted in code, not claimed in a slide**. The aggregator inspects every reply
-before aggregating and raises if anything but model weights and scalar metrics arrives, so the
-round stops rather than quietly averaging a leak. See
-[`backend/federation/`](backend/federation/README.md) and the Federation tab in the app, which
-shows the measured bytes, every tensor shape and a SHA-256 of the weights.
-
----
+Gemini runs on click, never on page load, and identical requests are cached. `vision.py` is the
+only module that reaches Gemini, which [`test_api_boundary.py`](backend/tests/test_api_boundary.py)
+enforces.
 
 ## Architecture
 
-```
-                    ┌───────────────────────────────────────┐
-  SMS / WhatsApp ──▶ │  one ingestion spine  (app/ingest.py) │
-  web app ─────────▶ │  dedupe → identify → extract →        │
-  ward photo ──────▶ │  resolve → validate → score → commit  │
-                    └──────────────────┬────────────────────┘
-                                       ▼
-                          ┌────────────────────────┐
-                          │   PostgreSQL 17        │
-                          │   (no PostGIS —        │
-                          │    haversine in SQL)   │
-                          └──┬─────────────┬───────┘
-         reads rows only     │             │   one state per SuperNode
-                             ▼             ▼
-              ┌──────────────────┐   ┌──────────────────────────┐
-              │  FastAPI + React │   │  Flower SuperLink        │
-              │  one origin,     │   │  + 4 SuperNodes (FedProx)│
-              │  no torch        │   │  weights only ───────────┼──┐
-              └──────────────────┘   └──────────────────────────┘  │
-                       ▲                                           │
-                       └────────  forecasts table  ◀───────────────┘
-                                  (publish_forecast.py)
+```mermaid
+flowchart LR
+    subgraph IN["Facilities report"]
+        WEB["Web app"]
+        SMS["SMS / WhatsApp / IVR"]
+        PHOTO["Ward photo"]
+    end
+
+    PHOTO -->|image| GV["Gemini vision"]
+    WEB --> SPINE["Ingestion spine<br/>dedupe, identify, extract,<br/>validate, score, commit"]
+    SMS --> SPINE
+    GV --> SPINE
+    SPINE --> DB[("PostgreSQL")]
+
+    subgraph FL["Flower deployment engine"]
+        LINK["SuperLink<br/>FedProx, trust-weighted"]
+        MH["Maharashtra silo"]
+        KL["Kerala silo"]
+        BR["Bihar silo"]
+        UP["Uttar Pradesh silo"]
+        MH --> LINK
+        KL --> LINK
+        BR --> LINK
+        UP --> LINK
+    end
+
+    DB -.->|"each silo reads only its own state"| MH
+    DB -.-> KL
+    DB -.-> BR
+    DB -.-> UP
+    LINK -->|"weights only, 0 rows asserted"| ROUNDS[("federation_rounds")]
+    LINK --> PUB["publish_forecast.py"]
+    PUB --> FC[("forecasts")]
+
+    DB --> API["FastAPI + React<br/>one origin, no PyTorch"]
+    FC --> API
+    ROUNDS --> API
+    API -->|on click| GT["Gemini text"]
+    API --> OR["OR-Tools solver"]
+    OR -->|"proposals; a person approves"| DB
 ```
 
-**"Publishing, not serving."** The web image carries no PyTorch. Training writes predictions into
-`forecasts`; the API only ever reads rows.
+**Publishing, not serving.** The web image carries no PyTorch. Training writes predictions into
+`forecasts` and the API only reads rows, so a bad training run falls back to the burn-rate rule
+instead of breaking the dashboard.
 
-| Layer | Choice |
+| Layer | What is used |
 |---|---|
-| API | FastAPI, SQLAlchemy 2 async, asyncpg, Alembic |
-| Database | PostgreSQL 17, no PostGIS (haversine in SQL) |
-| Frontend | React 19, Vite 6, TypeScript, Tailwind v4, Leaflet directly |
-| Federation | Flower 1.37 deployment engine, PyTorch `DemandLSTM` |
+| API | FastAPI, SQLAlchemy 2 (async), asyncpg, Alembic, Pydantic 2 |
+| Database | PostgreSQL 17 (no PostGIS; haversine in SQL) |
+| Frontend | React 19, Vite 6, TypeScript, Tailwind CSS 4, Leaflet |
+| Federated learning | Flower 1.37 deployment engine (SuperLink + 4 SuperNodes), FedProx, PyTorch `DemandLSTM` |
 | Optimiser | OR-Tools `SimpleMinCostFlow`, greedy fallback |
-| AI | Gemini `gemini-3.1-flash-lite` (vision) and `gemini-3.5-flash-lite` (briefings) behind `LLM_MODE` |
+| **Google AI** | **Gemini** vision and text via `LLM_MODE`; **Google Maps** Routes and Map Tiles via `MAPS_MODE` |
+| Messaging | Twilio SMS / WhatsApp / voice via `COMMS_MODE` (simulator on the demo) |
+| Hosting | One Docker service on Render |
 
-**Every external service has a zero-credential fallback, and both paths stay tested.**
-`LLM_MODE`, `MAPS_MODE` and `COMMS_MODE` each default to a mode that needs no API key, so the
-platform starts, seeds and demonstrates fully with every credential blank. A test enforces this by
-booting the app in a subprocess with an empty configuration.
+`LLM_MODE`, `MAPS_MODE` and `COMMS_MODE` each default to a mode that needs no key, so the app starts,
+seeds and demos with every credential blank. Both paths stay tested.
 
----
+## The federated result
+
+A real run on Flower's deployment engine (one SuperLink and four SuperNode processes, each reading
+only its own state), reproduced for this README:
+
+| Round | MAE | Burn-rate rule, same held-out weeks | Bytes sent | Facility rows sent |
+|---|---|---|---|---|
+| 0 (untrained) | 1.0914 | 0.1108 | 22,788 | 0 |
+| 1 | 0.0795 | 0.1108 | 22,788 | 0 |
+| 3 | 0.0791 | 0.1108 | 22,788 | 0 |
+| 5 | 0.0782 | 0.1108 | 22,788 | 0 |
+
+Rounds 4 and 5 were started from the **Run next round** button. Each continued only after the saved
+weights hashed to what the previous row recorded. The deployed database holds an earlier run,
+recorded in [`SPEC_DIGEST.md`](SPEC_DIGEST.md) §5 on 2026-09-20: nine rounds, MAE 1.0674 → 0.1106
+against a 0.1494 burn rate.
 
 ## Run it locally
 
-Needs Python 3.13, Node 20 and PostgreSQL 17.
+Verified on Linux with Python 3.11, Node 22 and PostgreSQL 16. The project targets Python 3.13 and
+PostgreSQL 17. On Windows use `.venv\Scripts\` in place of `.venv/bin/`.
 
 ```bash
 git clone https://github.com/AdityaChandel11/LESSGOO.git && cd LESSGOO
-cp .env.example .env          # then edit DATABASE_URL to point at your Postgres
+cp .env.example .env    # set the password in DATABASE_URL to your local Postgres password
+createdb phc            # the database the default DATABASE_URL points at
 ```
 
 ```bash
 cd backend
-python -m venv .venv && .venv/Scripts/pip install -r requirements.txt
-.venv/Scripts/alembic upgrade head
-.venv/Scripts/python -m scripts.seed --yes
-.venv/Scripts/python -m scripts.trust
-.venv/Scripts/python -m scripts.users demo
-.venv/Scripts/uvicorn app.main:app --reload --port 8000
+python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+.venv/bin/alembic upgrade head
+.venv/bin/python -m scripts.seed --days 28 --focus-days 60 --yes   # a smaller seed; about a minute
+.venv/bin/python -m scripts.trust
+.venv/bin/python -m scripts.users demo      # prints the demo password
+.venv/bin/uvicorn app.main:app --port 8000
 ```
 
 ```bash
-cd frontend && npm install && npm run dev      # http://localhost:5173
+cd frontend && npm ci && npm run dev        # http://localhost:5173
 ```
 
-On Linux or macOS use `.venv/bin/` in place of `.venv/Scripts/`. The seed takes a few minutes and
-prints the demo password it created.
+To see Gemini live, set `LLM_MODE=live` and `GEMINI_API_KEY` in `.env`, then check the key with
+`python -m scripts.check_gemini`. Federated training is optional; its four-process setup is in
+[`backend/federation/README.md`](backend/federation/README.md).
 
-Training the federated model is optional — the dashboard falls back to the burn rate without it.
-Its four-process setup is documented in [`backend/federation/README.md`](backend/federation/README.md).
-
-### Tests
-
-```bash
-cd backend && .venv/Scripts/python -m pytest -q     # 207 unit tests
-.venv/Scripts/python -m checks                      # 137 integration assertions
-```
-
-The `checks` suite runs against a seeded database and asserts behaviour end to end — that a
-provider retry cannot double-count, that a stale bed photo is rejected, that a donor is never
-drained below its safety stock, and that no facility row ever crossed a silo boundary.
-
----
-
-## Deploy it
-
-One service serves the API and the built site from a single origin — which is not incidental: the
-session cookie is `SameSite=Lax`, so splitting the frontend onto another host is precisely how
-sign-in would break.
-
-1. Create a **PostgreSQL** instance. Note its region.
-2. Create a **Web Service** from this repository. Runtime **Docker**, same region as the database.
-3. Set the environment variables below in the dashboard.
-4. Deploy. The container runs `alembic upgrade head` before serving, because free tiers have no
-   pre-deploy hook.
-5. Seed it, through the guarded runner — it prints the target host and refuses a local one:
+## Tests
 
 ```bash
 cd backend
-.venv/Scripts/python -m scripts.remote --confirm -- -m scripts.seed --days 35 --focus-days 120 --yes
-.venv/Scripts/python -m scripts.remote --confirm -- -m scripts.trust
-.venv/Scripts/python -m scripts.remote --confirm -- -m scripts.users demo
+.venv/bin/python -m pytest -q     # 409 unit tests
+.venv/bin/python -m checks        # 201 integration assertions, 9 suites, against the seeded database
+cd ../frontend && npx tsc -b && npm run build
 ```
 
-`render.yaml` describes the service. It deliberately does **not** define a database: a managed
-database is not something a config file should be able to replace on a redeploy.
+The check suites assert behaviour end to end, including that:
+- a provider retry cannot double-count
+- a stale bed photo is rejected
+- a donor is never drained below its floor
+- a controlled substance is never offered a donor
+- no facility row crosses a silo boundary
 
-### Environment
+The federation suite needs `FEDERATION_PYTHON` set to the Flower environment's interpreter, and
+forecasts published once.
 
-Secrets live only in `.env` (gitignored) or the host's secret settings — never in the repository,
-never in frontend code. `.env.example` lists every variable you need to set; the remaining
-settings are tuning constants with defaults in [`backend/app/config.py`](backend/app/config.py).
+## Deploy
+
+This is the path the live demo was deployed with. It was not re-run for this README.
+
+1. Create a PostgreSQL instance and a Docker **Web Service** from this repository in the same
+   region. [`render.yaml`](render.yaml) describes the service.
+2. Set the variables below in the host's dashboard. Secrets never go in the repository.
+3. Deploy. The container runs `alembic upgrade head` before serving.
+4. Seed through the guarded runner, which prints the target host and refuses a local one:
+
+```bash
+cd backend
+.venv/bin/python -m scripts.remote --confirm -- -m scripts.seed --days 35 --focus-days 120 --yes
+.venv/bin/python -m scripts.remote --confirm -- -m scripts.trust
+.venv/bin/python -m scripts.remote --confirm -- -m scripts.users demo
+```
 
 | Variable | Needed | Notes |
 |---|---|---|
-| `DATABASE_URL` | yes | Any Postgres URL; the app corrects the driver prefix itself |
+| `DATABASE_URL` | yes | Any Postgres URL; the app corrects the driver prefix |
 | `JWT_SECRET` | production | 32+ random characters; production refuses to start without it |
-| `PHONE_HASH_SALT` | production | What stops the registry becoming a list of phone numbers |
-| `GEMINI_API_KEY` | for vision | Only with `LLM_MODE=live`; free tier is enough |
-| `GOOGLE_MAPS_SERVER_KEY` | optional | Routes API road distances |
-| `GOOGLE_MAPS_BROWSER_KEY` | optional | Referrer-restricted; the only key that reaches a browser |
-| `TWILIO_*` | optional | Only with `COMMS_MODE=live` |
+| `PHONE_HASH_SALT` | production | Keeps the phone registry from becoming a list of numbers |
+| `GEMINI_API_KEY` | for Gemini | With `LLM_MODE=live` |
+| `GOOGLE_MAPS_SERVER_KEY`, `GOOGLE_MAPS_BROWSER_KEY` | optional | With `MAPS_MODE=google` |
+| `TWILIO_*` | optional | With `COMMS_MODE=live` |
 
-Production refuses to boot with a weak signing secret, insecure cookies, a development database
-password, or demo mode left on without `ALLOW_PUBLIC_DEMO=true`.
+The full list is in [`.env.example`](.env.example). An alternative Google Cloud path (Cloud Run,
+Cloud SQL and Firebase Hosting: [`deploy/cloudrun.sh`](deploy/cloudrun.sh),
+[`firebase.json`](firebase.json)) is written and its config is tested, but it has never been run
+against a real project.
 
----
+## Privacy
 
-## Privacy and honest limits
+- **No patient-level data exists in the system.** India's DPDP Act 2023 is the frame.
+- Phone numbers and staff identifiers are stored only as salted hashes, and the interface shows
+  masked forms.
+- Trust flags attach to facilities and patterns, never to a named person. This is a data-quality
+  signal, not fraud detection.
+- Federated learning here is **privacy-enhancing, not privacy-guaranteed**. Raw rows stay local,
+  and the aggregator proves it. There is no differential privacy or secure aggregation yet.
 
-- **No patient-level data exists in this system at all**, and the schema has nowhere to put any.
-- India's **DPDP Act 2023** is the relevant frame, not HIPAA.
-- Phone numbers and staff identifiers are stored as **salted hashes only**; the interface shows
-  masked forms. The raw number is never written down.
-- Trust flags attach to **facilities and patterns, never to a named individual**. Staff data
-  aggregates to facility level. This is a data-quality signal, not fraud detection.
-- **Federated learning is privacy-enhancing, not privacy-guaranteeing.** This implementation keeps
-  raw rows local and proves it, but it does not yet add differential privacy or secure
-  aggregation. Both are future work, and we would rather say so than overclaim.
+## Known limitations and roadmap
 
-### Two things the demo shows that deserve a caveat
+- **Run next round is local only.** It needs the Flower processes and PyTorch, which the free web
+  service cannot host. The deployed site shows the recorded rounds and says why the button is off.
+- **Only four states train.** Other regions receive forecasts by generalisation (see the note at
+  the top). The app does not yet label those forecasts on screen.
+- **Outbreak pre-positioning is not built.** Stock-out early warning works. Weighting it by an
+  active outbreak, to move supply ahead of a cluster, is designed but not implemented.
+- **Voice input is not built.** Hindi labels and Gemini's Hindi briefings are live; there is no
+  speech-to-text path yet.
+- **The receipt-photo reader has no functional test.** The Gemini path that reads a bill or
+  delivery slip into stock lines exists ([`read_stock_photo`](backend/app/vision.py)), but only its
+  quota guard is tested.
+- **The Gemini free tier allows 20 requests a day per model.** Heavy use falls back to the
+  rule-based text, labelled as such.
+- **The demo uses no Google Maps key.** Distances are straight-line × 1.3, labelled on screen.
+- **Messaging runs through the simulator on the demo.** The Twilio adapters are implemented and
+  signature-checked, but live sending needs an account.
+- **Links are unencrypted locally.** The SuperLink and SuperNodes run `--insecure`; production
+  would need TLS and SuperNode authentication.
 
-- **Lakshadweep and Dadra & Nagar Haveli and Daman & Diu have forecasts, but were never trained
-  on.** The four silos are Maharashtra, Kerala, Bihar and Uttar Pradesh. The shared model is
-  state-agnostic — it reads a 28-day consumption window and calendar features, not a state
-  identifier — so it **generalises** to regions it has never seen. That is a real property of the
-  model and arguably a strength, but it is generalisation, not training, and it is labelled as such
-  wherever those two territories appear.
-- **Emergency demand surge is roadmap.** Stock-out early warning works today. Weighting it by an
-  active outbreak — pre-positioning supply ahead of a cluster — is designed as a temporary
-  multiplier into the existing solver, but it is not built.
-
----
-
-## Repository
+## Repository layout
 
 | Path | What is in it |
 |---|---|
-| `backend/app/` | API, ingestion spine, trust, redistribution, vision, ledger |
-| `backend/federation/` | Flower silos, FedProx, the inspector, forecast publishing |
-| `backend/checks/` | Integration checks — behaviour, not unit tests |
-| `backend/scripts/` | Seed, trust recompute, users, eval harness, guarded remote runner |
-| `frontend/src/` | Map, dashboard, panels, federation inspector |
-| `CLAUDE.md` | Working agreement, invariants and operational rules |
+| [`backend/app/`](backend/app) | API, ingestion spine, trust rules, redistribution solver, ledger, Gemini adapter (`vision.py`) |
+| [`backend/federation/`](backend/federation) | Flower ServerApp/ClientApp, the silos, the inspector, forecast publishing |
+| [`backend/tests/`](backend/tests) | Unit tests (pytest) |
+| [`backend/checks/`](backend/checks) | Integration checks against a seeded database |
+| [`backend/scripts/`](backend/scripts) | Seed, trust, demo users, key checks, the guarded remote runner |
+| [`backend/alembic/`](backend/alembic) | Database migrations |
+| [`frontend/src/`](frontend/src) | Map, dashboard panels, emergency drill, federation inspector |
+| [`docs/`](docs) | Storage measurements and planning notes |
+| `render.yaml`, `Dockerfile` | The deployed service |
+| `CLAUDE.md`, `SPEC_DIGEST.md`, `masterbuildspec-*.md` | Working agreement and build specifications |
