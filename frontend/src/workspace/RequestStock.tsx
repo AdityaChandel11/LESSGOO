@@ -24,6 +24,7 @@ const ROLE_WORDS: Record<string, string> = {
   block_mo: "the district logistics officer",
   state_officer: "the state NHM officer",
   admin: "a platform administrator",
+  donor_facility: "the donor centre's staff",
 };
 
 
@@ -43,10 +44,8 @@ export default function RequestStock({
   // Pre-filled with what the centre actually needs, ceilinged at what this
   // donor can give without breaching its own floor.
   const ceiling = donor.spare_units;
-  // The same rule auth.can_decide_transfer applies: a block_mo may only decide
-  // inside its own district, so a donor from elsewhere needs the state officer.
-  const approverRole =
-    donor.district === facility.district ? "block_mo" : "state_officer";
+  // auth.can_decide_transfer: the donor centre accepts or declines.
+  const approverRole = "donor_facility";
   const [qty, setQty] = useState(String(Math.min(supply.units_needed, ceiling)));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

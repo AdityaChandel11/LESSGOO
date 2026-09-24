@@ -574,13 +574,22 @@ async def _decide(
         ).scalars()
     }
     src, dst = facilities[ends[0]], facilities[ends[1]]
-    if not can_decide_transfer(
+    allowed = can_decide_transfer(
         user,
         from_state=src.state_silo,
         from_district=src.district,
         to_state=dst.state_silo,
         to_district=dst.district,
-    ):
+        from_facility=src.id,
+    )
+    # The emergency drill runs in the Nashik sandbox in demo mode; an officer
+    # running it acts for the donor there, and the drill says so on screen.
+    in_sandbox = all(f.state_silo == "MH" and f.district == "Nashik" for f in (src, dst))
+    if not allowed and settings.demo_mode and in_sandbox and user.role in ("state_officer", "block_mo"):
+        allowed = can_submit_reading(
+            user, facility_id=src.id, facility_state=src.state_silo, facility_district=src.district
+        )
+    if not allowed:
         raise HTTPException(
             status_code=403,
             detail="This transfer is outside the area you are responsible for",
@@ -985,6 +994,9 @@ class StockPhotoLineOut(BaseModel):
     sku_name: str | None
     match_score: int
     committed: bool
+    # The shelf figure before this photo, so the screen can show the ledger
+    # change (before -> after) rather than only "recorded".
+    qty_before: float | None = None
     # Why a line was not committed, when it was not. Shown to the pharmacist,
     # because "three of four lines went in" without saying which is worse than
     # refusing the lot.
@@ -1069,6 +1081,8 @@ async def submit_stock_photo(
     now = datetime.now(timezone.utc)
     rows: list[StockPhotoLineOut] = []
     committed = 0
+    snaps = await services.get_snapshots(session, facility_ids=[facility.id])
+    before = {s.sku_code: float(s.qty_on_hand) for s in (snaps[0].skus if snaps else [])}
 
     for line in extraction.lines:
         code, score = ingest.resolve_sku(line.medicine, lookup)
@@ -1112,7 +1126,7 @@ async def submit_stock_photo(
             StockPhotoLineOut(
                 medicine=line.medicine, quantity=line.quantity,
                 sku_code=code, sku_name=names.get(code, code),
-                match_score=score, committed=True,
+                match_score=score, committed=True, qty_before=before.get(code),
             )
         )
 
@@ -1243,6 +1257,94 @@ class RequestOut(BaseModel):
     assumptions: dict[str, float]
 
 
+@router.get(
+    "/facilities/{facility_id}/incoming", response_model=list[TransferOut], tags=["workspace"]
+)
+async def incoming_requests(
+    facility_id: str,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> list[TransferOut]:
+    """Requests waiting for this centre, as the donor, to accept or decline."""
+    facility = await _facility_in_scope(session, facility_id, user)
+    rows = await redistribution.list_transfers(
+        session, from_facility=facility.id, statuses=["proposed"], limit=50
+    )
+    return [TransferOut.model_validate(r) for r in rows]
+
+
+@router.post(
+    "/facilities/{facility_id}/demo-request",
+    response_model=TransferOut,
+    status_code=201,
+    tags=["workspace"],
+)
+async def demo_neighbour_request(
+    facility_id: str,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> TransferOut:
+    """Demo only: the neighbouring centre shortest on something this centre can
+    spare raises a real request to it, so one login can show both sides.
+    The request is an ordinary proposed transfer; nothing moves until this
+    centre accepts it."""
+    if not settings.demo_mode:
+        raise HTTPException(status_code=404, detail="Not found")
+    facility = await _facility_in_scope(session, facility_id, user)
+    controlled = set(
+        (await session.execute(select(Sku.code).where(Sku.is_controlled.is_(True)))).scalars()
+    )
+    rules = redistribution.PlanRules.from_settings()
+    nodes_by_sku = await redistribution.load_state_nodes(session, facility.state_silo)
+    best = None
+    for sku, nodes in nodes_by_sku.items():
+        if sku in controlled:
+            continue
+        me = next((n for n in nodes if n.facility_id == facility.id), None)
+        if me is None or me.burn <= 0:
+            continue
+        spare = me.qty - rules.donor_floor_days * me.burn
+        neighbours = [
+            n for n in nodes
+            if n.facility_id != facility.id and n.district == facility.district and n.burn > 0
+        ]
+        if spare < 1 or not neighbours:
+            continue
+        needy = min(neighbours, key=lambda n: n.qty / n.burn)
+        qty = round(min(spare, max(rules.recipient_target_days * needy.burn - needy.qty, 3 * needy.burn)))
+        if qty >= 1 and (best is None or needy.qty / needy.burn < best[0]):
+            best = (needy.qty / needy.burn, sku, needy, qty, me)
+    if best is None:
+        raise HTTPException(
+            status_code=409, detail="No medicine here has stock to spare for a neighbour right now"
+        )
+    _, sku, needy, qty, me = best
+    km = workspace.road_km_between(me, needy, rules.road_factor)
+    transfer = Transfer(
+        from_facility=facility.id, to_facility=needy.facility_id, sku_code=sku, qty=qty,
+        route_km=round(km, 1), eta_hours=round(km / rules.avg_speed_kmh + rules.handling_hours, 2),
+        route_source="haversine", status="proposed", triggered_by=workspace.FACILITY_REQUEST,
+        rationale={
+            "origin": "facility_request", "approver_role": "donor_facility", "demo": True,
+            "units_needed": qty, "recipient_days_before": round(needy.qty / needy.burn, 2),
+            "recipient_days_after_this": round((needy.qty + qty) / needy.burn, 2),
+            "donor_days_after_plan": round((me.qty - qty) / me.burn, 2),
+            "recipient_status": "critical" if needy.qty / needy.burn < settings.critical_days else "at_risk",
+        },
+    )
+    session.add(transfer)
+    await session.commit()
+    await session.refresh(transfer)
+    await events.record(
+        session, events.TRANSFER_REQUESTED,
+        {"transfer_id": transfer.id, "reference": workspace.reference(transfer.id),
+         "facility_id": needy.facility_id, "facility_name": needy.name, "sku_code": sku,
+         "qty": qty, "from_name": facility.name},
+        state_silo=facility.state_silo,
+    )
+    return TransferOut.model_validate((await redistribution.list_transfers(session, ids=[transfer.id]))[0])
+
+
 @router.post(
     "/facilities/{facility_id}/requests",
     response_model=RequestOut,
@@ -1256,7 +1358,7 @@ async def create_request(
     user: Principal = Depends(current_user),
 ) -> RequestOut:
     """Raise a request for stock. This creates a *proposed* transfer and
-    nothing else: no stock moves until an officer approves it (spec 12.3 —
+    nothing else: no stock moves until the donor centre accepts it (spec 12.3 —
     nothing auto-executes)."""
     facility = await _facility_in_scope(session, facility_id, user)
     sku_row = await session.get(Sku, payload.sku_code)
@@ -1306,12 +1408,8 @@ async def create_request(
     now = datetime.now(timezone.utc)
     estimate = workspace.delivery_estimate(km=km, raised_at=now)
     eta_hours = round(km / rules.avg_speed_kmh + rules.handling_hours, 2)
-    approver_role = (
-        "block_mo"
-        if donor_facility.district == facility.district
-        and donor_facility.state_silo == facility.state_silo
-        else "state_officer"
-    )
+    # The donor centre's staff accept or decline (auth.can_decide_transfer).
+    approver_role = "donor_facility"
 
     transfer = Transfer(
         from_facility=donor_facility.id,
@@ -1950,6 +2048,7 @@ class SelfDayOut(BaseModel):
     geofence_km: float | None
     geofence_ok: bool | None
     pings: list[VerificationPingOut]
+    synthetic: bool = False
 
 
 class SelfRecordOut(BaseModel):
@@ -1970,7 +2069,7 @@ async def my_attendance(
     user: Principal = Depends(current_user),
 ) -> SelfRecordOut:
     """This account's own attendance record. Never anybody else's."""
-    if not user.facility_id or not user.staff_ref:
+    if not user.facility_id or (not user.staff_ref and not settings.demo_mode):
         raise HTTPException(
             status_code=404,
             detail="This account is not linked to an attendance record",
@@ -1979,9 +2078,13 @@ async def my_attendance(
     if facility is None:
         raise HTTPException(status_code=404, detail="Unknown facility")
 
-    record = await attendance.own_record(
-        session, user.facility_id, user.staff_ref
-    )
+    if user.staff_ref is None:
+        # Demo mode only (checked above): a synthetic, labelled record.
+        record = attendance.synthetic_record(user.facility_id)
+    else:
+        record = await attendance.own_record(session, user.facility_id, user.staff_ref)
+        if settings.demo_mode:
+            record = attendance.with_synthetic_today(record)
     payload = asdict(record)
     # The pseudonymous reference is how the rows were found; it is not part of
     # the answer, and the reader already knows who they are.
@@ -2390,6 +2493,25 @@ async def outbreaks(state: str | None = None) -> OutbreaksOut:
             for r in idsp.outbreaks(state)
         ],
     )
+
+
+class StockingAdviceOut(BaseModel):
+    unique_id: str
+    district: str
+    state_code: str
+    disease: str
+    medicines: list[str]
+    demand_rise_pct: int
+    signals: list[str]
+    action: str
+
+
+@router.get("/outbreaks/advice", response_model=list[StockingAdviceOut], tags=["outbreaks"])
+async def outbreak_advice(state: str | None = None) -> list[StockingAdviceOut]:
+    """Demo: stocking advice from IDSP outbreaks, the monsoon calendar and a
+    simulated demand trend. Computed on request; nothing is stored."""
+    month = datetime.now(timezone.utc).month
+    return [StockingAdviceOut(**a) for a in idsp.stocking_advice(state, month)]
 
 
 # ==================================================== the ingestion spine ===

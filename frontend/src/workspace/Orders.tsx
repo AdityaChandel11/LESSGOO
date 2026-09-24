@@ -16,6 +16,7 @@
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 
 import { ApiError, type Movement, api } from "../api";
+import Incoming from "./Incoming";
 import { both } from "./labels";
 
 const STATUS_WORDS: Record<string, { label: string; className: string }> = {
@@ -175,7 +176,7 @@ function MovementCard({ m, onChanged }: { m: Movement; onChanged: () => void }) 
   );
 }
 
-export default function Orders({
+function OrdersList({
   facilityId,
   refreshKey,
   onChanged,
@@ -208,7 +209,7 @@ export default function Orders({
     return (
       <p className="rounded-lg border border-line bg-panel px-3.5 py-4 text-[12.5px] leading-relaxed text-ink-2">
         Nothing is on its way to this centre. Requests you raise from the Medicines tab
-        appear here once an officer approves them.
+        appear here once the donor centre accepts them.
       </p>
     );
   }
@@ -227,5 +228,20 @@ export default function Orders({
         </li>
       ))}
     </ul>
+  );
+}
+
+export default function Orders(props: {
+  facilityId: string;
+  refreshKey: number;
+  onChanged: () => void;
+  demoMode?: boolean;
+}) {
+  return (
+    <div>
+      <Incoming facilityId={props.facilityId} demoMode={!!props.demoMode} onChanged={props.onChanged} />
+      <h2 className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.09em] text-ink-3">On its way to you</h2>
+      <OrdersList {...props} />
+    </div>
   );
 }

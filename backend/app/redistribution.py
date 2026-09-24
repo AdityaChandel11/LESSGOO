@@ -552,6 +552,7 @@ async def list_transfers(
     state: str | None = None,
     statuses: list[str] | None = None,
     ids: list[int] | None = None,
+    from_facility: str | None = None,
     limit: int = 500,
 ) -> list[dict]:
     src = aliased(Facility)
@@ -566,6 +567,8 @@ async def list_transfers(
         stmt = stmt.where(dst.state_silo == state)
     if statuses:
         stmt = stmt.where(Transfer.status.in_(statuses))
+    if from_facility:
+        stmt = stmt.where(Transfer.from_facility == from_facility)
     if ids is not None:
         stmt = stmt.where(Transfer.id.in_(ids))
         # An explicit id list is fetched whole; the page limit is for browsing.

@@ -434,11 +434,9 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
 
   // Demo-only: the whole emergency chain in one click, confined to the
   // sandbox district and offered only to someone who may write there.
-  const sandbox = { state: SANDBOX.state, district: SANDBOX.district };
   const canRunEmergency =
     session.demo_mode &&
-    can.report(user, { id: "", state_silo: SANDBOX.state, district: SANDBOX.district }) &&
-    can.decideTransfer(user, sandbox, sandbox);
+    can.report(user, { id: "", state_silo: SANDBOX.state, district: SANDBOX.district });
 
   const startEmergency = async () => {
     setEmergencyBusy(true);
@@ -786,11 +784,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
                 onPlan={runPlan}
                 canPlan={can.planState(user, activeState)}
                 canDecide={(trip) =>
-                  can.decideTransfer(
-                    user,
-                    { state: activeState, district: trip.from.district },
-                    { state: activeState, district: trip.to.district },
-                  )
+can.decideTransfer(user, trip.from.id)
                 }
                 onDecideTrip={decideTrip}
                 onHoverTrip={setHighlightTrip}

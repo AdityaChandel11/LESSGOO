@@ -199,22 +199,9 @@ const post = <T>(path: string, body?: unknown) => request<T>("POST", path, { bod
 export const can = {
   planState: (u: User, state: string) =>
     u.role === "admin" || (u.role === "state_officer" && u.state_silo === state),
-  decideTransfer: (
-    u: User,
-    from: { state: string; district: string },
-    to: { state: string; district: string },
-  ) => {
-    if (u.role === "admin") return true;
-    if (u.role === "state_officer") return u.state_silo === from.state && from.state === to.state;
-    if (u.role === "block_mo")
-      return (
-        u.state_silo === from.state &&
-        from.state === to.state &&
-        u.district === from.district &&
-        from.district === to.district
-      );
-    return false;
-  },
+  /** Mirrors auth.can_decide_transfer: the donor centre decides; officers watch. */
+  decideTransfer: (u: User, fromFacilityId: string) =>
+    u.role === "admin" || (u.role === "facility_user" && u.facility_id === fromFacilityId),
   report: (u: User, f: { id: string; state_silo: string; district: string }) => {
     if (u.role === "admin") return true;
     if (u.role === "state_officer") return u.state_silo === f.state_silo;
@@ -405,6 +392,11 @@ export const api = {
     get<AuditRow[]>("/trust/queue", { state, limit }),
   explainTrip: (transferIds: number[]) =>
     post<Explanation>("/transfers/explain", { transfer_ids: transferIds }),
+  incoming: (facilityId: string) =>
+    get<Transfer[]>(`/facilities/${encodeURIComponent(facilityId)}/incoming`),
+  demoRequest: (facilityId: string) =>
+    post<Transfer>(`/facilities/${encodeURIComponent(facilityId)}/demo-request`),
+  outbreakAdvice: (state: string | null) => get<StockingAdvice[]>("/outbreaks/advice", { state }),
   outbreaks: (state: string | null) => get<Outbreaks>("/outbreaks", { state }),
   explainTrust: (facilityId: string) =>
     post<Explanation>(`/facilities/${encodeURIComponent(facilityId)}/trust/explain`),
@@ -472,6 +464,8 @@ export interface SelfDay {
   geofence_km: number | null;
   geofence_ok: boolean | null;
   pings: VerificationPing[];
+  /** Generated for the demo, never stored; labelled on screen. */
+  synthetic?: boolean;
 }
 
 export interface SelfRecord {
@@ -680,6 +674,8 @@ export interface StockPhotoLine {
   sku_name: string | null;
   match_score: number;
   committed: boolean;
+  /** Shelf figure before this photo. */
+  qty_before: number | null;
   reason: string | null;
 }
 
@@ -1132,4 +1128,16 @@ export interface Outbreaks {
   columns: string[];
   reports: { year: number; week: number; rows: number }[];
   rows: Outbreak[];
+}
+
+/** Demo: an outbreak turned into a stocking action. Demand rise is simulated. */
+export interface StockingAdvice {
+  unique_id: string;
+  district: string;
+  state_code: string;
+  disease: string;
+  medicines: string[];
+  demand_rise_pct: number;
+  signals: string[];
+  action: string;
 }

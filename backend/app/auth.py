@@ -93,16 +93,19 @@ def can_decide_transfer(
     from_district: str,
     to_state: str,
     to_district: str,
+    from_facility: str | None = None,
 ) -> bool:
+    """Who accepts or declines a transfer: the facility giving the stock.
+
+    Stock leaves a shelf only when the staff of the centre that holds it say
+    yes, so the human approval of spec 1.6 sits with the donor. District and
+    state officers see every transfer on the dashboard but do not decide them.
+    The platform administrator can act on any transfer.
+    """
     if p.role == "admin":
         return True
-    if p.role == "state_officer":
-        return p.state_silo == from_state == to_state
-    if p.role == "block_mo":
-        return (
-            p.state_silo == from_state == to_state
-            and p.district == from_district == to_district
-        )
+    if p.role == "facility_user":
+        return from_facility is not None and p.facility_id == from_facility
     return False
 
 
@@ -319,7 +322,13 @@ class SessionOut(BaseModel):
 def _session_out(p: Principal) -> SessionOut:
     fields = {k: v for k, v in p.__dict__.items() if k != "staff_ref"}
     return SessionOut(
-        user=UserOut(**fields, has_staff_record=p.staff_ref is not None),
+        user=UserOut(
+            **fields,
+            # In demo mode a facility account without a linked staff member is
+            # shown a synthetic, labelled record (attendance.synthetic_record).
+            has_staff_record=p.staff_ref is not None
+            or (settings.demo_mode and p.role == "facility_user" and p.facility_id is not None),
+        ),
         demo_mode=settings.demo_mode,
         environment=settings.environment,
     )

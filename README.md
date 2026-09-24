@@ -43,8 +43,12 @@ arriving at a primary health centre to a medicine arriving at the one that ran o
 **<https://swasthsetu-m4x5.onrender.com>**
 
 On the sign-in page, press **Continue →** next to **Maharashtra NHM Officer · State officer**. No
-password is needed. This account sees Maharashtra's data, can run the emergency drill and approve
-transfers, and cannot see other states' audit queues. The server enforces that, not the interface.
+password is needed. This account sees what is happening across Maharashtra, can run the emergency
+drill in the Nashik sandbox, and cannot see other states' audit queues. Officers watch transfers;
+the donor facility decides them. The server enforces that, not the interface.
+
+To see a facility's side, sign in as **Pharmacist, Nashik PHC 1**: Medicines, Orders (requests from
+other centres to accept or decline), Beds and Attendance.
 
 > [!NOTE]
 > **The first load takes about a minute.** The demo runs on a free instance that sleeps when idle,
@@ -52,8 +56,8 @@ transfers, and cannot see other states' audit queues. The server enforces that, 
 > every page after that is immediate.
 
 **A two-minute path:** press **Simulate emergency** on the map → watch the chain run → press
-**Approve** → press **Confirm arrival** → open **Redistribution → High impact** → open
-**Federation**.
+**Accept for the donor centre** → press **Confirm arrival** → open **Stocking advice (demo)** on the
+outbreak panel → open **Federation**.
 
 ## How this maps to the judging criteria
 
@@ -79,7 +83,7 @@ carries it through the real endpoints:
 1. The stock recomputes, and the rule flags the facility as critical.
 2. Gemini explains the risk.
 3. OR-Tools proposes a donor, and Gemini explains why.
-4. **You approve.** The donor dispatches.
+4. **The donor centre accepts** (in the drill, you accept for it). It dispatches.
 5. **The receiver confirms arrival.**
 6. Both facilities' stock is shown side by side, before and after.
 
@@ -92,8 +96,8 @@ deficit. It never takes a donor below its own 14-day floor, and never plans cont
 which go to a manual review list instead. Trips are grouped by vehicle run.
 - **High impact** shows the ten most urgent trips that alone lift a critical facility out of
   critical.
-- **Nothing is ever executed without an officer's approval**, which re-checks the donor's stock at
-  that moment.
+- **Nothing is ever executed until the donor facility accepts**, which re-checks its stock at that
+  moment. Officers see every trip on the dashboard but do not decide them.
 <!-- screenshot: docs/screenshots/redistribution.png -->
 
 **Two-sided medicine ledger.** A dispatch is logged at the source and the receipt is confirmed at
@@ -193,7 +197,7 @@ flowchart LR
     ROUNDS --> API
     API -->|on click| GT["Gemini text"]
     API --> OR["OR-Tools solver"]
-    OR -->|"proposals; a person approves"| DB
+    OR -->|"proposals; the donor facility accepts"| DB
 ```
 
 **Publishing, not serving.** The web image carries no PyTorch. Training writes predictions into
@@ -264,7 +268,7 @@ To see Gemini live, set `LLM_MODE=live` and `GEMINI_API_KEY` in `.env`, then che
 
 ```bash
 cd backend
-.venv/bin/python -m pytest -q     # 406 unit tests
+.venv/bin/python -m pytest -q     # 418 unit tests
 .venv/bin/python -m checks        # 201 integration assertions, 9 suites, against the seeded database
 cd ../frontend && npx tsc -b && npm run build
 ```
