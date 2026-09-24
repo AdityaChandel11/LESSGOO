@@ -118,7 +118,7 @@ export function TrustBlock({
 
       {trust.components.some((c) => c.penalty >= 0.05) && (
         <WhyLine
-          key={`${facilityId}:${refreshKey}`}
+          key={facilityId}
           load={() => api.explainTrust(facilityId)}
           label="Why do these signals disagree?"
         />
