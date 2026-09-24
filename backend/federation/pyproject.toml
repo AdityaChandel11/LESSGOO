@@ -39,6 +39,14 @@ batch-size = 64
 #   flwr run . --run-config "proximal-mu=0.0"
 proximal-mu = 0.01
 save-model = true
+# Continue a recorded run instead of starting a fresh one. Empty means new.
+# Set by the dashboard's "Run next round", which also passes start-round (the
+# run's last recorded round) and model-path (where that round's weights were
+# saved). The ServerApp refuses to resume unless those weights hash to what
+# that round recorded.
+resume-run-id = ""
+start-round = 0
+model-path = ""
 
 
 #######################################################################

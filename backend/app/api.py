@@ -21,7 +21,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -31,6 +31,7 @@ from . import (
     attendance,
     beds,
     events,
+    federation_live,
     movements,
     redistribution,
     services,
@@ -2275,6 +2276,79 @@ async def federation_inspector(
         raw_rows_transmitted=sum(r.raw_rows_transmitted for r in rows),
         tensor_shapes=next((r.tensor_shapes for r in reversed(rows) if r.tensor_shapes), {}),
     )
+
+
+class LivePhaseOut(BaseModel):
+    label: str
+    at_s: float
+
+
+class LiveRoundOut(BaseModel):
+    run_id: str
+    round_no: int
+    status: str  # running | done | failed
+    started_at: datetime
+    finished_at: datetime | None
+    phases: list[LivePhaseOut]
+    error: str | None
+
+
+class LiveRoundStateOut(BaseModel):
+    """Whether one more real round can be started from here, and why not."""
+
+    available: bool
+    reason: str | None
+    job: LiveRoundOut | None
+
+
+def _live_out(job: federation_live.LiveRound | None) -> LiveRoundOut | None:
+    if job is None:
+        return None
+    return LiveRoundOut(
+        run_id=job.run_id, round_no=job.round_no, status=job.status,
+        started_at=job.started_at, finished_at=job.finished_at,
+        phases=[LivePhaseOut(label=label, at_s=at) for label, at in job.phases],
+        error=job.error,
+    )
+
+
+@router.get("/federation/live", response_model=LiveRoundStateOut, tags=["federation"])
+async def federation_live_state() -> LiveRoundStateOut:
+    reason = await federation_live.unavailable_reason()
+    return LiveRoundStateOut(
+        available=reason is None, reason=reason, job=_live_out(federation_live.current())
+    )
+
+
+@router.post(
+    "/federation/live", response_model=LiveRoundOut, status_code=202, tags=["federation"]
+)
+async def federation_live_start(
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> LiveRoundOut:
+    """Continue the latest recorded run by one real round (local only).
+
+    The web service starts `flwr run` and reads its output; the training, the
+    hash check on resume and the new row all happen in the ServerApp.
+    """
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Only an administrator can start a training round")
+    latest = await session.scalar(
+        select(FederationRound.run_id).order_by(FederationRound.completed_at.desc()).limit(1)
+    )
+    if latest is None:
+        raise HTTPException(status_code=409, detail="There is no recorded run to continue")
+    last_round = await session.scalar(
+        select(func.max(FederationRound.round_no)).where(FederationRound.run_id == latest)
+    )
+    try:
+        job = await federation_live.start(run_id=latest, last_round=int(last_round or 0))
+    except federation_live.AlreadyRunning:
+        raise HTTPException(status_code=409, detail="A round is already running") from None
+    except federation_live.Unavailable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    return _live_out(job)  # type: ignore[return-value]
 
 
 # ==================================================== the ingestion spine ===

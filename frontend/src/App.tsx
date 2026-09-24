@@ -707,7 +707,12 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               onBack={() => setSelected(null)}
             />
           ) : mode === "federation" ? (
-            <FederationPanel refreshKey={refreshKey} onSilos={setSiloStates} stateName={stateName} />
+            <FederationPanel
+              refreshKey={refreshKey}
+              onSilos={setSiloStates}
+              stateName={stateName}
+              canTrain={user.role === "admin"}
+            />
           ) : mode === "trust" ? (
             <AuditQueuePanel
               // One value decides both the request and the heading. An

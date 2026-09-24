@@ -292,9 +292,29 @@ export interface FederationInspector {
   note: string | null;
 }
 
+/** One real round started from the page; phases are lines Flower printed. */
+export interface LiveRound {
+  run_id: string;
+  round_no: number;
+  status: "running" | "done" | "failed";
+  started_at: string;
+  finished_at: string | null;
+  phases: { label: string; at_s: number }[];
+  error: string | null;
+}
+
+export interface LiveRoundState {
+  available: boolean;
+  /** Why the button is off here, e.g. on the deployed site. */
+  reason: string | null;
+  job: LiveRound | null;
+}
+
 export const api = {
   health: () => get<Health>("/health"),
   federationInspector: () => get<FederationInspector>("/federation/inspector"),
+  federationLive: () => get<LiveRoundState>("/federation/live"),
+  startFederationRound: () => post<LiveRound>("/federation/live"),
   clientConfig: () => get<ClientConfig>("/client-config"),
   skus: () => get<Sku[]>("/skus"),
   summary: (sku: string | null, state?: string | null) =>

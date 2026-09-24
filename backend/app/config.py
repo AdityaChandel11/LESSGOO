@@ -197,6 +197,9 @@ class Settings(BaseSettings):
     public_webhook_base_url: str = ""
     bhashini_api_key: str = ""
     redis_url: str = ""
+    # The federation's own interpreter (torch lives there, never here). Only
+    # read by the local-only "Run next round"; blank means that button is off.
+    federation_python: str = ""
 
     # --- reorder floor thresholds (spec 12.1) ---
     critical_days: float = 3.0

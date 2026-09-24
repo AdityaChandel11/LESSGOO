@@ -64,6 +64,33 @@ python publish_forecast.py
 The environment variable must be set **before** the SuperLink starts: the
 SuperLink spawns the ServerApp, which inherits its environment.
 
+flwr 1.37 serves its control API over HTTP on `127.0.0.1:8000` by default,
+which is also the backend's port. Start the SuperLink with `--port 9093` to
+keep them apart; `~/.flwr/config.toml` then points `local-deployment` at
+`127.0.0.1:9093`. The SuperLink also spawns `flower-superexec` by name, so the
+federation interpreter's `bin/` has to be on `PATH` when it starts.
+
+## Run next round, from the Federation page
+
+The page can continue the latest recorded run by one real round. The web
+service does not train: it starts `flwr run` with the federation interpreter
+and shows the phases the aggregator prints. It is off in production and
+until all of these hold locally:
+
+- `FEDERATION_PYTHON` in `.env` points at this directory's interpreter;
+- the SuperLink and the four SuperNodes are running as above;
+- a full training saved its weights where the button resumes from:
+
+```bash
+flwr run . local-deployment --stream \
+  --run-config "model-path='$PWD/runs/latest_global.pt'"
+```
+
+Each press passes `resume-run-id`, `start-round` and that `model-path`. The
+ServerApp refuses to resume unless the saved weights hash to exactly what the
+run's last recorded round wrote, so a new row always continues the row above
+it. `runs/` is gitignored.
+
 `local-deployment` lives in `~/.flwr/config.toml`, not in `pyproject.toml` —
 flwr 1.37 moved federation configuration out of the project file.
 

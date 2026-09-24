@@ -14,7 +14,15 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, api, type FederationInspector, type FederationRound } from "./api";
+import {
+  ApiError,
+  api,
+  type FederationInspector,
+  type FederationRound,
+  type LiveRoundState,
+} from "./api";
+
+const LIVE_POLL_MS = 1000;
 
 function mae(value: number | null | undefined): string {
   return typeof value === "number" ? value.toFixed(4) : "—";
@@ -46,6 +54,7 @@ function day(iso: string): string {
     year: "numeric",
   });
 }
+
 /**
  * The accuracy curve, drawn against the rule it has to beat.
  *
@@ -132,30 +141,96 @@ export function FederationPanel({
   refreshKey,
   onSilos,
   stateName,
+  canTrain = false,
 }: {
   refreshKey: number;
   /** Reports the silo states upward so the map can ring them. */
   onSilos?: (states: string[]) => void;
   /** The rounds store two-letter codes; a reader wants the state. */
   stateName?: (code: string) => string;
+  /** Whether this account may start a real round (administrators). */
+  canTrain?: boolean;
 }) {
   const named = (code: string) => stateName?.(code) ?? code;
   const [data, setData] = useState<FederationInspector | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   // null: the finished run, as recorded. A number: the round a replay has
-  // reached. Nothing here re-trains anything — the rows are already written.
+  // reached. The replay re-trains nothing — the rows are already written.
   const [replayAt, setReplayAt] = useState<number | null>(null);
   const timer = useRef<number | null>(null);
+  const [live, setLive] = useState<LiveRoundState | null>(null);
+  const [liveError, setLiveError] = useState<string | null>(null);
+  const [freshRound, setFreshRound] = useState<number | null>(null);
+  const livePoll = useRef<number | null>(null);
+
+  const loadInspector = useCallback(
+    () =>
+      api
+        .federationInspector()
+        .then(setData)
+        .catch((e) => setError(e instanceof ApiError ? e.message : "Could not load the inspector")),
+    [],
+  );
 
   useEffect(() => {
     setLoading(true);
-    api
-      .federationInspector()
-      .then(setData)
-      .catch((e) => setError(e instanceof ApiError ? e.message : "Could not load the inspector"))
-      .finally(() => setLoading(false));
-  }, [refreshKey]);
+    void loadInspector().finally(() => setLoading(false));
+  }, [refreshKey, loadInspector]);
+
+  useEffect(() => {
+    if (!canTrain) return;
+    api.federationLive().then(setLive).catch(() => setLive(null));
+  }, [canTrain, refreshKey]);
+
+  const stopLivePoll = () => {
+    if (livePoll.current) window.clearInterval(livePoll.current);
+    livePoll.current = null;
+  };
+  useEffect(() => stopLivePoll, []);
+
+  // A real round: the server starts `flwr run`, and each phase shown below is
+  // a line the aggregator printed. The new row comes from the database once
+  // the round has written it, never from this component.
+  const runNextRound = async () => {
+    setLiveError(null);
+    setFreshRound(null);
+    try {
+      const job = await api.startFederationRound();
+      setLive((l) => ({ available: true, reason: null, ...(l ?? {}), job }));
+    } catch (e) {
+      setLiveError(e instanceof ApiError ? e.message : "Could not start the round");
+      return;
+    }
+    stopLivePoll();
+    livePoll.current = window.setInterval(async () => {
+      try {
+        const state = await api.federationLive();
+        setLive(state);
+        if (state.job && state.job.status !== "running") {
+          stopLivePoll();
+          if (state.job.status === "done") {
+            await loadInspector();
+            setReplayAt(null);
+            setFreshRound(state.job.round_no);
+          }
+        }
+      } catch {
+        // One missed poll is not a failed round; the next tick asks again.
+      }
+    }, LIVE_POLL_MS);
+  };
+
+  const job = live?.job ?? null;
+  const training = job?.status === "running";
+
+  // Bring the round that just landed into view: it is the thing to watch.
+  useEffect(() => {
+    if (freshRound == null) return;
+    document
+      .querySelector(`[data-round="${freshRound}"]`)
+      ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [freshRound, data]);
 
   const rounds = data?.rounds ?? NO_ROUNDS;
 
@@ -251,6 +326,58 @@ export function FederationPanel({
               Replay of the recorded run, not a new training. The rounds below were written by the
               aggregator when the run happened; pressing this re-reads them in order.
             </p>
+
+            {canTrain && live && (
+              <div className="mt-2 border-t border-line pt-2">
+                {live.available || training ? (
+                  <>
+                    <button
+                      onClick={runNextRound}
+                      disabled={training}
+                      className="h-8 rounded-md bg-brand px-3 text-[12.5px] font-medium text-white hover:bg-brand/90 focus:ring-2 focus:ring-brand/30 focus:outline-none disabled:opacity-60"
+                    >
+                      {training ? `Training round ${job?.round_no}…` : "Run next round"}
+                    </button>
+                    <p className="mt-1 text-[11px] leading-snug text-ink-3">
+                      A real round: the four state silos train on their own rows and send back
+                      weights, which are checked, averaged and scored. It takes about two minutes.
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-[11px] leading-snug text-ink-3">
+                    <span className="font-medium text-ink-2">Run next round is off here.</span>{" "}
+                    {live.reason}
+                  </p>
+                )}
+                {liveError && <p className="mt-1 text-[11.5px] text-crit">{liveError}</p>}
+                {job && (training || job.status !== "running") && (
+                  <ol className="mt-1.5 space-y-0.5" aria-live="polite">
+                    {job.phases.map((p) => (
+                      <li key={p.label} className="flex items-baseline justify-between gap-2 text-[11.5px]">
+                        <span className="text-ink-2">
+                          <span className="text-ok" aria-hidden="true">✓</span> {p.label}
+                        </span>
+                        <span className="shrink-0 font-mono text-[10.5px] text-ink-3">+{p.at_s.toFixed(1)}s</span>
+                      </li>
+                    ))}
+                    {training && (
+                      <li className="text-[11.5px] text-ink-3">
+                        <span className="live-dot mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-brand" />
+                        Working…
+                      </li>
+                    )}
+                    {job.status === "done" && (
+                      <li className="text-[11.5px] font-medium text-ok">
+                        Round {job.round_no} recorded — see the highlighted row below.
+                      </li>
+                    )}
+                    {job.status === "failed" && (
+                      <li className="text-[11.5px] text-crit">The round stopped: {job.error}</li>
+                    )}
+                  </ol>
+                )}
+              </div>
+            )}
           </>
         )}
       </div>
@@ -273,13 +400,14 @@ export function FederationPanel({
               <Curve rounds={data.rounds} baseline={data.baseline_mae} upTo={replayAt} />
               <Row
                 label={replayAt == null ? "Model error now (MAE)" : `Model error at round ${shown?.round_no}`}
-                value={mae(replayAt == null ? data.best_mae : shown?.global_val_mae)}
+                value={mae(shown?.global_val_mae)}
                 strong
               />
               <Row label="Burn rate, same held-out weeks" value={mae(data.baseline_mae)} />
               <Row label="Error at round one" value={mae(data.first_mae)} />
+              <Row label="Best round" value={mae(data.best_mae)} />
               <Row
-                label="Better than the burn rate by"
+                label="Best round beats the burn rate by"
                 value={data.improvement_pct == null ? "—" : `${data.improvement_pct}%`}
                 strong
               />
@@ -421,9 +549,10 @@ export function FederationPanel({
                   {data.rounds.map((r, i) => (
                     <tr
                       key={r.round_no}
+                      data-round={r.round_no}
                       className={`border-t border-line text-ink-2 ${
                         replayAt != null && i > replayAt ? "opacity-35" : ""
-                      }`}
+                      } ${r.round_no === freshRound ? "bg-ok/10 font-semibold text-ink" : ""}`}
                     >
                       <td className="py-1">{r.round_no}</td>
                       <td className="py-1" title={new Date(r.completed_at).toString()}>
