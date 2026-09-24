@@ -264,7 +264,7 @@ To see Gemini live, set `LLM_MODE=live` and `GEMINI_API_KEY` in `.env`, then che
 
 ```bash
 cd backend
-.venv/bin/python -m pytest -q     # 409 unit tests
+.venv/bin/python -m pytest -q     # 406 unit tests
 .venv/bin/python -m checks        # 201 integration assertions, 9 suites, against the seeded database
 cd ../frontend && npx tsc -b && npm run build
 ```
@@ -305,10 +305,7 @@ cd backend
 | `GOOGLE_MAPS_SERVER_KEY`, `GOOGLE_MAPS_BROWSER_KEY` | optional | With `MAPS_MODE=google` |
 | `TWILIO_*` | optional | With `COMMS_MODE=live` |
 
-The full list is in [`.env.example`](.env.example). An alternative Google Cloud path (Cloud Run,
-Cloud SQL and Firebase Hosting: [`deploy/cloudrun.sh`](deploy/cloudrun.sh),
-[`firebase.json`](firebase.json)) is written and its config is tested, but it has never been run
-against a real project.
+The full list is in [`.env.example`](.env.example).
 
 ## Privacy
 
