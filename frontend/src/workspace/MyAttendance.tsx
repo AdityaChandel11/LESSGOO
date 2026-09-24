@@ -210,6 +210,39 @@ function Day({ day }: { day: SelfDay }) {
   );
 }
 
+/** Today in words: the check-in, how it was verified, and today's random checks. */
+function Today({ day }: { day: SelfDay | undefined }) {
+  return (
+    <section aria-label="Today" className="mb-2.5 rounded-lg border border-brand/30 bg-brand/[0.04] px-3.5 py-3">
+      <h2 className="text-[11px] font-semibold uppercase tracking-[0.09em] text-brand">Today · आज</h2>
+      {!day || !day.present ? (
+        <p className="mt-1 text-[12.5px] text-ink-2">No check-in has been logged yet today.</p>
+      ) : (
+        <>
+          <p className="mt-1 text-[12.5px] text-ink">
+            Checked in{day.checked_in_at && <> at <span className="font-mono">{time(day.checked_in_at)}</span></>} by{" "}
+            {SOURCE_LABEL[day.source ?? ""] ?? day.source ?? "an unknown channel"}
+            {day.loc_method && <>, located by {METHOD_LABEL[day.loc_method] ?? day.loc_method}</>}
+            {day.geofence_ok === true && <span className="text-ok"> — inside the centre</span>}
+            {day.geofence_ok === false && <span className="text-risk"> — outside the centre</span>}
+            {day.geofence_ok === null && " — the location could not be checked"}
+            {day.checked_out_at ? <>; checked out at <span className="font-mono">{time(day.checked_out_at)}</span>.</> : "; shift still open."}
+          </p>
+          {day.pings.length === 0 ? (
+            <p className="mt-1 text-[11.5px] text-ink-3">No random check has been sent yet today.</p>
+          ) : (
+            <ul className="mt-1.5 space-y-1.5">
+              {day.pings.map((p) => (
+                <Ping key={p.sent_at} ping={p} />
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 /* ------------------------------------------------------------- the screen --- */
 
 export default function MyAttendance({ refreshKey }: { refreshKey: number }) {
@@ -247,6 +280,7 @@ export default function MyAttendance({ refreshKey }: { refreshKey: number }) {
 
   return (
     <div>
+      <Today day={data.days.find((d) => dayLabel(d.day).isToday)} />
       <section
         aria-label="Your attendance, last 30 days"
         className="rounded-lg border border-line bg-panel px-3.5 py-3"
