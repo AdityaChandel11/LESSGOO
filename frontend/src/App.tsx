@@ -129,7 +129,7 @@ function UserMenu({ user, onSignOut }: { user: User; onSignOut: () => void }) {
         <span className="flex h-7 w-7 items-center justify-center rounded-full bg-brand text-[11px] font-semibold text-white">
           {initials || "?"}
         </span>
-        <span className="hidden text-left leading-tight xl:block">
+        <span className="hidden text-left leading-tight 2xl:block">
           <span className="block max-w-[160px] truncate text-[12.5px] font-medium text-ink">{user.name}</span>
           <span className="block text-[10.5px] text-ink-3">{ROLE_LABEL[user.role]}</span>
         </span>
@@ -501,21 +501,25 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
   return (
     <div className="flex h-full flex-col bg-canvas font-sans text-ink">
       {/* ------------------------------------------------------ top bar --- */}
-      <header className="z-[1100] flex h-14 shrink-0 items-center gap-5 border-b border-line bg-panel px-4">
-        <div className="flex items-center gap-2.5">
-          <svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true">
-            <rect width="26" height="26" rx="6" fill="#0b3d5c" />
-            <path d="M13 6v14M6 13h14" stroke="#fff" strokeWidth="3" strokeLinecap="round" />
-            <circle cx="19.5" cy="6.5" r="3" fill="#e0900e" stroke="#0b3d5c" strokeWidth="1.5" />
+      <header className="z-[1100] flex h-14 shrink-0 items-center gap-3 border-b-2 border-brand bg-panel pr-4 min-[1360px]:gap-5">
+        {/* The mark sits on a solid brand block — flat, no gradient — so the
+            product reads as one identity before any data does. */}
+        <div className="flex h-full shrink-0 items-center gap-2.5 bg-brand pr-4 pl-4 whitespace-nowrap text-white">
+          <svg width="28" height="28" viewBox="0 0 26 26" aria-hidden="true">
+            <rect width="26" height="26" rx="6" fill="#fff" />
+            <path d="M13 6v14M6 13h14" stroke="#0b3d5c" strokeWidth="3" strokeLinecap="round" />
+            <circle cx="19.5" cy="6.5" r="3" fill="#e0900e" stroke="#fff" strokeWidth="1.5" />
           </svg>
           <div className="leading-tight">
-            <div className="text-[14.5px] font-semibold tracking-tight text-ink">SwasthSetu</div>
-            <div className="text-[10.5px] text-ink-3">National Health Supply Command</div>
+            <div className="text-[15.5px] font-semibold tracking-tight">
+              SwasthSetu{" "}
+              <span className="ml-0.5 text-[13px] font-medium text-white/85">स्वस्थसेतु</span>
+            </div>
+            <div className="text-[10.5px] text-white/80">National Health Supply Command</div>
           </div>
         </div>
 
         <nav aria-label="Location" className="flex min-w-0 items-center gap-1.5 text-[13px]">
-          <span className="text-line">|</span>
           <button
             onClick={goNational}
             className={`rounded px-1.5 py-0.5 hover:bg-canvas ${activeState ? "text-brand" : "font-medium text-ink"}`}
@@ -541,7 +545,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
           )}
         </nav>
 
-        <div className="ml-auto flex items-center gap-3">
+        <div className="ml-auto flex items-center gap-2 min-[1360px]:gap-3">
           <div role="tablist" aria-label="View" className="flex rounded-md border border-line bg-canvas p-0.5">
             {(
               [
@@ -558,7 +562,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
                 role="tab"
                 aria-selected={mode === m}
                 onClick={() => setMode(m)}
-                className={`h-7 rounded px-3 text-[12.5px] font-medium ${
+                className={`h-7 rounded px-2 text-[12px] font-medium whitespace-nowrap min-[1360px]:px-2.5 min-[1360px]:text-[12.5px] ${
                   mode === m ? "bg-panel text-ink shadow-sm" : "text-ink-3 hover:text-ink-2"
                 }`}
               >
@@ -568,11 +572,11 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
           </div>
 
           <label className="flex items-center gap-2 text-[12px] text-ink-2">
-            Medicine
+            <span className="sr-only 2xl:not-sr-only">Medicine</span>
             <select
               value={sku ?? ""}
               onChange={(e) => setSku(e.target.value || null)}
-              className="h-8 min-w-[210px] rounded-md border border-line bg-panel px-2 text-[12.5px] font-medium text-ink focus:border-brand focus:outline-none"
+              className="h-8 min-w-[150px] rounded-md min-[1360px]:min-w-[190px] 2xl:min-w-[210px] border border-line bg-panel px-2 text-[12.5px] font-medium text-ink focus:border-brand focus:outline-none"
             >
               <option value="">All medicines (lowest stocked)</option>
               {skus.map((s) => (
@@ -584,7 +588,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
           </label>
 
           <span
-            className="rounded-md border border-line px-2 py-1 text-[11px] text-ink-2"
+            className="rounded-md border border-line px-2 py-1 text-[11px] whitespace-nowrap text-ink-2"
             title="District locations are real. Facility positions and stock levels are simulated, covering roughly 12% of the national PHC network."
           >
             Simulated data
