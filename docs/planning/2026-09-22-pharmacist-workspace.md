@@ -8,7 +8,7 @@
 
 **Tech Stack:** FastAPI + SQLAlchemy 2 async + asyncpg, PostgreSQL 17. React 19 + Vite + TypeScript + Tailwind v4, direct Leaflet.
 
-**Spec:** `docs/JOURNEY_PLAN.md`; `masterbuildspec-v3.md` §12.3 (redistribution, human approval), §26.3 (two-sided ledger), §12.6 (trust).
+**Spec:** `docs/planning/JOURNEY_PLAN.md`; `docs/specs/masterbuildspec-v3.md` §12.3 (redistribution, human approval), §26.3 (two-sided ledger), §12.6 (trust).
 
 ---
 
@@ -49,7 +49,7 @@ So this stage follows both existing patterns and **adds no test dependency**:
 
 ## Global Constraints
 
-Copied verbatim from `CLAUDE.md`, `SPEC_DIGEST.md` and the approved brief. Every task implicitly includes this section.
+Copied verbatim from `CLAUDE.md`, `docs/specs/SPEC_DIGEST.md` and the approved brief. Every task implicitly includes this section.
 
 - **No patient-level data exists in this system at all.**
 - **Redistribution always ends in human approval. Nothing auto-executes.** A request creates a `proposed` transfer and nothing more.
@@ -129,7 +129,7 @@ Five conditions the brief implies but no happy path exercises. Each has its test
 
 ## Task 2: The medicine list, with how each figure was verified
 
-**Governing rule** (`SPEC_DIGEST.md` §1): "The trust score is computed live from the same tables everything else reads — never cached, never a parallel dataset." This task reads; it computes no new trust.
+**Governing rule** (`docs/specs/SPEC_DIGEST.md` §1): "The trust score is computed live from the same tables everything else reads — never cached, never a parallel dataset." This task reads; it computes no new trust.
 
 `SkuStockOut` (`api.py:150`) already carries `qty_on_hand`, `days_of_stock`, `status`, `rate_source`, `last_reported_at`, `last_source`, `last_confidence`. Three of the four verification kinds are therefore already on the wire: a physical count is `last_source in ("form","voice")`, a phone report is `("sms","ivr","whatsapp")`, and trust comes from the facility payload. The missing one is **delivery confirmation** — the last settled `medicine_movements` row per SKU. Ward photos verify beds, not medicines, and stay on the facility header where `bed_occupancy_pct` already is.
 
@@ -294,7 +294,7 @@ def stockout_date(
 
 ## Task 4: Find supply
 
-**Governing rule** (`SPEC_DIGEST.md` §1): "Never propose taking a donor below its own safety stock, in either solver implementation," and "Controlled-substance SKUs are excluded from the solver entirely, routed to a manual-only queue."
+**Governing rule** (`docs/specs/SPEC_DIGEST.md` §1): "Never propose taking a donor below its own safety stock, in either solver implementation," and "Controlled-substance SKUs are excluded from the solver entirely, routed to a manual-only queue."
 
 This is `split_roles` read from the recipient's side: same `StockNode` list the solver uses (`load_state_nodes(session, state, sku)` — bounded to one state and one SKU, 250 rows for MH), same split, ranked by `road_km`, returning the nearest three with the cover each donor keeps.
 
@@ -362,7 +362,7 @@ def test_a_cold_chain_medicine_respects_the_shorter_road_limit():
 
 ## Task 5: Request stock, and the two caps
 
-**Governing rule** (`SPEC_DIGEST.md` §1): "Redistribution/outbreak always ends in human approval. **Nothing auto-executes.**"
+**Governing rule** (`docs/specs/SPEC_DIGEST.md` §1): "Redistribution/outbreak always ends in human approval. **Nothing auto-executes.**"
 
 A request creates a `Transfer` with `status="proposed"` and `triggered_by="facility_request"` — existing column, no migration. The existing chain carries it from there.
 
