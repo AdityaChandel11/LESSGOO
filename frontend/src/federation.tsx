@@ -25,6 +25,27 @@ function bytes(value: number | null | undefined): string {
   return value < 1024 ? `${value} B` : `${(value / 1024).toFixed(1)} KB`;
 }
 
+/** Exact, because a rounded figure is what makes a measured one look typed in. */
+function exactBytes(value: number | null | undefined): string {
+  return typeof value === "number" ? `${value.toLocaleString("en-IN")} B` : "—";
+}
+
+function clock(iso: string): string {
+  return new Date(iso).toLocaleTimeString("en-IN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
+function day(iso: string): string {
+  return new Date(iso).toLocaleDateString("en-IN", {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
+}
 /**
  * The accuracy curve, drawn against the rule it has to beat.
  *
@@ -184,6 +205,13 @@ export function FederationPanel({
       ? data?.raw_rows_transmitted ?? 0
       : rounds.slice(0, replayAt + 1).reduce((n, r) => n + r.raw_rows_transmitted, 0);
   const weighting = shown ? mostDownWeighted(shown.per_silo) : null;
+  // Counted from the recorded tensor shapes, so bytes ÷ numbers is a check on
+  // the measurement rather than an assumption about it.
+  const params = shapes.reduce((n, [, shape]) => n + shape.reduce((a, b) => a * b, 1), 0);
+  const bytesPerNumber =
+    params > 0 && typeof data?.bytes_per_round === "number" ? data.bytes_per_round / params : null;
+  const oneDay =
+    rounds.length > 0 && rounds.every((r) => day(r.completed_at) === day(rounds[0].completed_at));
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -268,13 +296,33 @@ export function FederationPanel({
                     {rowsSoFar}
                   </span>
                 </div>
+                <p className="mt-0.5 text-[11px] leading-snug text-ink-2">
+                  0 rows per round. What each silo sent instead:{" "}
+                  <span className="font-mono">{exactBytes(data.bytes_per_round)}</span> of model
+                  weights
+                  {params > 0 && bytesPerNumber != null && (
+                    <>
+                      {" "}
+                      — {params.toLocaleString("en-IN")} numbers × {bytesPerNumber} bytes
+                    </>
+                  )}
+                  .
+                </p>
                 <p className="mt-0.5 text-[11px] leading-snug text-ink-3">
                   Asserted by the aggregator before each round was recorded — a reply carrying
                   anything but weights and scalar numbers stops the round.
                 </p>
               </div>
               <div className="mt-1.5">
-                <Row label="Weights per round" value={bytes(data.bytes_per_round)} strong />
+                <Row
+                  label="Weights per round"
+                  value={`${exactBytes(data.bytes_per_round)} (${bytes(data.bytes_per_round)})`}
+                  strong
+                />
+                <p className="text-[11px] leading-snug text-ink-3">
+                  The same every round because the model&rsquo;s shape never changes. The hash
+                  changes every round because the numbers inside it do.
+                </p>
                 <Row label="Across the whole run" value={bytes(data.total_bytes)} />
                 <Row label="Tensors in the payload" value={String(shapes.length)} />
                 <Row label="Silos reporting" value={String(last?.silos_reporting ?? "—")} />
@@ -353,36 +401,58 @@ export function FederationPanel({
               <div className="text-[10.5px] font-semibold tracking-[0.09em] text-ink-3 uppercase">
                 Round by round
               </div>
-              <div className="mt-1.5 space-y-0.5">
-                {data.rounds.map((r, i) => (
-                  <div
-                    key={r.round_no}
-                    className={`flex items-baseline justify-between gap-2 border-t border-line py-1 first:border-t-0 ${
-                      replayAt != null && i > replayAt ? "opacity-35" : ""
-                    }`}
-                  >
-                    <span className="text-[11.5px] text-ink-2">Round {r.round_no}</span>
-                    <span className="font-mono text-[11.5px] tabular-nums text-ink-2">
-                      MAE {mae(r.global_val_mae)} · {bytes(r.bytes_transmitted)}
-                      {" · "}
-                      {/* The zero is the result this whole subsystem exists to
-                          produce, so it is written as a finding rather than as
-                          an empty column. "0 rows", set in the same grey as the
-                          numbers beside it, reads like a figure nobody filled
-                          in; the assertion is that no facility row left its
-                          state, and it was checked before the round was
-                          written. */}
-                      {r.raw_rows_transmitted === 0 ? (
-                        <span className="text-ok">no rows left the state</span>
-                      ) : (
-                        <span className="text-crit">
-                          {r.raw_rows_transmitted.toLocaleString("en-IN")} rows left the state
-                        </span>
-                      )}
-                    </span>
-                  </div>
-                ))}
-              </div>
+              <p className="mt-1 text-[11px] text-ink-3">
+                {oneDay
+                  ? `Each row written by the aggregator as its round finished, ${day(rounds[0].completed_at)}, your local time.`
+                  : "Each row written by the aggregator as its round finished, your local time."}
+              </p>
+              <table className="mt-1.5 w-full font-mono text-[11px] tabular-nums">
+                <thead>
+                  <tr className="text-left font-sans text-ink-3">
+                    <th className="py-1 font-medium">Round</th>
+                    <th className="py-1 font-medium">Finished</th>
+                    <th className="py-1 text-right font-medium">MAE</th>
+                    <th className="py-1 text-right font-medium">Weights</th>
+                    <th className="py-1 pl-2 font-medium">Hash</th>
+                    <th className="py-1 text-right font-medium">Rows</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.rounds.map((r, i) => (
+                    <tr
+                      key={r.round_no}
+                      className={`border-t border-line text-ink-2 ${
+                        replayAt != null && i > replayAt ? "opacity-35" : ""
+                      }`}
+                    >
+                      <td className="py-1">{r.round_no}</td>
+                      <td className="py-1" title={new Date(r.completed_at).toString()}>
+                        {oneDay ? clock(r.completed_at) : `${day(r.completed_at)} ${clock(r.completed_at)}`}
+                      </td>
+                      <td className="py-1 text-right">{mae(r.global_val_mae)}</td>
+                      <td className="py-1 text-right">{exactBytes(r.bytes_transmitted)}</td>
+                      <td className="py-1 pl-2 text-ink-3" title={r.weights_sha256 ?? undefined}>
+                        {r.weights_sha256?.slice(0, 8) ?? "—"}
+                      </td>
+                      {/* The zero is the finding this subsystem exists to
+                          produce, so it is set in the success colour rather
+                          than the grey of a column nobody filled in. */}
+                      <td
+                        className={`py-1 text-right font-semibold ${
+                          r.raw_rows_transmitted === 0 ? "text-ok" : "text-crit"
+                        }`}
+                        title={
+                          r.raw_rows_transmitted === 0
+                            ? "No facility row left its state this round"
+                            : "Facility rows left the state this round"
+                        }
+                      >
+                        {r.raw_rows_transmitted.toLocaleString("en-IN")}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           </>
         )}
