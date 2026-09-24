@@ -166,6 +166,7 @@ export default function Workspace({
         {tab === "orders" && (
           <Orders
             facilityId={facilityId}
+            demoMode={session.demo_mode}
             refreshKey={refreshKey}
             onChanged={() => setRefreshKey((k) => k + 1)}
           />

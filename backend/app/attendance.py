@@ -22,7 +22,8 @@ anything, and it attaches to a facility and a pattern — never to a person.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import random
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import func, select
@@ -293,6 +294,8 @@ class SelfDay:
     geofence_km: float | None
     geofence_ok: bool | None
     pings: list[VerificationPing]
+    # True for a day generated for the demo rather than read from check-ins.
+    synthetic: bool = False
 
 
 @dataclass(frozen=True)
@@ -428,3 +431,80 @@ async def own_record(
         pings_unanswered=sum(1 for p in pings if p.outcome == "no_reply"),
         days=days,
     )
+
+
+# ============================================================ demo record ===
+# The demo needs a staff member's own record to show, including today, and
+# the seeded history stops before today. These days are generated per request
+# from a fixed seed (facility, day), never stored, and every one carries
+# synthetic=True so the screen labels it. Biometric appears only here: the
+# platform has no biometric capture, and a synthetic day says so.
+
+
+def synthetic_day(facility_id: str, day: date, now: datetime) -> SelfDay:
+    rnd = random.Random(f"{facility_id}:{day.isoformat()}")
+    base = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+    is_today = day == now.date()
+    if not is_today and rnd.random() < 0.18:
+        return SelfDay(day, False, None, None, None, None, None, None, None, None, [], True)
+    # IST morning shift, stored in UTC: 08:40-09:10 IST is 03:10-03:40 UTC.
+    check_in = base + timedelta(hours=3, minutes=10 + rnd.randint(0, 30))
+    check_out = None if is_today else check_in + timedelta(hours=8, minutes=rnd.randint(0, 40))
+    source = rnd.choices(["biometric", "ivr", "sms"], weights=[6, 2, 2])[0]
+    loc = "gps" if source == "biometric" else rnd.choice(["cell_id", "gps"])
+    tower = f"404-20-{rnd.randint(1000, 9999)}-{rnd.randint(10000, 99999)}"
+    pings = []
+    for hours, channel in ((6, "sms"), (9, "ivr")):
+        sent = check_in + timedelta(hours=hours, minutes=rnd.randint(0, 50))
+        if sent > now or rnd.random() < 0.25:
+            continue
+        answered = rnd.random() > 0.15
+        by_tower = channel == "sms" and rnd.random() < 0.5
+        pings.append(VerificationPing(
+            sent_at=sent,
+            responded_at=sent + timedelta(minutes=rnd.randint(1, 12)) if answered else None,
+            channel=channel,
+            loc_method=("cell_id" if by_tower else "gps") if answered and channel == "sms" else None,
+            cell_id=tower if answered and by_tower else None,
+            geofence_km=round(rnd.uniform(0.02, 0.6), 2) if answered and channel == "sms" else None,
+            geofence_ok=True if answered and channel == "sms" else None,
+            outcome=("confirmed" if channel == "sms" else "unlocatable") if answered else "no_reply",
+        ))
+    return SelfDay(
+        day=day, present=True, checked_in_at=check_in, checked_out_at=check_out,
+        shift="morning", source=source, loc_method=loc,
+        cell_id=tower if loc == "cell_id" else None,
+        geofence_km=round(rnd.uniform(0.01, 0.4), 2), geofence_ok=True,
+        pings=pings, synthetic=True,
+    )
+
+
+def _tally(facility_id: str, staff_ref: str, window_days: int, days: list[SelfDay]) -> SelfRecord:
+    pings = [p for d in days for p in d.pings]
+    return SelfRecord(
+        facility_id=facility_id, staff_ref=staff_ref, window_days=window_days,
+        days_present=sum(d.present for d in days),
+        days_absent=sum(not d.present for d in days),
+        pings_sent=len(pings),
+        pings_confirmed=sum(p.outcome == "confirmed" for p in pings),
+        pings_unanswered=sum(p.outcome == "no_reply" for p in pings),
+        days=days,
+    )
+
+
+def synthetic_record(facility_id: str, *, window_days: int = SELF_WINDOW_DAYS,
+                     now: datetime | None = None) -> SelfRecord:
+    """A whole demo record, for a demo account with no linked staff member."""
+    at = now or datetime.now(timezone.utc)
+    days = [synthetic_day(facility_id, at.date() - timedelta(days=i), at) for i in range(window_days)]
+    return _tally(facility_id, "demo", window_days, days)
+
+
+def with_synthetic_today(record: SelfRecord, now: datetime | None = None) -> SelfRecord:
+    """Fill today with a demo day when nothing has been logged yet."""
+    at = now or datetime.now(timezone.utc)
+    days = [
+        synthetic_day(record.facility_id, d.day, at) if d.day == at.date() and not d.present else d
+        for d in record.days
+    ]
+    return replace(_tally(record.facility_id, record.staff_ref, record.window_days, days))

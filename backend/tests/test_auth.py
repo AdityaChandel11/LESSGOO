@@ -58,13 +58,12 @@ CROSS_STATE = dict(from_state="MH", from_district="Nashik", to_state="GJ", to_di
     "who, route, allowed",
     [
         (ADMIN, CROSS_STATE, True),
-        (MH_OFFICER, WITHIN_NASHIK, True),
-        (MH_OFFICER, NASHIK_TO_PUNE, True),
-        # A state officer's authority stops at the state border.
-        (MH_OFFICER, CROSS_STATE, False),
-        (NASHIK_MO, WITHIN_NASHIK, True),
-        # A district officer cannot send stock out of, or into, another district.
-        (NASHIK_MO, NASHIK_TO_PUNE, False),
+        # Officers watch transfers; the donor centre decides them.
+        (MH_OFFICER, WITHIN_NASHIK, False),
+        (NASHIK_MO, WITHIN_NASHIK, False),
+        # A pharmacist decides transfers out of their own centre, and no other.
+        (PHARMACIST, {**WITHIN_NASHIK, "from_facility": PHARMACIST.facility_id}, True),
+        (PHARMACIST, {**WITHIN_NASHIK, "from_facility": "HFR-MH-PHC-99999"}, False),
         (PHARMACIST, WITHIN_NASHIK, False),
     ],
 )

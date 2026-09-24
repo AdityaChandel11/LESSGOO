@@ -516,7 +516,7 @@ function TripCard({
 
       {open.length > 0 && !mayDecide && (
         <p className="mt-2 text-right text-[11px] text-ink-3">
-          Awaiting a decision from the responsible officer
+          Awaiting the donor centre's decision
         </p>
       )}
       {open.length > 0 && mayDecide && (

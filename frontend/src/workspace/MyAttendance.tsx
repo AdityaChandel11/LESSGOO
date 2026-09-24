@@ -43,6 +43,7 @@ const METHOD_LABEL: Record<string, string> = {
 };
 
 const SOURCE_LABEL: Record<string, string> = {
+  biometric: "biometric scanner",
   form: "app",
   ussd: "USSD",
   ivr: "phone call",
@@ -152,6 +153,7 @@ function Day({ day }: { day: SelfDay }) {
           {weekday}
           {isToday && <span className="ml-1 text-brand">today</span>}
         </p>
+        {day.synthetic && <p className="mt-0.5 text-[10px] text-ink-3">synthetic demo</p>}
         <p className="font-mono text-[11px] tabular-nums text-ink-3">{date}</p>
       </div>
 
@@ -214,7 +216,9 @@ function Day({ day }: { day: SelfDay }) {
 function Today({ day }: { day: SelfDay | undefined }) {
   return (
     <section aria-label="Today" className="mb-2.5 rounded-lg border border-brand/30 bg-brand/[0.04] px-3.5 py-3">
-      <h2 className="text-[11px] font-semibold uppercase tracking-[0.09em] text-brand">Today · आज</h2>
+      <h2 className="text-[11px] font-semibold uppercase tracking-[0.09em] text-brand">
+        Today · आज{day?.synthetic && <span className="ml-1.5 rounded border border-line bg-canvas px-1 text-[10px] font-medium text-ink-3">synthetic demo</span>}
+      </h2>
       {!day || !day.present ? (
         <p className="mt-1 text-[12.5px] text-ink-2">No check-in has been logged yet today.</p>
       ) : (

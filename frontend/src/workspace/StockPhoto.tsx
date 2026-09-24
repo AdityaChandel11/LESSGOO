@@ -181,9 +181,20 @@ export default function StockPhoto({
                   {l.sku_name ?? l.medicine}
                 </span>
                 {l.committed ? (
+                  <>
                   <span className="ml-1.5 text-[10.5px] font-semibold uppercase tracking-[0.06em] text-ok">
                     recorded
                   </span>
+                  <span className="block text-[11px] text-ink-2">
+                    Stock ledger:{" "}
+                    <span className="font-mono">
+                      {l.qty_before == null ? "no earlier count" : Math.round(l.qty_before).toLocaleString("en-IN")}
+                      {" → "}
+                      {Math.round(l.quantity).toLocaleString("en-IN")}
+                    </span>{" "}
+                    · new reading written, source "photo", read by Gemini
+                  </span>
+                  </>
                 ) : (
                   <>
                     <span className="ml-1.5 text-[10.5px] font-semibold uppercase tracking-[0.06em] text-risk">

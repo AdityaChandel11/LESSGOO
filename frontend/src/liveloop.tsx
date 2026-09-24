@@ -72,7 +72,7 @@ const STEP_TITLES: [string, string][] = [
   ["brief", "Gemini explains the risk"],
   ["plan", "Optimiser proposes a transfer"],
   ["why", "Gemini explains the transfer"],
-  ["approve", "Officer approves"],
+  ["approve", "Donor centre accepts"],
   ["moved", "Donor dispatches"],
   ["receipt", "Receiver confirms arrival"],
   ["feed", "Activity feed"],
@@ -468,11 +468,8 @@ export function LiveLoopPanel({
     );
   }, [events, phase, facility.id, transfer]);
 
-  const mayWrite = can.report(user, facility) && can.decideTransfer(
-    user,
-    { state: facility.state_silo, district: facility.district },
-    { state: facility.state_silo, district: facility.district },
-  );
+  // In the sandbox, whoever may report there acts for the donor centre too.
+  const mayWrite = can.report(user, facility);
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -551,13 +548,13 @@ export function LiveLoopPanel({
         {phase === "awaiting" && transfer && (
           <div className="mt-3 rounded-md border border-brand/30 bg-brand/[0.04] px-2.5 py-2.5">
             <p className="text-[12.5px] leading-snug text-ink">
-              Nothing has moved yet. The plan is a proposal until somebody accountable accepts it.
+              Nothing has moved yet. The donor centre decides; in this drill you accept on its behalf.
             </p>
             <button
               onClick={approve}
               className="mt-2 h-9 w-full rounded-md bg-brand text-[13px] font-medium text-white hover:bg-brand/90 focus:ring-2 focus:ring-brand/30 focus:outline-none"
             >
-              Approve transfer {transfer.id}
+              Accept for the donor centre (transfer {transfer.id})
             </button>
           </div>
         )}
