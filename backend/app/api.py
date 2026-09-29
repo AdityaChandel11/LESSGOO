@@ -38,6 +38,7 @@ from . import (
     redistribution,
     services,
     comms,
+    stockphoto,
     trust,
     vision,
     workspace,
@@ -920,6 +921,15 @@ async def facility_workspace(
     snap = snaps[0]
 
     receipts = await workspace.last_receipts(session, facility.id)
+    documents = await workspace.photo_documents(
+        session,
+        facility.id,
+        {
+            s.sku_code: s.last_reported_at
+            for s in snap.skus
+            if s.last_source == "photo" and s.last_reported_at is not None
+        },
+    )
     open_here, _ = await workspace.open_request_counts(session, facility.id)
     units = {
         row.code: row.unit
@@ -930,7 +940,9 @@ async def facility_workspace(
     rows: list[WorkspaceSkuOut] = []
     for s in snap.skus:
         receipt = receipts.get(s.sku_code)
-        prov = workspace.provenance(s.last_source, s.last_reported_at, receipt, now)
+        prov = workspace.provenance(
+            s.last_source, s.last_reported_at, receipt, now, document=documents.get(s.sku_code)
+        )
         rows.append(
             WorkspaceSkuOut(
                 **vars(s),
@@ -1062,14 +1074,23 @@ class StockPhotoLineOut(BaseModel):
 
     medicine: str
     quantity: float
+    # As printed on the document, or None when it does not say.
+    unit: str | None = None
+    batch: str | None = None
     sku_code: str | None
     sku_name: str | None
     match_score: int
     committed: bool
-    # The shelf figure before this photo, so the screen can show the ledger
-    # change (before -> after) rather than only "recorded".
+    # "added" (a delivery, through the ledger), "subtracted" (an issue), "set"
+    # (a count) or "not_applied" — never a bare "recorded".
+    action: str
+    # The shelf figure before and after this line, so the screen shows the
+    # ledger change rather than only that something happened.
     qty_before: float | None = None
-    # Why a line was not committed, when it was not. Shown to the pharmacist,
+    qty_after: float | None = None
+    # The dispatch a delivery slip settled, when it settled one.
+    movement_id: int | None = None
+    # Why a line was not applied, when it was not. Shown to the pharmacist,
     # because "three of four lines went in" without saying which is worse than
     # refusing the lot.
     reason: str | None = None
@@ -1082,12 +1103,17 @@ class StockPhotoOut(BaseModel):
     # real extraction with the model's name and this one as a mock; computed
     # output is never presented as the model's work.
     ai: bool
+    # The model's own estimate of how well it read the page. Not a check:
+    # nothing here verifies it, and the screen says so.
     confidence: float
+    # delivery_slip | issue_record | stock_count | unknown — what decided
+    # whether each number was added, subtracted or set.
+    document_type: str
     document_date: date | None
+    document_age_days: int | None
     notes: str | None
     lines: list[StockPhotoLineOut]
     committed: int
-    verification: str
 
 
 class StockPhotoIn(BaseModel):
@@ -1106,19 +1132,21 @@ async def submit_stock_photo(
     session: AsyncSession = Depends(get_session),
     user: Principal = Depends(current_user),
 ) -> StockPhotoOut:
-    """Read a medicine bill or delivery slip and update the shelf from it.
+    """Read a photographed stock document and change the shelf the way that
+    document means it (spec 26.3–26.4, fix list #11).
 
-    The consumption half of spec 26.3, and the same bargain the ward photo
-    makes: the model turns an unstructured photograph into rows that the
-    reorder threshold, the forecast and the redistribution solver all read
-    next. That is exactly why it refuses more than it accepts.
+    The model says which document it is looking at, and that decides what each
+    number does (app/stockphoto.py): a delivery slip is added through the
+    delivery ledger, settling its own dispatch, so it cannot be counted twice;
+    an issue record is subtracted; a stock count is set. Reading every line as
+    the new shelf level is how a slip for 10 tablets once emptied a shelf of
+    500 on the map.
 
-    A line is committed only when its medicine resolves to a SKU this facility
-    actually stocks, above the same fuzzy-match floor the SMS grammar uses. A
-    line that does not resolve is returned unchanged, uncommitted, with the
-    reason — inventing a quantity on a stock ledger is worse than reading
-    nothing, because nothing downstream can tell an invented row from a real
-    one.
+    It refuses more than it accepts, because the model turns a photograph into
+    rows the reorder threshold, the forecast and the solver all read next. A
+    line is applied only when its medicine resolves to this centre's list and
+    nothing about it is doubtful; otherwise it comes back "not applied" with
+    the reason, and nothing about it is stored.
 
     The photograph itself is never stored. Only what was read from it is.
     """
@@ -1148,24 +1176,93 @@ async def submit_stock_photo(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     lookup = await ingest.sku_lookup(session)
-    names = {
-        s.code: s.name for s in (await session.execute(select(Sku))).scalars().all()
-    }
+    skus = {s.code: s for s in (await session.execute(select(Sku))).scalars().all()}
     now = datetime.now(timezone.utc)
+    today = now.date()
     rows: list[StockPhotoLineOut] = []
     committed = 0
+    readings_written = 0
     snaps = await services.get_snapshots(session, facility_ids=[facility.id])
-    before = {s.sku_code: float(s.qty_on_hand) for s in (snaps[0].skus if snaps else [])}
+    on_hand = {s.sku_code: float(s.qty_on_hand) for s in (snaps[0].skus if snaps else [])}
+    last_count = await workspace.last_count_times(
+        session, facility.id, since=now - timedelta(days=settings.stock_photo_max_age_days + 30)
+    )
+    open_by_sku, settled_by_sku = await movements.deliveries_to(
+        session, facility.id, since=now - timedelta(days=30)
+    )
+    settled_ids: set[int] = set()
 
-    for line in extraction.lines:
+    for i, line in enumerate(extraction.lines):
         code, score = ingest.resolve_sku(line.medicine, lookup)
+        common = dict(
+            medicine=line.medicine, quantity=line.quantity, unit=line.unit,
+            batch=line.batch, match_score=score,
+        )
         if code is None:
             rows.append(
                 StockPhotoLineOut(
-                    medicine=line.medicine, quantity=line.quantity,
-                    sku_code=None, sku_name=None, match_score=score,
-                    committed=False,
+                    **common, sku_code=None, sku_name=None, committed=False,
+                    action="not_applied",
                     reason="No medicine in this centre's list matches that name.",
+                )
+            )
+            continue
+
+        sku = skus[code]
+        before = on_hand.get(code)
+        decision = stockphoto.decide_line(
+            document_type=extraction.document_type,
+            qty=line.quantity,
+            printed_unit=line.unit,
+            printed_batch=line.batch,
+            sku_name=sku.name,
+            sku_unit=sku.unit,
+            on_hand=before or 0.0,
+            last_count_at=last_count.get(code),
+            document_date=extraction.document_date,
+            today=today,
+            confidence=extraction.confidence,
+            open_deliveries=[
+                d for d in open_by_sku.get(code, []) if d.movement_id not in settled_ids
+            ],
+            settled_deliveries=settled_by_sku.get(code, []),
+            confidence_floor=settings.channel_confidence_floor,
+            max_age_days=settings.stock_photo_max_age_days,
+        )
+        line_out = dict(common, sku_code=code, sku_name=sku.name, qty_before=before)
+
+        if decision.action == "hold":
+            rows.append(
+                StockPhotoLineOut(
+                    **line_out, committed=False, action="not_applied", reason=decision.reason
+                )
+            )
+            continue
+
+        if decision.action == "receive":
+            # A delivery goes through the ledger, never around it: the receipt
+            # settles the dispatch and writes the stock itself, so the same
+            # slip photographed twice finds its batch already settled.
+            try:
+                _, effect = await movements.confirm_receipt(
+                    session, decision.movement_id,
+                    qty_received=line.quantity, via="photo", by_ref=f"user:{user.id}",
+                    note=f"Read from a photographed delivery slip by {extraction.model}",
+                )
+            except movements.ReceiptError as exc:
+                rows.append(
+                    StockPhotoLineOut(
+                        **line_out, committed=False, action="not_applied", reason=str(exc)
+                    )
+                )
+                continue
+            settled_ids.add(decision.movement_id)
+            on_hand[code] = effect["qty_on_hand"]
+            committed += 1
+            rows.append(
+                StockPhotoLineOut(
+                    **line_out, committed=True, action="added",
+                    qty_after=effect["qty_on_hand"], movement_id=decision.movement_id,
                 )
             )
             continue
@@ -1174,17 +1271,21 @@ async def submit_stock_photo(
             StockReading(
                 facility_id=facility.id,
                 sku_code=code,
-                qty_on_hand=Decimal(str(line.quantity)),
-                reported_at=now,
+                qty_on_hand=Decimal(str(decision.qty_after)),
+                # Two lines of one medicine on one page keep their order.
+                reported_at=now + timedelta(microseconds=i),
                 source="photo",
                 reporter_ref=f"user:{user.id}",
                 # The model's own confidence, carried through rather than
-                # replaced: a blurred bill must read as a doubtful row, and the
+                # replaced: a blurred page must read as a doubtful row, and the
                 # trust layer widens this facility's warning thresholds for it.
                 confidence=Decimal(str(round(extraction.confidence, 2))),
                 raw_payload={
                     "read_by": extraction.model,
+                    "document_type": extraction.document_type,
                     "as_printed": line.medicine,
+                    "qty_as_printed": line.quantity,
+                    "unit_as_printed": line.unit,
                     "match_score": score,
                     "document_date": (
                         extraction.document_date.isoformat()
@@ -1194,19 +1295,22 @@ async def submit_stock_photo(
                 },
             )
         )
+        on_hand[code] = decision.qty_after
         committed += 1
+        readings_written += 1
         rows.append(
             StockPhotoLineOut(
-                medicine=line.medicine, quantity=line.quantity,
-                sku_code=code, sku_name=names.get(code, code),
-                match_score=score, committed=True, qty_before=before.get(code),
+                **line_out, committed=True,
+                action="subtracted" if decision.action == "subtract" else "set",
+                qty_after=decision.qty_after,
             )
         )
 
     if committed:
         await session.commit()
-        await services.refresh_facility_state(session, facility.id)
-        await session.commit()
+        if readings_written:
+            await services.refresh_facility_state(session, facility.id)
+            await session.commit()
         await events.record(
             session,
             events.READING_COMMITTED,
@@ -1214,25 +1318,26 @@ async def submit_stock_photo(
                 "facility_id": facility.id,
                 "facility_name": facility.name,
                 "source": "photo",
+                "document_type": extraction.document_type,
                 "lines": committed,
                 "read_by": extraction.model,
             },
             state_silo=facility.state_silo,
         )
 
-    live = extraction.model != "mock"
     return StockPhotoOut(
         facility_id=facility.id,
         model=extraction.model,
-        ai=live,
+        ai=extraction.model != "mock",
         confidence=extraction.confidence,
+        document_type=extraction.document_type,
         document_date=extraction.document_date,
+        document_age_days=(
+            (today - extraction.document_date).days if extraction.document_date else None
+        ),
         notes=extraction.notes,
         lines=rows,
         committed=committed,
-        # The same three words the bed report uses, and the same rule: a check
-        # that could not run is never reported as one that passed.
-        verification="verified" if live and committed else "unverified",
     )
 
 

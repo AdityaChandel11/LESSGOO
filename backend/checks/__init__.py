@@ -1,6 +1,6 @@
 """Integration checks that live in the repository rather than in a scrollback.
 
-Nine checks, one per claim the platform makes about itself:
+Ten checks, one per claim the platform makes about itself:
 
     platform      it stands up with no credentials, and refuses what it should
     ledger        dispatch against receipt, and overdue derived from the clock
@@ -11,6 +11,7 @@ Nine checks, one per claim the platform makes about itself:
     federation    real per-state silos, trust weighting, and the forecast switch
     workspace     a pharmacist's loop: ask, approve, dispatch, confirm
     comms         the phone channels, the signed door, and what is not kept
+    stockphoto    a photographed document changes the shelf the way it means
 
     python -m checks                 run all of them
     python -m checks ledger trust    run some of them
@@ -27,6 +28,7 @@ from . import (
     ingestion,
     ledger,
     platform,
+    stockphoto,
     trustlayer,
     workspace,
 )
@@ -41,6 +43,7 @@ CHECKS = {
     "federation": federation.run,
     "workspace": workspace.run,
     "comms": comms.run,
+    "stockphoto": stockphoto.run,
 }
 
 __all__ = ["CHECKS"]

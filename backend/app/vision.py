@@ -29,6 +29,7 @@ from datetime import date
 
 import httpx
 
+from . import stockphoto
 from .config import settings
 
 log = logging.getLogger(__name__)
@@ -710,12 +711,24 @@ async def explain_trust(
 # reading is what the reorder threshold, the forecast and the redistribution
 # solver all read next.
 
+# The same number means three different things on three different documents,
+# so the model is asked which document it is looking at before any number is
+# used (fix list #11; app/stockphoto.py decides what each kind does).
 STOCK_PROMPT = (
-    "This is a photograph of a medicine bill, delivery slip or stock register "
-    "page from an Indian primary health centre.\n"
-    "Report only what is legibly written:\n"
-    "- lines: one entry per medicine, each with `medicine` exactly as printed "
-    "and `quantity` as a number\n"
+    "This is a photograph of a stock document from an Indian primary health "
+    "centre.\n"
+    "First decide which kind of document it is, and report it as document_type:\n"
+    "- delivery_slip: a delivery note, challan, dispatch slip or supplier's invoice "
+    "listing stock SENT TO this centre\n"
+    "- issue_record: a dispensing bill, issue register or issue voucher listing "
+    "stock GIVEN OUT or used by this centre\n"
+    "- stock_count: a stock register page or count sheet stating what is ON THE "
+    "SHELF (closing balance)\n"
+    "- unknown: anything else, or if you cannot tell\n"
+    "Then report only what is legibly written:\n"
+    "- lines: one entry per medicine, each with `medicine` exactly as printed, "
+    "`quantity` as a number, `unit` exactly as printed (null if no unit is "
+    "written) and `batch` as printed (null if none)\n"
     "- document_date: the date printed on the document in YYYY-MM-DD form, or "
     "null if none is legible\n"
     "- confidence: 0.0 to 1.0, how sure you are of the lines as a whole\n"
@@ -724,9 +737,13 @@ STOCK_PROMPT = (
     "total anything. If a quantity is unreadable, omit that line entirely."
 )
 
+# document_type is a plain string rather than a schema enum: the parser below
+# maps anything outside the three kinds to "unknown", which is the same
+# guarantee without depending on how the API validates enums.
 STOCK_SCHEMA = {
     "type": "object",
     "properties": {
+        "document_type": {"type": "string"},
         "lines": {
             "type": "array",
             "items": {
@@ -734,6 +751,8 @@ STOCK_SCHEMA = {
                 "properties": {
                     "medicine": {"type": "string"},
                     "quantity": {"type": "number"},
+                    "unit": {"type": "string", "nullable": True},
+                    "batch": {"type": "string", "nullable": True},
                 },
                 "required": ["medicine", "quantity"],
             },
@@ -742,7 +761,7 @@ STOCK_SCHEMA = {
         "confidence": {"type": "number"},
         "notes": {"type": "string", "nullable": True},
     },
-    "required": ["lines", "confidence"],
+    "required": ["document_type", "lines", "confidence"],
 }
 
 
@@ -750,6 +769,9 @@ STOCK_SCHEMA = {
 class StockLine:
     medicine: str
     quantity: float
+    # As printed, or None when the document does not say.
+    unit: str | None = None
+    batch: str | None = None
 
 
 @dataclass(frozen=True)
@@ -759,6 +781,8 @@ class StockExtraction:
     confidence: float
     notes: str | None
     model: str
+    # One of stockphoto.DOCUMENT_TYPES, or "unknown".
+    document_type: str = stockphoto.UNKNOWN
 
 
 def parse_stock_extraction(payload: dict, *, model: str) -> StockExtraction:
@@ -781,7 +805,17 @@ def parse_stock_extraction(payload: dict, *, model: str) -> StockExtraction:
             continue
         if not name or qty < 0:
             continue
-        lines.append(StockLine(medicine=name, quantity=qty))
+        lines.append(
+            StockLine(
+                medicine=name,
+                quantity=qty,
+                unit=_printed(raw.get("unit")),
+                batch=_printed(raw.get("batch")),
+            )
+        )
+
+    kind = payload.get("document_type")
+    kind = kind.strip().lower() if isinstance(kind, str) else ""
 
     parsed_date: date | None = None
     raw_date = payload.get("document_date")
@@ -804,18 +838,29 @@ def parse_stock_extraction(payload: dict, *, model: str) -> StockExtraction:
         confidence=confidence,
         notes=str(notes).strip() if notes else None,
         model=model,
+        document_type=kind if kind in stockphoto.DOCUMENT_TYPES else stockphoto.UNKNOWN,
     )
+
+
+def _printed(raw) -> str | None:
+    """A unit or batch exactly as the document prints it, or None."""
+    if not isinstance(raw, str):
+        return None
+    return raw.strip() or None
 
 
 def _mock_stock_extraction() -> StockExtraction:
     """What the mock path returns. Labelled `model="mock"` on every row it
-    produces, and never presented as real inference."""
+    produces, and never presented as real inference. A stock count, because
+    it is the one kind of document that needs nothing else in the database to
+    be applied."""
     return StockExtraction(
-        lines=[StockLine(medicine="ORS", quantity=250.0)],
+        lines=[StockLine(medicine="ORS", quantity=250.0, unit="sachets")],
         document_date=None,
         confidence=settings.channel_confidence_floor,
         notes="mock extraction — no model was called",
         model="mock",
+        document_type=stockphoto.STOCK_COUNT,
     )
 
 

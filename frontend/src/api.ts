@@ -594,8 +594,9 @@ export interface BedReport {
 /* ------------------------------------------------- pharmacist workspace --- */
 
 /** How a stock figure was last checked. `system` means nobody checked it:
- *  a seeded opening balance or an automatic transfer adjustment. */
-export type ProvenanceKind = "counted" | "delivery" | "phone" | "system" | "none";
+ *  a seeded opening balance or an automatic transfer adjustment. `photo` is a
+ *  document a model read — never a hand count. */
+export type ProvenanceKind = "counted" | "photo" | "delivery" | "phone" | "system" | "none";
 
 export interface LastReceipt {
   batch_id: string;
@@ -687,15 +688,24 @@ export interface StockRequest {
   assumptions: Record<string, number>;
 }
 
+export type StockDocumentType = "delivery_slip" | "issue_record" | "stock_count" | "unknown";
+
 export interface StockPhotoLine {
   medicine: string;
   quantity: number;
+  /** As printed on the document. */
+  unit: string | null;
+  batch: string | null;
   sku_code: string | null;
   sku_name: string | null;
   match_score: number;
   committed: boolean;
-  /** Shelf figure before this photo. */
+  /** What the line did: a delivery is added, an issue subtracted, a count set. */
+  action: "added" | "subtracted" | "set" | "not_applied";
+  /** Shelf figure before and after this line. */
   qty_before: number | null;
+  qty_after: number | null;
+  movement_id: number | null;
   reason: string | null;
 }
 
@@ -705,12 +715,14 @@ export interface StockPhotoResult {
   /** False when the deterministic mock produced this. The screen must not put
    *  a model's name or a confidence figure on output nothing computed. */
   ai: boolean;
+  /** The model's own estimate of its reading — not a check. */
   confidence: number;
+  document_type: StockDocumentType;
   document_date: string | null;
+  document_age_days: number | null;
   notes: string | null;
   lines: StockPhotoLine[];
   committed: number;
-  verification: string;
 }
 
 /* ------------------------------------------------------ field simulator --- */

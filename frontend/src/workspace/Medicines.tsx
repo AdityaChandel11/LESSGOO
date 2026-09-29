@@ -38,6 +38,7 @@ const STATUS_STYLE: Record<string, { dot: string; text: string; label: string }>
 
 const PROVENANCE_LABEL: Record<ProvenanceKind, string> = {
   counted: "Counted by hand",
+  photo: "Read from a photo",
   delivery: "Confirmed on delivery",
   phone: "Reported by phone",
   system: "Not yet verified",

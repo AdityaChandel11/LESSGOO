@@ -50,12 +50,20 @@ FACILITY_REQUEST = "facility_request"
 # screen cannot accidentally imply a road route (spec: route_source).
 STRAIGHT_LINE = "straight_line_x1.3"
 
-# Reading sources, grouped by what they actually prove about a number.
-_IN_APP = frozenset({"form", "voice", "photo"})
+# Reading sources, grouped by what they actually prove about a number. A photo
+# is not a count: it is a document a model read, and what it proves depends on
+# which document it was (fix list #11).
+_IN_APP = frozenset({"form", "voice"})
 _PHONE = frozenset({"sms", "ivr", "whatsapp"})
 _SYSTEM = frozenset({"seed", "transfer"})
 
-ProvenanceKind = Literal["counted", "delivery", "phone", "system", "none"]
+ProvenanceKind = Literal["counted", "photo", "delivery", "phone", "system", "none"]
+
+_DOCUMENT_LABEL = {
+    "stock_count": "Stock count",
+    "issue_record": "Issue record",
+    "delivery_slip": "Delivery slip",
+}
 
 
 # =============================================================== values ===
@@ -150,16 +158,32 @@ class RequestRefused(Exception):
 # ========================================================== provenance ===
 
 
-def _describe(source: str | None, receipt: LastReceipt | None) -> tuple[ProvenanceKind, str]:
+def _photo_detail(document: dict | None) -> str:
+    """Which document a photo reading came from, and who read it. Readings
+    from before fix #11 carry no document type and say so."""
+    doc = document or {}
+    kind = _DOCUMENT_LABEL.get(doc.get("document_type"))
+    if kind is None:
+        return "Read from a photo; the kind of document was not recorded"
+    reader = (
+        "the test reader (no model was called)" if doc.get("read_by") == "mock" else "Gemini"
+    )
+    return "{0} read by {1}".format(kind, reader)
+
+
+def _describe(
+    source: str | None, receipt: LastReceipt | None, document: dict | None = None
+) -> tuple[ProvenanceKind, str]:
     if receipt is not None:
         return "delivery", "Batch {0}, {1:,.0f} received".format(
             receipt.batch_id, receipt.qty_received
         )
+    if source == "photo":
+        return "photo", _photo_detail(document)
     if source in _IN_APP:
         detail = {
             "form": "Entered on the stock form",
             "voice": "Spoken into the app and transcribed",
-            "photo": "Read from a photographed register",
         }[source]
         return "counted", detail
     if source in _PHONE:
@@ -181,6 +205,7 @@ def provenance(
     last_reported_at: datetime | None,
     last_receipt: LastReceipt | None,
     now: datetime,
+    document: dict | None = None,
 ) -> Provenance:
     """How this facility's figure for one medicine was last checked, and when.
 
@@ -210,7 +235,7 @@ def provenance(
     if receipt_wins:
         at, kind_detail = receipt_at, _describe(None, last_receipt)
     else:
-        at, kind_detail = reading_at, _describe(last_source, None)
+        at, kind_detail = reading_at, _describe(last_source, None, document)
 
     kind, detail = kind_detail
     return Provenance(
@@ -597,6 +622,58 @@ async def last_receipts(session: AsyncSession, facility_id: str) -> dict[str, La
             batch_id=r[1], qty_received=float(r[2]), received_at=r[3], received_via=r[4]
         )
         for r in rows.all()
+    }
+
+
+async def last_count_times(
+    session: AsyncSession, facility_id: str, *, since: datetime
+) -> dict[str, datetime]:
+    """When each medicine's shelf level was last stated here, per medicine.
+
+    Any reading but a delivery's own ledger row (`transfer`) states a level; a
+    superseded reading states nothing. Bounded by one facility and a window,
+    over ix_readings_facility_sku_time. Used to refuse a photographed document
+    dated before the latest count, which that count already includes (fix #11).
+    """
+    rows = await session.execute(
+        text(
+            """
+            SELECT sku_code, MAX(reported_at)
+            FROM stock_readings
+            WHERE facility_id = :fid AND reported_at >= :since
+              AND source <> 'transfer' AND superseded_by IS NULL
+            GROUP BY sku_code
+            """
+        ),
+        {"fid": facility_id, "since": since},
+    )
+    return {r[0]: r[1] for r in rows.all()}
+
+
+async def photo_documents(
+    session: AsyncSession, facility_id: str, latest: dict[str, datetime]
+) -> dict[str, dict]:
+    """The document behind each medicine's latest reading, where that reading
+    was a photo: `latest` maps medicine to that reading's time. Only this
+    facility's photo rows at those times are read, so the card can say "Issue
+    record read by Gemini" instead of guessing what the photo was."""
+    if not latest:
+        return {}
+    rows = await session.execute(
+        text(
+            """
+            SELECT sku_code, reported_at, raw_payload
+            FROM stock_readings
+            WHERE facility_id = :fid AND source = 'photo'
+              AND reported_at >= :since AND sku_code = ANY(:skus)
+            """
+        ),
+        {"fid": facility_id, "since": min(latest.values()), "skus": list(latest)},
+    )
+    return {
+        sku: payload or {}
+        for sku, at, payload in rows.all()
+        if at == latest.get(sku)
     }
 
 

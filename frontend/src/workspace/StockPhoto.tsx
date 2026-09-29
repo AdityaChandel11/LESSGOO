@@ -1,18 +1,18 @@
 /**
- * Photograph a bill, and the shelf updates.
+ * Photograph a stock document, and the shelf changes the way it means.
  *
- * The consumption half of the two-sided ledger. A delivery slip or a bill is
- * the thing a pharmacist already has in their hand; typing it into a form is
- * the step that gets skipped at the end of a long shift. So the camera does
- * it, and the same Gemini pipeline that reads a ward photo reads this one.
+ * A delivery slip, an issue register page and a stock count are the papers a
+ * pharmacist already has in hand; typing them into a form is the step that
+ * gets skipped at the end of a long shift. So the camera does it, and the
+ * same Gemini pipeline that reads a ward photo reads this one.
  *
- * What this screen is careful about is the difference between *read* and
- * *accepted*. Every line the model found is shown, including the ones that
- * were refused, with the reason. A medicine that did not match this centre's
- * list is never quietly dropped and never guessed at — an invented quantity on
- * a stock ledger is worse than no reading, because the reorder threshold, the
- * forecast and the redistribution solver all read it next and none of them can
- * tell an invented row from a real one.
+ * The same number means three things on three documents, so the model first
+ * says which document it is: a delivery is added (through its dispatch record,
+ * so it cannot count twice), an issue is subtracted, a count is set. Every line
+ * is shown with what it did to the shelf, before and after, and every line
+ * that was not applied says why — an invented or misread quantity on a stock
+ * ledger is worse than no reading, because the reorder threshold, the forecast
+ * and the redistribution solver all read it next.
  *
  * The photograph itself is never uploaded anywhere but here, and never stored.
  * Only what was read from it is.
@@ -20,7 +20,29 @@
 
 import { useRef, useState } from "react";
 
-import { ApiError, type StockPhotoResult, api } from "../api";
+import { ApiError, type StockDocumentType, type StockPhotoLine, type StockPhotoResult, api } from "../api";
+
+const DOCUMENT_LABEL: Record<StockDocumentType, string> = {
+  delivery_slip: "Delivery slip · डिलीवरी पर्ची",
+  issue_record: "Issue record · निर्गम रजिस्टर",
+  stock_count: "Stock count · स्टॉक गिनती",
+  unknown: "Document type not recognised",
+};
+
+const ACTION: Record<StockPhotoLine["action"], { label: string; tone: string }> = {
+  added: { label: "added", tone: "text-ok" },
+  subtracted: { label: "subtracted", tone: "text-ok" },
+  set: { label: "count set", tone: "text-ok" },
+  not_applied: { label: "not applied", tone: "text-risk" },
+};
+
+const n = (x: number) => Math.round(x).toLocaleString("en-IN");
+
+function age(days: number | null): string {
+  if (days === null) return "";
+  if (days <= 0) return " (today)";
+  return days === 1 ? " (1 day old)" : ` (${days} days old)`;
+}
 
 /** Longest edge sent to the model, in pixels. */
 const MAX_EDGE = 1600;
@@ -108,15 +130,16 @@ export default function StockPhoto({
 
   return (
     <section
-      aria-label="Update stock from a bill"
+      aria-label="Update stock from a photographed document"
       className="mb-3 rounded-lg border border-line bg-panel px-3.5 py-3"
     >
       <h2 className="text-[11px] font-semibold uppercase tracking-[0.09em] text-ink-3">
-        From a bill or delivery slip
+        From a delivery slip, issue register or stock count
       </h2>
       <p className="mt-1 text-[12.5px] leading-relaxed text-ink-2">
-        Photograph the paper you already have. The medicines and quantities are
-        read off it and written to this shelf.
+        Photograph the paper you already have. A delivery is added through its
+        dispatch record, an issue is subtracted, a count replaces the figure.
+        Anything doubtful is not applied, and says why.
       </p>
 
       <input
@@ -135,7 +158,7 @@ export default function StockPhoto({
         disabled={busy}
         className="mt-2.5 min-h-11 w-full rounded-md border border-brand px-3 text-[13px] font-medium text-brand disabled:opacity-60"
       >
-        {busy ? "Reading the photo…" : "Photograph a bill · बिल की फ़ोटो लें"}
+        {busy ? "Reading the photo…" : "Photograph a document · दस्तावेज़ की फ़ोटो लें"}
       </button>
 
       {error && (
@@ -147,24 +170,28 @@ export default function StockPhoto({
       {result && (
         <div className="mt-3 border-t border-line pt-2.5">
           <p className="text-[12px] text-ink">
-            <span className="font-medium">
-              {result.committed} of {result.lines.length} line
-              {result.lines.length === 1 ? "" : "s"} recorded
+            <span className="font-medium">{DOCUMENT_LABEL[result.document_type]}</span>
+            <span className="text-ink-2">
+              {" "}· {result.committed} of {result.lines.length} line
+              {result.lines.length === 1 ? "" : "s"} applied
             </span>
             {result.document_date && (
-              <span className="text-ink-2"> · dated {result.document_date}</span>
+              <span className="text-ink-2">
+                {" "}· dated {result.document_date}
+                {age(result.document_age_days)}
+              </span>
             )}
           </p>
           <p className="mt-0.5 text-[11px] leading-snug text-ink-3">
             {result.ai ? (
               <>
-                Read by {result.model} · confidence{" "}
-                {(result.confidence * 100).toFixed(0)}% · {result.verification}
+                Read by Gemini ({result.model}). Its own estimate of how well it read
+                the page: {(result.confidence * 100).toFixed(0)}% — an estimate, not a check.
               </>
             ) : (
               // No model ran. Saying so plainly, rather than showing a
               // confidence figure that nothing computed.
-              <>Mock extraction — no model was called, so nothing is verified.</>
+              <>Test reader — no model was called, so nothing here was read from your photo.</>
             )}
           </p>
           {result.notes && (
@@ -175,35 +202,28 @@ export default function StockPhoto({
             {result.lines.map((l, i) => (
               <li key={`${l.medicine}-${i}`} className="text-[12px] leading-snug">
                 <span className={l.committed ? "text-ink" : "text-ink-3"}>
-                  <span className="font-mono">
-                    {Math.round(l.quantity).toLocaleString("en-IN")}
-                  </span>{" "}
-                  {l.sku_name ?? l.medicine}
+                  <span className="font-mono">{n(l.quantity)}</span>
+                  {l.unit ? ` ${l.unit}` : ""} {l.sku_name ?? l.medicine}
                 </span>
-                {l.committed ? (
-                  <>
-                  <span className="ml-1.5 text-[10.5px] font-semibold uppercase tracking-[0.06em] text-ok">
-                    recorded
-                  </span>
+                <span
+                  className={`ml-1.5 text-[10.5px] font-semibold uppercase tracking-[0.06em] ${ACTION[l.action].tone}`}
+                >
+                  {ACTION[l.action].label}
+                </span>
+                {l.committed && l.qty_after !== null ? (
                   <span className="block text-[11px] text-ink-2">
-                    Stock ledger:{" "}
+                    Shelf:{" "}
                     <span className="font-mono">
-                      {l.qty_before == null ? "no earlier count" : Math.round(l.qty_before).toLocaleString("en-IN")}
+                      {l.qty_before == null ? "no earlier figure" : n(l.qty_before)}
                       {" → "}
-                      {Math.round(l.quantity).toLocaleString("en-IN")}
-                    </span>{" "}
-                    · new reading written, source "photo", read by Gemini
-                  </span>
-                  </>
-                ) : (
-                  <>
-                    <span className="ml-1.5 text-[10.5px] font-semibold uppercase tracking-[0.06em] text-risk">
-                      not recorded
+                      {n(l.qty_after)}
                     </span>
-                    {l.reason && (
-                      <span className="block text-[11px] text-ink-3">{l.reason}</span>
-                    )}
-                  </>
+                    {l.action === "added"
+                      ? " · delivery confirmed against its dispatch record"
+                      : ""}
+                  </span>
+                ) : (
+                  l.reason && <span className="block text-[11px] text-ink-3">{l.reason}</span>
                 )}
               </li>
             ))}

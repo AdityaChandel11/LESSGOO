@@ -250,6 +250,10 @@ class Settings(BaseSettings):
     # overdue (spec 26.3). Generous on purpose: a batch sitting unconfirmed is
     # a question for the officer, not an accusation against the facility.
     receipt_window_hours: float = 72.0
+    # A photographed stock document older than this is not applied (fix #11):
+    # the shelf figure has probably moved on since, and applying it would
+    # count the same stock twice.
+    stock_photo_max_age_days: int = 7
 
     # --- bed capture (spec 26.2) ---
     # How close a photo or check-in must be to the registered coordinates. GPS
