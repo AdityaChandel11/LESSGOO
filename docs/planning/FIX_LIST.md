@@ -1258,6 +1258,12 @@ Stale bed reports/codes: include in #30's roll-forward.
 Render free web services sleep when idle → first click can hit a long cold start. Verify the
 plan and cold-start time; document the wake-up in the demo script (#36). Pair with the DB
 30-day deletion date (blocked on Aditya).
+**Checked 2026-09-29:** `render.yaml` says `plan: free`, one instance. After 17 idle minutes the
+first request (`GET /api/health`, 09:44 UTC) took **42.6 s to first byte**; the next one 0.38 s.
+The landing page is served by the same service, so a cold first click shows nothing for ~43 s.
+→ #36's demo script must say: open the link at least a minute before judging. Options that avoid it
+(Aditya's call, not built): Render's paid Starter plan (does not sleep), or an outside uptime pinger
+on `/api/health` every 10 minutes (it only pings the database and writes nothing).
 
 ### Fix #54 — Is the recorded federation run from the data Render holds?  · Tier 1 check · status: TODO
 Rounds are dated 20 Sept; Render was reseeded 21 Sept. Verify the run's windows/trust match
