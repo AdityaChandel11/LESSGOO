@@ -16,7 +16,7 @@ import { useEffect, useState } from "react";
 
 import BrandMark from "../Brand";
 import DataNotice from "../DataNotice";
-import { type FacilityDetail, type Session, api } from "../api";
+import { type FacilityDetail, type Session, api, can } from "../api";
 import Beds from "./Beds";
 import Medicines from "./Medicines";
 import MyAttendance from "./MyAttendance";
@@ -169,6 +169,15 @@ export default function Workspace({
             demoMode={session.demo_mode}
             refreshKey={refreshKey}
             onChanged={() => setRefreshKey((k) => k + 1)}
+            mayDecide={(t) =>
+              can.decideTransfer(session.user, {
+                fromId: t.from.id,
+                state: facility?.state_silo ?? session.user.state_silo ?? "",
+                fromDistrict: t.from.district,
+                toDistrict: t.to.district,
+              })
+            }
+            sandboxLabel={session.user.demo_sandbox?.label}
           />
         )}
         {tab === "beds" && (

@@ -121,6 +121,16 @@ class Settings(BaseSettings):
     # A public showcase deployment may run demo mode on purpose; it has to say
     # so explicitly, so a real deployment can never inherit it by accident.
     allow_public_demo: bool = False
+    # The one district where a public demo account may change anything. Anyone
+    # can enter a demo account without a password, so outside this district
+    # they are view-only (auth.demo_may_write); the drill and the demo requests
+    # all live here, and scripts/reset_nashik.py puts it back afterwards.
+    demo_sandbox_state: str = "MH"
+    demo_sandbox_district: str = "Nashik"
+    # A full re-plan deletes and rewrites a whole state's proposals and takes
+    # seconds of the free instance's CPU. A demo account may start one per
+    # state this often; a single-medicine plan (the drill's) is not limited.
+    demo_plan_interval_minutes: float = 10.0
 
     # --- web ---
     # Built frontend served by this process in production. In development the

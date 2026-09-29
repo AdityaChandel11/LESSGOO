@@ -29,6 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
 from .db import get_session
+from .geo import STATE_BY_CODE
 from .models import LoginFailure, User
 
 DEMO_EMAIL_DOMAIN = "@demo.swasthsetu.in"
@@ -141,6 +142,59 @@ def can_view_facility(
         facility_state=facility_state,
         facility_district=facility_district,
     )
+
+
+# ------------------------------------------------------------ public demo ---
+# A public showcase lets anyone into a demo account without a password, so a
+# demo account is a stranger. Outside one sandbox district it may look but not
+# change anything: the deployed database is small and shared by every visitor,
+# and a stranger painting centres red in another state is vandalism, not a
+# demo. Real accounts are untouched by every rule in this block.
+
+
+def is_public_demo(p: Principal) -> bool:
+    return settings.demo_mode and p.email.lower().endswith(DEMO_EMAIL_DOMAIN)
+
+
+def in_demo_sandbox(state: str, district: str) -> bool:
+    return state == settings.demo_sandbox_state and district == settings.demo_sandbox_district
+
+
+def _sandbox_state_name() -> str:
+    state = STATE_BY_CODE.get(settings.demo_sandbox_state)
+    return state.name if state else settings.demo_sandbox_state
+
+
+def demo_sandbox_label() -> str:
+    return "{0}, {1}".format(settings.demo_sandbox_district, _sandbox_state_name())
+
+
+def demo_sandbox_refusal() -> str:
+    return (
+        "Public demo: changes are limited to the {0} sandbox in {1}. "
+        "Everything else is view-only."
+    ).format(settings.demo_sandbox_district, _sandbox_state_name())
+
+
+def demo_may_write(p: Principal, *, state: str, district: str) -> bool:
+    return not is_public_demo(p) or in_demo_sandbox(state, district)
+
+
+def demo_may_plan(p: Principal, state: str) -> bool:
+    """A plan covers a whole state, so the sandbox's state is the only one a
+    demo account may re-plan; single-medicine plans are what the drill runs."""
+    return not is_public_demo(p) or state == settings.demo_sandbox_state
+
+
+def next_full_plan_at(
+    last_run: datetime | None, now: datetime, interval_minutes: float
+) -> datetime | None:
+    """When a demo account may start the next all-medicine plan for a state,
+    or None if it may start one now."""
+    if last_run is None:
+        return None
+    allowed = last_run + timedelta(minutes=interval_minutes)
+    return allowed if allowed > now else None
 
 
 # ==================================================================== tokens ===
@@ -299,6 +353,12 @@ class LoginIn(BaseModel):
     password: str
 
 
+class DemoSandboxOut(BaseModel):
+    state: str
+    district: str
+    label: str
+
+
 class UserOut(BaseModel):
     id: int
     email: str
@@ -311,6 +371,9 @@ class UserOut(BaseModel):
     # decide whether to offer the tab. The pseudonymous reference itself stays
     # on the server: the client has no use for it and nothing to do with it.
     has_staff_record: bool = False
+    # Set only for a public demo account: the one district it may change. The
+    # browser mirrors demo_may_write with it so no button offers a 403.
+    demo_sandbox: DemoSandboxOut | None = None
 
 
 class SessionOut(BaseModel):
@@ -328,6 +391,15 @@ def _session_out(p: Principal) -> SessionOut:
             # shown a synthetic, labelled record (attendance.synthetic_record).
             has_staff_record=p.staff_ref is not None
             or (settings.demo_mode and p.role == "facility_user" and p.facility_id is not None),
+            demo_sandbox=(
+                DemoSandboxOut(
+                    state=settings.demo_sandbox_state,
+                    district=settings.demo_sandbox_district,
+                    label=demo_sandbox_label(),
+                )
+                if is_public_demo(p)
+                else None
+            ),
         ),
         demo_mode=settings.demo_mode,
         environment=settings.environment,

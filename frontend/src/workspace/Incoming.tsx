@@ -12,10 +12,16 @@ export default function Incoming({
   facilityId,
   demoMode,
   onChanged,
+  mayDecide,
+  sandboxLabel,
 }: {
   facilityId: string;
   demoMode: boolean;
   onChanged: () => void;
+  /** Mirrors can.decideTransfer; absent means this centre decides everything here. */
+  mayDecide?: (t: Transfer) => boolean;
+  /** A public demo account's sandbox, named when a request falls outside it. */
+  sandboxLabel?: string;
 }) {
   const [rows, setRows] = useState<Transfer[] | null>(null);
   const [busy, setBusy] = useState<number | "demo" | null>(null);
@@ -97,14 +103,22 @@ export default function Incoming({
                 {t.rationale.donor_days_after_plan != null &&
                   ` · you keep ${formatDays(t.rationale.donor_days_after_plan)}`}
               </p>
-              <div className="mt-1.5 flex justify-end gap-2">
-                <button onClick={() => decide(t, "reject")} disabled={busy !== null} className="h-7 rounded-md border border-line px-2.5 text-[12px] font-medium text-ink-2 hover:bg-canvas disabled:opacity-50">
-                  Decline
-                </button>
-                <button onClick={() => decide(t, "approve")} disabled={busy !== null} className="h-7 rounded-md bg-ok px-2.5 text-[12px] font-medium text-white disabled:opacity-50">
-                  {busy === t.id ? "Sending…" : "Accept and send"}
-                </button>
-              </div>
+              {mayDecide && !mayDecide(t) ? (
+                <p className="mt-1.5 text-[11.5px] text-ink-3">
+                  {sandboxLabel
+                    ? `View only in the public demo: ${t.to.name} is outside the sandbox (${sandboxLabel}).`
+                    : "View only: this account cannot decide this request."}
+                </p>
+              ) : (
+                <div className="mt-1.5 flex justify-end gap-2">
+                  <button onClick={() => decide(t, "reject")} disabled={busy !== null} className="h-7 rounded-md border border-line px-2.5 text-[12px] font-medium text-ink-2 hover:bg-canvas disabled:opacity-50">
+                    Decline
+                  </button>
+                  <button onClick={() => decide(t, "approve")} disabled={busy !== null} className="h-7 rounded-md bg-ok px-2.5 text-[12px] font-medium text-white disabled:opacity-50">
+                    {busy === t.id ? "Sending…" : "Accept and send"}
+                  </button>
+                </div>
+              )}
             </li>
           ))}
         </ul>

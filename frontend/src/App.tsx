@@ -22,6 +22,7 @@ import {
   type Transfer,
   type User,
   can,
+  inDemoSandbox,
   STATUS_COLOR,
   STATUS_LABEL,
   STATUS_RULE,
@@ -650,6 +651,17 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
         </div>
       </header>
 
+      {user.demo_sandbox && (
+        // Anyone can enter a demo account, so it looks everywhere but changes
+        // only one district (auth.demo_may_write). Said once, up front, rather
+        // than discovered as a refusal.
+        <p className="shrink-0 border-b border-line bg-canvas px-4 py-1 text-[11.5px] text-ink-2">
+          Public demo: you can view every state. Changes are limited to the sandbox,{" "}
+          <span className="font-medium text-ink">{user.demo_sandbox.label}</span>.{" "}
+          <span lang="hi">सार्वजनिक डेमो: बदलाव केवल {user.demo_sandbox.district} सैंडबॉक्स में किए जा सकते हैं।</span>
+        </p>
+      )}
+
       <main className="flex min-h-0 flex-1">
         {/* ---------------------------------------------------- panel --- */}
         <aside className="z-[1000] flex w-[400px] shrink-0 flex-col border-r border-line bg-panel">
@@ -680,7 +692,18 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
             // Ahead of the facility panel on purpose: choosing the tab is a
             // decision to look at the channels, and it still reads whichever
             // centre is selected on the map so the two stay in step.
-            <FieldSimulator facilityId={selected ? selected.id : null} />
+            <FieldSimulator
+              facilityId={
+                selected && inDemoSandbox(user, selected.state_silo, selected.district)
+                  ? selected.id
+                  : null
+              }
+              blockedNote={
+                selected && user.demo_sandbox && !inDemoSandbox(user, selected.state_silo, selected.district)
+                  ? `Public demo: messages can be sent only as handsets of centres in ${user.demo_sandbox.label}. Choose one of those on the map.`
+                  : undefined
+              }
+            />
           ) : selected && mode === "stock" ? (
             // Gated on the tab, not just on `selected`. Without the mode
             // check this branch shadows every panel below it, so once a
@@ -783,8 +806,18 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
                 highlightTripId={highlightTrip}
                 onPlan={runPlan}
                 canPlan={can.planState(user, activeState)}
+                viewOnlyNote={
+                  user.demo_sandbox && user.demo_sandbox.state !== activeState
+                    ? `View only in the public demo. Plans can be recomputed for ${stateName(user.demo_sandbox.state)} only, where the sandbox is.`
+                    : undefined
+                }
                 canDecide={(trip) =>
-can.decideTransfer(user, trip.from.id)
+                  can.decideTransfer(user, {
+                    fromId: trip.from.id,
+                    state: activeState,
+                    fromDistrict: trip.from.district,
+                    toDistrict: trip.to.district,
+                  })
                 }
                 onDecideTrip={decideTrip}
                 onHoverTrip={setHighlightTrip}
@@ -862,7 +895,7 @@ can.decideTransfer(user, trip.from.id)
                 <button
                   onClick={startEmergency}
                   disabled={emergencyBusy}
-                  title={`Drops one medicine at a ${SANDBOX.label} facility below the critical line and carries it through detection, Gemini, the optimiser, approval and receipt. Writes stay in the sandbox.`}
+                  title={`Drops one medicine at a ${SANDBOX.label} facility below the critical line and carries it through detection, Gemini, the optimiser, approval and receipt. The stock report, approval and receipt stay in the sandbox; the plan it runs covers that medicine across the whole state.`}
                   className="rounded-lg bg-crit px-3 py-1.5 text-[12px] font-semibold text-white shadow-sm hover:bg-crit/90 focus:ring-2 focus:ring-crit/30 focus:outline-none disabled:opacity-60"
                 >
                   {emergencyBusy ? "Choosing a facility…" : "Simulate emergency"}

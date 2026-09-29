@@ -12,10 +12,11 @@ the adapter, where the fallback and the tests live.
 
 import base64
 import binascii
+import math
 from uuid import uuid4
 from dataclasses import asdict
 from decimal import Decimal
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import logging
 
@@ -48,6 +49,12 @@ from .auth import (
     can_submit_reading,
     can_view_facility,
     current_user,
+    demo_may_plan,
+    demo_may_write,
+    demo_sandbox_refusal,
+    in_demo_sandbox,
+    is_public_demo,
+    next_full_plan_at,
 )
 from .config import settings
 from .db import get_session, ping
@@ -55,6 +62,7 @@ from .models import (
     CALL_OUTCOMES,
     LOC_METHODS,
     CallLog,
+    Event,
     Facility,
     FederationRound,
     MedicineMovement,
@@ -433,6 +441,54 @@ class PlanOut(BaseModel):
     manual_review: list[ShortfallOut]
 
 
+async def _last_full_plan_at(
+    session: AsyncSession, state: str, since: datetime
+) -> datetime | None:
+    """When the latest all-medicine plan for a state was computed, if that was
+    after `since`. Every plan run writes one transfer.proposed event carrying
+    its sku (null for all medicines), and events.created_at is indexed, so the
+    time bound keeps this a short index range, never a scan."""
+    return await session.scalar(
+        select(func.max(Event.created_at)).where(
+            Event.created_at >= since,
+            Event.kind == events.TRANSFER_PROPOSED,
+            Event.state_silo == state,
+            Event.payload["sku"].astext.is_(None),
+        )
+    )
+
+
+def _minutes(n: int) -> str:
+    return "1 minute" if n == 1 else "{0} minutes".format(n)
+
+
+async def _refuse_early_full_plan(session: AsyncSession, state: str) -> None:
+    """429 when a public demo account asks for a second all-medicine plan of a
+    state within settings.demo_plan_interval_minutes. A full plan deletes and
+    rewrites the state's proposals and holds the free instance's CPU for
+    seconds; a stranger pressing it in a loop is the whole site slowing down."""
+    now = datetime.now(timezone.utc)
+    interval = settings.demo_plan_interval_minutes
+    last = await _last_full_plan_at(session, state, since=now - timedelta(minutes=interval))
+    allowed_at = next_full_plan_at(last, now, interval)
+    if allowed_at is None:
+        return
+    wait_s = (allowed_at - now).total_seconds()
+    ago = int((now - last).total_seconds() // 60)
+    raise HTTPException(
+        status_code=429,
+        detail=(
+            "This state's full plan was recomputed {0} ago. The public demo allows one "
+            "every {1}; try again in {2}. A single medicine can be planned any time."
+        ).format(
+            "less than a minute" if ago < 1 else _minutes(ago),
+            _minutes(int(interval)),
+            _minutes(math.ceil(wait_s / 60)),
+        ),
+        headers={"Retry-After": str(math.ceil(wait_s))},
+    )
+
+
 @router.post("/transfers/plan", response_model=PlanOut, tags=["transfers"])
 async def plan_transfers(
     payload: PlanIn,
@@ -443,6 +499,10 @@ async def plan_transfers(
         raise HTTPException(
             status_code=403, detail="Only this state's officers can generate its transfer plan"
         )
+    if not demo_may_plan(user, payload.state):
+        raise HTTPException(status_code=403, detail=demo_sandbox_refusal())
+    if payload.sku is None and is_public_demo(user):
+        await _refuse_early_full_plan(session, payload.state)
     if await session.scalar(
         select(Facility.id).where(Facility.state_silo == payload.state).limit(1)
     ) is None:
@@ -584,7 +644,7 @@ async def _decide(
     )
     # The emergency drill runs in the Nashik sandbox in demo mode; an officer
     # running it acts for the donor there, and the drill says so on screen.
-    in_sandbox = all(f.state_silo == "MH" and f.district == "Nashik" for f in (src, dst))
+    in_sandbox = all(in_demo_sandbox(f.state_silo, f.district) for f in (src, dst))
     if not allowed and settings.demo_mode and in_sandbox and user.role in ("state_officer", "block_mo"):
         allowed = can_submit_reading(
             user, facility_id=src.id, facility_state=src.state_silo, facility_district=src.district
@@ -594,6 +654,10 @@ async def _decide(
             status_code=403,
             detail="This transfer is outside the area you are responsible for",
         )
+    # A decision moves stock at both ends, so a public demo account needs both
+    # inside the sandbox.
+    if not in_sandbox and is_public_demo(user):
+        raise HTTPException(status_code=403, detail=demo_sandbox_refusal())
 
     status_before = {s.id: s.status for s in await services.get_snapshots(session, ends)}
 
@@ -802,6 +866,14 @@ class WorkspaceOut(BaseModel):
     # Both languages of the computed line, always present and needing no key.
     # The screen renders this on load; the model is an overlay on top of it.
     briefing: dict[str, str]
+
+
+def _require_demo_write(user: Principal, facility: Facility) -> None:
+    """A public demo account changes nothing outside the sandbox district
+    (auth.demo_may_write). Checked after the ordinary permission, so this
+    refusal never tells a stranger more than that one would."""
+    if not demo_may_write(user, state=facility.state_silo, district=facility.district):
+        raise HTTPException(status_code=403, detail=demo_sandbox_refusal())
 
 
 async def _facility_in_scope(
@@ -1061,6 +1133,7 @@ async def submit_stock_photo(
             status_code=403,
             detail="You can only report stock for facilities you are responsible for",
         )
+    _require_demo_write(user, facility)
 
     try:
         image = base64.b64decode(payload.image_base64, validate=True)
@@ -1291,6 +1364,7 @@ async def demo_neighbour_request(
     if not settings.demo_mode:
         raise HTTPException(status_code=404, detail="Not found")
     facility = await _facility_in_scope(session, facility_id, user)
+    _require_demo_write(user, facility)
     controlled = set(
         (await session.execute(select(Sku.code).where(Sku.is_controlled.is_(True)))).scalars()
     )
@@ -1361,6 +1435,7 @@ async def create_request(
     nothing else: no stock moves until the donor centre accepts it (spec 12.3 —
     nothing auto-executes)."""
     facility = await _facility_in_scope(session, facility_id, user)
+    _require_demo_write(user, facility)
     sku_row = await session.get(Sku, payload.sku_code)
     if sku_row is None:
         raise HTTPException(status_code=404, detail="Unknown medicine")
@@ -1495,6 +1570,7 @@ async def submit_reading(
         raise HTTPException(
             status_code=403, detail="You can only report stock for facilities you are responsible for"
         )
+    _require_demo_write(user, facility)
     # "seed" and "transfer" are written only by the server itself. A browser
     # able to claim "transfer" could hide real consumption, because transfer
     # readings are excluded from usage rates. Phone-channel sources come from
@@ -1749,6 +1825,7 @@ async def confirm_receipt(
             status_code=403,
             detail="You can only confirm deliveries for facilities you are responsible for",
         )
+    _require_demo_write(user, facility)
     # Only the web form comes through this endpoint; phone channels confirm
     # through their own webhook adapters, which set their own `via`.
     if payload.via not in WEB_SOURCES and not (
@@ -1900,6 +1977,7 @@ async def submit_bed_report(
     user: Principal = Depends(current_user),
 ) -> BedReportOut:
     facility = await _facility_for_report(session, facility_id, user)
+    _require_demo_write(user, facility)
     if payload.location.method not in LOC_METHODS:
         raise HTTPException(status_code=422, detail="Unknown location method")
     if payload.simulate is not None and not (
@@ -2102,6 +2180,7 @@ async def submit_checkin(
     user: Principal = Depends(current_user),
 ) -> CheckinOut:
     facility = await _facility_for_report(session, facility_id, user)
+    _require_demo_write(user, facility)
     if payload.action not in ("in", "out"):
         raise HTTPException(status_code=422, detail="Action must be 'in' or 'out'")
     if payload.location.method not in LOC_METHODS:
@@ -2581,6 +2660,9 @@ async def facility_handsets(
     facility = await session.get(Facility, facility_id)
     if facility is None:
         raise HTTPException(status_code=404, detail="Facility not found")
+    # A handset is a way to write for its centre, so a public demo account is
+    # offered only the sandbox's.
+    _require_demo_write(user, facility)
     out: list[HandsetOut] = []
     for role in ("reporter", "supervisor"):
         number = ingest.demo_number(facility_id, role)
@@ -2604,6 +2686,15 @@ async def ingest_simulate(
 ) -> SimulateOut:
     if not settings.demo_mode:
         raise HTTPException(status_code=404, detail="Not found")
+    # The sender decides which centre the message writes for, so a public demo
+    # account may send only as a handset registered to a sandbox centre. An
+    # unregistered number writes nothing: the spine refuses it at identify.
+    if is_public_demo(user):
+        contact = await ingest.identify(session, payload.sender)
+        if contact is not None:
+            owner = await session.get(Facility, contact.facility_id)
+            if owner is not None:
+                _require_demo_write(user, owner)
     submission = ingest.RawSubmission(
         channel=payload.channel,
         sender_ref=payload.sender,

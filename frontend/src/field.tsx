@@ -53,7 +53,14 @@ function Pill({ ok, children }: { ok: boolean; children: React.ReactNode }) {
   );
 }
 
-export function FieldSimulator({ facilityId }: { facilityId: string | null }) {
+export function FieldSimulator({
+  facilityId,
+  blockedNote,
+}: {
+  facilityId: string | null;
+  /** Why no centre is offered, when one is selected but may not be written for. */
+  blockedNote?: string;
+}) {
   const [handsets, setHandsets] = useState<Handset[]>([]);
   const [sender, setSender] = useState("");
   const [channel, setChannel] = useState<Channel>("sms");
@@ -102,8 +109,8 @@ export function FieldSimulator({ facilityId }: { facilityId: string | null }) {
   if (!facilityId) {
     return (
       <p className="px-4 py-6 text-[12.5px] leading-relaxed text-ink-2">
-        Choose a health centre on the map to send a message as one of its
-        registered handsets.
+        {blockedNote ??
+          "Choose a health centre on the map to send a message as one of its registered handsets."}
       </p>
     );
   }

@@ -128,6 +128,11 @@ export interface User {
    * nothing the browser could do with it, and one fewer place it can leak.
    */
   has_staff_record: boolean;
+  /**
+   * Set only for a public demo account: the one district it may change
+   * (auth.demo_may_write). Everywhere else it is view-only.
+   */
+  demo_sandbox?: { state: string; district: string; label: string } | null;
 }
 
 export interface Session {
@@ -196,13 +201,28 @@ const post = <T>(path: string, body?: unknown) => request<T>("POST", path, { bod
  * only offers actions a person can actually take. The server still decides:
  * hiding a button is a courtesy, never the protection.
  */
+/** Mirrors auth.demo_may_write: a public demo account changes only its sandbox. */
+export const inDemoSandbox = (u: User, state: string, district: string) =>
+  !u.demo_sandbox || (u.demo_sandbox.state === state && u.demo_sandbox.district === district);
+
 export const can = {
   planState: (u: User, state: string) =>
-    u.role === "admin" || (u.role === "state_officer" && u.state_silo === state),
-  /** Mirrors auth.can_decide_transfer: the donor centre decides; officers watch. */
-  decideTransfer: (u: User, fromFacilityId: string) =>
-    u.role === "admin" || (u.role === "facility_user" && u.facility_id === fromFacilityId),
+    (u.role === "admin" || (u.role === "state_officer" && u.state_silo === state)) &&
+    (!u.demo_sandbox || u.demo_sandbox.state === state),
+  /**
+   * Mirrors auth.can_decide_transfer: the donor centre decides; officers
+   * watch. A decision moves stock at both ends, so a demo account needs both
+   * inside its sandbox.
+   */
+  decideTransfer: (
+    u: User,
+    t: { fromId: string; state: string; fromDistrict: string; toDistrict: string },
+  ) =>
+    (u.role === "admin" || (u.role === "facility_user" && u.facility_id === t.fromId)) &&
+    inDemoSandbox(u, t.state, t.fromDistrict) &&
+    inDemoSandbox(u, t.state, t.toDistrict),
   report: (u: User, f: { id: string; state_silo: string; district: string }) => {
+    if (!inDemoSandbox(u, f.state_silo, f.district)) return false;
     if (u.role === "admin") return true;
     if (u.role === "state_officer") return u.state_silo === f.state_silo;
     if (u.role === "block_mo") return u.state_silo === f.state_silo && u.district === f.district;

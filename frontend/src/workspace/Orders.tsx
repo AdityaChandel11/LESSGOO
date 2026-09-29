@@ -15,7 +15,7 @@
 
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 
-import { ApiError, type Movement, api } from "../api";
+import { ApiError, type Movement, type Transfer, api } from "../api";
 import Incoming from "./Incoming";
 import { both } from "./labels";
 
@@ -236,10 +236,18 @@ export default function Orders(props: {
   refreshKey: number;
   onChanged: () => void;
   demoMode?: boolean;
+  mayDecide?: (t: Transfer) => boolean;
+  sandboxLabel?: string;
 }) {
   return (
     <div>
-      <Incoming facilityId={props.facilityId} demoMode={!!props.demoMode} onChanged={props.onChanged} />
+      <Incoming
+        facilityId={props.facilityId}
+        demoMode={!!props.demoMode}
+        onChanged={props.onChanged}
+        mayDecide={props.mayDecide}
+        sandboxLabel={props.sandboxLabel}
+      />
       <h2 className="mb-1.5 text-[11px] font-semibold uppercase tracking-[0.09em] text-ink-3">On its way to you</h2>
       <OrdersList {...props} />
     </div>
