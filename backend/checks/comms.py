@@ -29,7 +29,10 @@ from app.models import BedReport, CallLog, Facility, OutboundMessage, StockReadi
 
 from .harness import PREFIX, Checker, Report, client, db, demo_emails
 
-STATE = "MH"
+# The demo accounts may write only inside the public demo sandbox
+# (auth.demo_may_write), so the handset used here belongs to a centre there.
+STATE = settings.demo_sandbox_state
+DISTRICT = settings.demo_sandbox_district
 # A 1x1 PNG. Enough to be "media" as far as the spine is concerned; the mock
 # extractor is what actually answers, because checks never reach a live model.
 TINY_PNG = (
@@ -48,7 +51,7 @@ async def run() -> Report:
     async with db() as session:
         facility = (
             await session.execute(
-                select(Facility).where(Facility.state_silo == STATE)
+                select(Facility).where(Facility.state_silo == STATE, Facility.district == DISTRICT)
                 .order_by(Facility.id).limit(1)
             )
         ).scalars().first()
