@@ -1046,6 +1046,14 @@ requests answered, trust flags visited, bed and staff availability. Labelled syn
 A whole-UI English/हिंदी switch (the briefing already has one); state language for the demo district
 (Marathi) on the PHC workspace. Scores on "Depth & reach across India".
 
+### Fix #96 — Refresh the always-loaded status lines  · Tier 0 · docs · FIRST · NEEDS ADITYA'S OK · status: TODO
+CLAUDE.md says "`main` is at `542d8dc`" and that Phase C/D code "was deliberately removed"; SPEC_DIGEST
+§5 says the same. On 2026-09-29 `main` is `e09fb0c` and `app/ingest.py`, `frontend/src/field.tsx`,
+`app/idsp.py` (IDSP outbreaks), the PHC workspace and the live loop all exist. A fresh session loads
+CLAUDE.md first and may believe features are missing. Update only the status lines (CLAUDE.md is
+Aditya's instruction file — show the diff and get a yes). Until then: trust git and this file's
+"Verified facts", not those status lines.
+
 ### Fix #95 — Submission deliverables match the fixed product  · Tier 1 · last · status: TODO
 README "what works, with a proof link" rewritten after the fixes (no stale claims); 2–3 line
 description; 10–12 slide deck (problem, solution, AI approach, who it serves, deployability, scale);
@@ -1300,7 +1308,7 @@ distance favours same-district donors).
 ## TIERS
 
 **Tier 0 — broken, corrupting, contradictory, or a risk to the live database. Must ship.**
-#53 (check: cold start on first click) · #82 (public demo roles can vandalise the DB) ·
+#96 (stale CLAUDE.md status lines, docs) · #53 (check: cold start on first click) · #82 (public demo roles can vandalise the DB) ·
 #11 (bill overwrites stock; wrong provenance label) · #74 (officers report facts for a centre:
 deliveries, check-ins, bed reports) · #79 (test report paints real centres red) · #37 (re-plan wipes
 requests / donor work) · #31 (request lockout + race guard) · #24 (dead simulator link) ·
@@ -1338,7 +1346,7 @@ deployed.
 Brainstorming is closed. New ideas go to the end of the list and into Tier 2 unless they are bugs.
 
 ## BUILD ORDER (current)
-**Tier 0:** #53 → #82 → #11 → #74 → #79 → #37 → #31 → #24 → #89 → #68 → #26
+**Tier 0:** #96 (docs, with OK) → #53 → #82 → #11 → #74 → #79 → #37 → #31 → #24 → #89 → #68 → #26
 **Tier 0 ops (Aditya's OK, dashboard % before/after):** #30 → #81 → #11r → #79 repair
 **Tier 1:**
 - A. Foundations & first impression: #52 → #87 → #88 → #47 → #90 → #63 → #72 → #91(T1) → #92(line)
