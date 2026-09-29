@@ -63,8 +63,8 @@ v3: Google Maps JS API primary, Leaflet/OSM demoted to `MAPS\_MODE=osm` fallback
 
 |Risk|Status|Pointer|
 |-|-|-|
-|Cloud Run/Cloud SQL scripts written, never run against a real project|**unverified**|v3, §28|
-|SSE breaks past 1 Cloud Run instance|needs `REDIS\_URL` or pinned instance count — **undecided**|v3, §16|
+|Cloud Run/Cloud SQL scripts written, never run against a real project|**removed** — the Cloud Run/Firebase path was deleted (`a01ce4f`); the app deploys to Render instead|v3, §28|
+|SSE breaks past 1 Cloud Run instance|**moot** — the code polls a durable `events` table instead of SSE, and `render.yaml` runs one free instance|v3, §16|
 |WhatsApp outbound blocked outside 24h session window|**mitigated by design** — SMS for critical alerts|v3, §14.2|
 |`import ortools` can fail natively|**mitigated by design** — greedy fallback is the sanctioned default|v3, §7 / §12.3; FINAL §5|
 |Federation accuracy can appear flat if silos are accidentally IID|**mitigated by design** — per-facility variance required in the generator|v3, §10 / §23|
@@ -85,19 +85,19 @@ v3: Google Maps JS API primary, Leaflet/OSM demoted to `MAPS\_MODE=osm` fallback
 
 ## 5\. Build order — done vs. pending 
 
-*Verified against the working tree on 2026-09-20 at commit `542d8dc`. B3 and all of Phases C and D were built on 2026-09-16, then deliberately removed by resetting `main` to `542d8dc` to restart that work differently; the removed code survives only in the local branch `backup-before-phase-c-removal`, and the database was rolled back to migration `3de61cc073d9` to match. This section, not memory, is the status of record.*
+*Verified against the working tree on 2026-09-29 at commit `e09fb0c` (`origin/main`). History: B3 and Phases C and D were first built on 2026-09-16, removed on 2026-09-20 by resetting `main` to `542d8dc` (that code survives only in the local branch `backup-before-phase-c-removal`), then rebuilt differently from 2026-09-20 on. Migration head: `d5e1f83a9c47`. Known defects live in docs/planning/FIX_LIST.md, not here. This section, not memory, is the status of record.*
 
 **Done (core):** scaffold, schema, migrations, national synthetic seed (3,510 facilities across all 28 states and 8 union territories), reorder floor, zoomable map, dashboard, redistribution solver (both fallbacks + rationale), approve/reject with row locking, real auth (4 roles), live updates, Routes caching with honest fallback, production security posture. `\[v3, §28 "Already built"]`
 
 **Phase A — Capture \& trust: done.** Ledger, movement tab, bed capture (code + Gemini Vision), attendance geofence, trust score + audit queue, trust wired into early-warning. `\[v3, §28 Phase A]`
 
-**Phase B — Federated forecasting: complete.** Live per-state silo partitions, FedProx with trust-weighted contributions on Flower's deployment engine, and forecasts feeding days-of-stock behind `FORECAST_MODE` — all three re-verified live on 2026-09-20. B3 was rebuilt on 2026-09-20 (migration `a1c4e77b90d2`): the aggregator inspects every reply before aggregating and stops the round if anything but weights and scalar metrics arrives, then writes measured bytes, tensor shapes, a SHA-256 of the weights, the per-silo trust-weighted table and an asserted `raw_rows_transmitted = 0`. Served at `/api/federation/inspector`, rendered on the Federation tab. Last run: 9 rounds, MAE 1.0674 to 0.1106 against a 0.1494 burn rate, 22,788 bytes per round, 0 facility rows. B4 stays superseded by the deployment engine. `\[v3, §28 Phase B]`
+**Phase B — Federated forecasting: complete.** Live per-state silo partitions, FedProx with trust-weighted contributions on Flower's deployment engine, and forecasts feeding days-of-stock behind `FORECAST_MODE` — all three re-verified live on 2026-09-20. B3 was rebuilt on 2026-09-20 (migration `a1c4e77b90d2`): the aggregator inspects every reply before aggregating and stops the round if anything but weights and scalar metrics arrives, then writes measured bytes, tensor shapes, a SHA-256 of the weights, the per-silo trust-weighted table and an asserted `raw_rows_transmitted = 0`. Served at `/api/federation/inspector`, rendered on the Federation tab. Last run: 9 rounds, MAE 1.0674 to 0.1106 against a 0.1494 burn rate, 22,788 bytes per round, 0 facility rows. B4 stays superseded by the deployment engine. On Render, the published forecasts (~20–21 Sept) are older than `forecast_max_age_days` (8), so the live site currently falls back to burn rate everywhere (2026-09-29 live audit; FIX_LIST #81). `\[v3, §28 Phase B]`
 
-**Phase C — Omnichannel: not started.** The ingestion spine, field client and 70/30 split view were built on 2026-09-16 and removed; there is no `app/ingest.py`, no `field.tsx` and no phone registry in the tree. Real SMS/WhatsApp/IVR still need credentials. `\[v3, §28 Phase C]`
+**Phase C — Omnichannel: built; simulator-only on Render.** Rebuilt from 2026-09-20: the ingestion spine (`app/ingest.py`), the channel simulator (`frontend/src/field.tsx` → `/api/ingest/simulate`), the phone registry (migration `b7f3c21d0e58`) and the call log (`c7b2e49a1d83`). Twilio can send for real (`58ca240`), but Render runs `COMMS_MODE=simulator`; real SMS/WhatsApp/IVR still need credentials. The 70/30 split view was not rebuilt. `\[v3, §28 Phase C]`
 
-**Phase D — Differentiators: not started.** Outbreak pre-positioning and the impact-replay/eval harness were built and removed; copilot, what-if twin and Jan Aushadhi redirect were never built. `\[v3, §28 Phase D]`
+**Phase D — Differentiators: partly built.** Built: IDSP outbreak warnings from NCDC's weekly outbreak report (`app/idsp.py`, `outbreaks.tsx`; 40 rows parsed from 2020 and 2023 reports), the stock-out drill (`liveloop.tsx`), and the evaluation harness (`app/evaluation.py`, `federation/evaluate_model.py` — no report is committed; `eval_reports/federation.json` is absent). Not built: outbreak pre-positioning — outbreaks feed nothing into forecast, cover or solver (v3 §12.5); copilot, what-if twin, Jan Aushadhi redirect. `\[v3, §28 Phase D]`
 
-**Phase E — Deployment: not started.** Scripts written, never run. `\[v3, §28 Phase E]` **Before any deploy:** generate a real password for the least-privilege `swasthsetu_app` role and put it in `DATABASE_URL`. Production mode refuses to start while the URL carries the `postgres:postgres` development credentials — and the local Postgres password is currently exactly that, which is why the local server runs in development mode. Not set yet.
+**Phase E — Deployment: live on Render.** https://swasthsetu-m4x5.onrender.com — one Docker web service (free plan, Singapore) serving the API and the built site from one origin (`render.yaml`), with `ENVIRONMENT=production`, `DEMO_MODE` + `ALLOW_PUBLIC_DEMO` on, `LLM_MODE=live`, `MAPS_MODE=osm`, `COMMS_MODE=simulator`, `FORECAST_MODE=federated`. The database is Render's free Postgres, created by hand in the dashboard (1 GB, deleted 30 days after creation — see CLAUDE.md's size guard). The Cloud Run/Firebase path was removed (`a01ce4f`). Production refuses to start with the `postgres:postgres` development credentials (`config.py`), which is why the local server runs in development mode; whether Render's `DATABASE_URL` uses the least-privilege `swasthsetu_app` role cannot be read from the repo. `\[v3, §28 Phase E]`
 
 ## 6. Google integration — standing instruction
 
@@ -105,7 +105,7 @@ Hackathon rule: mandatory is at least one of GenAI/predictive/vision — confirm
 
 
 
-Already integrated: Gemini bed-photo vision behind `LLM_MODE` (plain-language briefings were never built), and Google Maps as Routes API road distances plus the **Map Tiles API** basemap rendered in Leaflet — not the Maps JavaScript API widget.
+Already integrated: Gemini, called over REST from `app/vision.py` behind `LLM_MODE`, reads the ward whiteboard's figures and today's code from a photo (it does not count beds), reads stock bills and slips, writes the PHC daily briefing, and explains transfers ("Why?") and trust scores. Google Maps: Routes API road distances plus the **Map Tiles API** basemap rendered in Leaflet — not the Maps JavaScript API widget; Render runs `MAPS_MODE=osm`, so neither Maps path is live there.
 
 Legitimate remaining opportunities, only where they add real value to pending work: Cloud Speech-to-Text as the primary voice-input path (Bhashini as the value-add layer on top, per §26.4 — don't reverse this), BigQuery for the national dataset if analytics work is still pending, Dialogflow only if it's a genuine upgrade over Gemini function-calling for the Copilot.
 
@@ -140,5 +140,5 @@ Whenever a pending build step has a real choice between a Google tool and a non-
 * Full Red Team objection/mitigation tables for all four modules (research.md, Phase 5)
 * Exact synthetic-data consumption formula and SKU alias lists (v3 §10)
 * SMS grammar syntax and IVR DTMF fallback wording (v3 §13, §14.3)
-* Measured eval-harness numbers — MAE, precision/recall, stock-out-days: **the harness and its recorded runs were removed with Phase D, so nothing in the tree can regenerate them** (see §5)
+* Measured eval-harness numbers — MAE, precision/recall, stock-out-days: the harness exists again (`app/evaluation.py`, `federation/evaluate_model.py`), but no report is committed — `eval_reports/federation.json` is absent (see §5)
 
