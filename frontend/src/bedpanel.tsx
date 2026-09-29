@@ -10,6 +10,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, api, type BedCode, type BedReport, type User, can } from "./api";
+import { ChaseButton } from "./chase";
 import { drawWardBoard, plausibleOccupancy } from "./wardboard";
 
 const VERIFICATION_TONE: Record<string, { label: string; className: string }> = {
@@ -305,6 +306,14 @@ export function BedPanel({
 
       {mayReport && demoMode && (
         <div className="mt-2.5">
+          {user.role !== "facility_user" && (
+            // The labelled sandbox exception (fix #74): outside the public
+            // demo's sandbox, no officer sends a centre's bed report.
+            <p className="mb-1 text-[11px] font-medium text-ink-2">
+              Demo, sandbox only: these buttons send a bed report for the centre, which an
+              officer cannot do.
+            </p>
+          )}
           {code && (
             <p className="text-[11px] text-ink-3">
               Today's code for this facility:{" "}
@@ -333,6 +342,9 @@ export function BedPanel({
             ))}
           </div>
         </div>
+      )}
+      {can.chase(user, facility) && (
+        <ChaseButton facilityId={facilityId} topic="beds" label="Chase today's bed report · बिस्तर रिपोर्ट की याद दिलाएँ" />
       )}
       {error && <p className="mt-1.5 text-[11.5px] text-crit">{error}</p>}
     </div>

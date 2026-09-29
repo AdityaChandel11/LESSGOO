@@ -17,6 +17,7 @@ from uuid import uuid4
 from dataclasses import asdict
 from decimal import Decimal
 from datetime import date, datetime, timedelta, timezone
+from typing import Literal
 
 import logging
 
@@ -48,6 +49,7 @@ from .auth import (
     can_decide_transfer,
     can_plan_state,
     can_submit_reading,
+    can_report_facts,
     can_view_facility,
     current_user,
     demo_may_plan,
@@ -65,6 +67,7 @@ from .models import (
     CallLog,
     Event,
     Facility,
+    FacilityContact,
     FederationRound,
     MedicineMovement,
     Sku,
@@ -877,6 +880,27 @@ def _require_demo_write(user: Principal, facility: Facility) -> None:
         raise HTTPException(status_code=403, detail=demo_sandbox_refusal())
 
 
+def _require_facts(user: Principal, facility: Facility) -> None:
+    """Facts about a centre come from the centre itself (auth.can_report_facts).
+    The sandbox rule is checked first, so a demo account outside the sandbox
+    is told the rule that actually stopped it."""
+    _require_demo_write(user, facility)
+    if not can_report_facts(
+        user,
+        facility_id=facility.id,
+        facility_state=facility.state_silo,
+        facility_district=facility.district,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Stock, deliveries, staff check-ins and beds are reported by the centre "
+                "itself — only the centre can state them. Officers can view them and "
+                "chase the centre for a report."
+            ),
+        )
+
+
 async def _facility_in_scope(
     session: AsyncSession, facility_id: str, user: Principal
 ) -> Facility:
@@ -1151,17 +1175,7 @@ async def submit_stock_photo(
     The photograph itself is never stored. Only what was read from it is.
     """
     facility = await _facility_in_scope(session, facility_id, user)
-    if not can_submit_reading(
-        user,
-        facility_id=facility.id,
-        facility_state=facility.state_silo,
-        facility_district=facility.district,
-    ):
-        raise HTTPException(
-            status_code=403,
-            detail="You can only report stock for facilities you are responsible for",
-        )
-    _require_demo_write(user, facility)
+    _require_facts(user, facility)
 
     try:
         image = base64.b64decode(payload.image_base64, validate=True)
@@ -1666,16 +1680,7 @@ async def submit_reading(
     facility = await session.get(Facility, payload.facility_id)
     if facility is None:
         raise HTTPException(status_code=404, detail="Unknown facility")
-    if not can_submit_reading(
-        user,
-        facility_id=facility.id,
-        facility_state=facility.state_silo,
-        facility_district=facility.district,
-    ):
-        raise HTTPException(
-            status_code=403, detail="You can only report stock for facilities you are responsible for"
-        )
-    _require_demo_write(user, facility)
+    _require_facts(user, facility)
     # "seed" and "transfer" are written only by the server itself. A browser
     # able to claim "transfer" could hide real consumption, because transfer
     # readings are excluded from usage rates. Phone-channel sources come from
@@ -1919,18 +1924,9 @@ async def confirm_receipt(
     if facility is None:
         raise HTTPException(status_code=404, detail="Unknown facility")
     # Confirming a delivery is reporting a fact about your own facility, so it
-    # carries the same permission as submitting a stock reading.
-    if not can_submit_reading(
-        user,
-        facility_id=facility.id,
-        facility_state=facility.state_silo,
-        facility_district=facility.district,
-    ):
-        raise HTTPException(
-            status_code=403,
-            detail="You can only confirm deliveries for facilities you are responsible for",
-        )
-    _require_demo_write(user, facility)
+    # carries the same permission as submitting a stock reading: the receiving
+    # centre's, never the dispatching side's or an officer's (fix list #74).
+    _require_facts(user, facility)
     # Only the web form comes through this endpoint; phone channels confirm
     # through their own webhook adapters, which set their own `via`.
     if payload.via not in WEB_SOURCES and not (
@@ -1955,6 +1951,100 @@ async def confirm_receipt(
     return ReceiptOut(movement=MovementOut(**asdict(row)), **effect)
 
 
+# ===================================================================== chase ===
+# Fix list #74. Officers no longer confirm a centre's deliveries, check its
+# staff in or send its bed report; they chase the centre for them instead.
+
+
+def chase_text(
+    topic: str, facility_name: str, *, batch: str | None = None, medicine: str | None = None
+) -> str:
+    """The reminder, naming what to send back in the SMS grammar the ingestion
+    spine reads (GOT, IN/OUT, BEDS). A delivery reminder never states the
+    dispatched quantity: the centre counts first, then reports what it
+    counted."""
+    if topic == "receipt":
+        return (
+            "SwasthSetu reminder for {0}: batch {1} of {2} was sent to you. When it "
+            "arrives, count it and reply GOT {1} followed by the number you counted."
+        ).format(facility_name, batch, medicine)
+    if topic == "checkin":
+        return (
+            "SwasthSetu reminder for {0}: no staff check-in has been recorded today. "
+            "Staff on duty, reply IN when you arrive and OUT when you leave."
+        ).format(facility_name)
+    return (
+        "SwasthSetu reminder for {0}: today's bed report is due. Send a ward photo "
+        "with today's code, or reply BEDS followed by the number of occupied beds."
+    ).format(facility_name)
+
+
+class ChaseIn(BaseModel):
+    topic: Literal["receipt", "checkin", "beds"]
+    movement_id: int | None = None
+
+
+class ChaseOut(BaseModel):
+    facility_id: str
+    sent_to: str
+    channel: str
+    body: str
+    # Always "simulated". This system keeps only a salted hash of each
+    # handset's number, so it has nothing to text a real phone with; the
+    # reminder goes to the channel simulator's outbound log, and says so.
+    status: str
+
+
+@router.post("/facilities/{facility_id}/chase", response_model=ChaseOut, tags=["field"])
+async def chase_facility(
+    facility_id: str,
+    payload: ChaseIn,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> ChaseOut:
+    """Remind a centre to report what only it can report."""
+    if user.role == "facility_user":
+        raise HTTPException(
+            status_code=403,
+            detail="A centre reports for itself; chasing is for the officers who oversee it.",
+        )
+    facility = await _facility_in_scope(session, facility_id, user)
+    _require_demo_write(user, facility)
+
+    batch = medicine = None
+    if payload.topic == "receipt":
+        if payload.movement_id is None:
+            raise HTTPException(status_code=422, detail="Say which delivery to chase")
+        movement = await session.get(MedicineMovement, payload.movement_id)
+        if movement is None or movement.to_facility != facility.id:
+            raise HTTPException(status_code=404, detail="No such delivery to this centre")
+        if movement.status != movements.OPEN:
+            raise HTTPException(status_code=409, detail="That delivery has already been confirmed")
+        sku = await session.get(Sku, movement.sku_code)
+        batch, medicine = movement.batch_id, sku.name if sku else movement.sku_code
+
+    # The reporting handset first ('reporter' sorts before 'supervisor').
+    contact = await session.scalar(
+        select(FacilityContact)
+        .where(FacilityContact.facility_id == facility.id, FacilityContact.is_active.is_(True))
+        .order_by(FacilityContact.role)
+        .limit(1)
+    )
+    if contact is None:
+        raise HTTPException(status_code=409, detail="This centre has no registered handset to remind")
+
+    body = chase_text(payload.topic, facility.name, batch=batch, medicine=medicine)
+    await comms.record_outbound(
+        session, channel="sms", to_ref=contact.masked, body=body,
+        provider_sid=None, status="simulated",
+    )
+    await session.commit()
+    return ChaseOut(
+        facility_id=facility.id, sent_to=contact.masked, channel="sms", body=body,
+        status="simulated",
+    )
+
+
 # =============================================================== bed capture ===
 # Spec 26.2: a ward photo carrying the day's rotating code, read by Gemini,
 # checked against the facility's registered location and its admission
@@ -1977,7 +2067,9 @@ async def bed_code(
     session: AsyncSession = Depends(get_session),
     user: Principal = Depends(current_user),
 ) -> BedCodeOut:
-    facility = await _facility_for_report(session, facility_id, user)
+    # Reading the day's code is viewing, not reporting: an officer may see it
+    # for any centre they oversee (fix list #74 narrowed only the reports).
+    facility = await _facility_in_scope(session, facility_id, user)
     code = await beds.code_for(session, facility.id)
     await session.commit()
     return BedCodeOut(
@@ -2056,19 +2148,12 @@ def _bed_report_out(report) -> BedReportOut:
 async def _facility_for_report(
     session: AsyncSession, facility_id: str, user: Principal
 ) -> Facility:
+    """The facility a bed report or check-in is being made for: by the centre
+    itself only (auth.can_report_facts)."""
     facility = await session.get(Facility, facility_id)
     if facility is None:
         raise HTTPException(status_code=404, detail="Unknown facility")
-    if not can_submit_reading(
-        user,
-        facility_id=facility.id,
-        facility_state=facility.state_silo,
-        facility_district=facility.district,
-    ):
-        raise HTTPException(
-            status_code=403,
-            detail="You can only report for facilities you are responsible for",
-        )
+    _require_facts(user, facility)
     return facility
 
 
@@ -2082,7 +2167,6 @@ async def submit_bed_report(
     user: Principal = Depends(current_user),
 ) -> BedReportOut:
     facility = await _facility_for_report(session, facility_id, user)
-    _require_demo_write(user, facility)
     if payload.location.method not in LOC_METHODS:
         raise HTTPException(status_code=422, detail="Unknown location method")
     if payload.simulate is not None and not (
@@ -2285,7 +2369,6 @@ async def submit_checkin(
     user: Principal = Depends(current_user),
 ) -> CheckinOut:
     facility = await _facility_for_report(session, facility_id, user)
-    _require_demo_write(user, facility)
     if payload.action not in ("in", "out"):
         raise HTTPException(status_code=422, detail="Action must be 'in' or 'out'")
     if payload.location.method not in LOC_METHODS:

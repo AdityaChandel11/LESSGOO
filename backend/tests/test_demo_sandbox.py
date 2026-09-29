@@ -156,8 +156,10 @@ def test_a_demo_stock_report_inside_the_sandbox_goes_through():
 
 
 def test_a_real_admin_is_not_confined_by_the_demo_rule():
-    body = api.StockReadingIn(facility_id=JAIPUR.id, sku_code="ORS", qty_on_hand=4)
-    passes_guard(api.submit_reading(body, session=FakeSession(JAIPUR), user=REAL_ADMIN))
+    # A stock request, not a stock report: since fix #74 no officer reports a
+    # centre's facts at all, so that endpoint cannot show this rule on its own.
+    body = api.RequestIn(sku_code="ORS", from_facility=JAIPUR_B.id, qty=10)
+    passes_guard(api.create_request(JAIPUR.id, body, session=FakeSession(JAIPUR), user=REAL_ADMIN))
 
 
 def test_a_demo_stock_photo_outside_the_sandbox_is_refused():
@@ -296,6 +298,7 @@ GUARDED = {
     "/movements/{movement_id}/receipt",
     "/facilities/{facility_id}/bed-reports",
     "/facilities/{facility_id}/checkins",
+    "/facilities/{facility_id}/chase",
     "/ingest/simulate",
 }
 EXEMPT = {

@@ -19,6 +19,7 @@ import {
   type User,
   can,
 } from "./api";
+import { ChaseButton } from "./chase";
 
 const VIEWS: { key: MovementView; label: string; countKey: string }[] = [
   { key: "attention", label: "Needs attention", countKey: "attention" },
@@ -139,10 +140,15 @@ function ReceiptForm({
 function MovementRow({
   m,
   canConfirm,
+  actingForCentre,
+  canChase,
   onConfirm,
 }: {
   m: Movement;
   canConfirm: boolean;
+  /** A demo account confirming for the centre — the labelled sandbox exception. */
+  actingForCentre: boolean;
+  canChase: boolean;
   onConfirm: (qty: number, note: string) => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
@@ -182,23 +188,46 @@ function MovementRow({
       {reason && <p className="mt-1 text-[12px] text-ink-2">{reason}</p>}
       {m.note && <p className="mt-0.5 text-[11.5px] italic text-ink-3">“{m.note}”</p>}
 
-      {!settled &&
-        (canConfirm ? (
-          open ? (
-            <ReceiptForm movement={m} onConfirm={onConfirm} />
+      {!settled && (
+        <>
+          {canConfirm && !actingForCentre ? (
+            open ? (
+              <ReceiptForm movement={m} onConfirm={onConfirm} />
+            ) : (
+              <button
+                onClick={() => setOpen(true)}
+                className="mt-2 rounded border border-line px-2.5 py-1 text-[12px] font-medium text-ink-2 hover:border-brand hover:text-ink"
+              >
+                Confirm what arrived
+              </button>
+            )
           ) : (
-            <button
-              onClick={() => setOpen(true)}
-              className="mt-2 rounded border border-line px-2.5 py-1 text-[12px] font-medium text-ink-2 hover:border-brand hover:text-ink"
-            >
-              Confirm what arrived
-            </button>
-          )
-        ) : (
-          <p className="mt-1.5 text-[11.5px] text-ink-3">
-            Waiting on {m.facility_name} to confirm what arrived.
-          </p>
-        ))}
+            <p className="mt-1.5 text-[11.5px] text-ink-3">
+              Waiting on {m.facility_name} to confirm what arrived. Only the centre can.
+            </p>
+          )}
+          {canChase && (
+            <ChaseButton
+              facilityId={m.to_facility}
+              topic="receipt"
+              movementId={m.id}
+              label="Chase the centre · केंद्र को याद दिलाएँ"
+            />
+          )}
+          {canConfirm &&
+            actingForCentre &&
+            (open ? (
+              <ReceiptForm movement={m} onConfirm={onConfirm} />
+            ) : (
+              <button
+                onClick={() => setOpen(true)}
+                className="mt-1.5 rounded border border-dashed border-line px-2.5 py-1 text-[11.5px] text-ink-3 hover:border-brand hover:text-ink"
+              >
+                Demo, sandbox only: confirm for the centre
+              </button>
+            ))}
+        </>
+      )}
     </div>
   );
 }
@@ -334,6 +363,8 @@ export function MovementsPanel({
                 state_silo: m.state_silo,
                 district: m.district,
               })}
+              actingForCentre={user.role !== "facility_user"}
+              canChase={can.chase(user, m)}
               onConfirm={confirm(m)}
             />
           ))

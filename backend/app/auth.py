@@ -7,12 +7,17 @@ rather than when its token expires.
 
 Roles and what they may *change* (every signed-in user may *view* everything):
 
-    admin          everything
-    state_officer  plans and decisions for transfers inside their state;
-                   stock corrections for facilities in their state
-    block_mo       decisions for transfers where both facilities are in their
-                   district; stock reports for facilities in their district
-    facility_user  stock reports for their own facility only
+    admin          plans for any state; decisions on any transfer
+    state_officer  plans for their own state
+    block_mo       nothing beyond viewing and chasing their district's centres
+    facility_user  facts about their own facility — stock, deliveries
+                   received, staff check-ins, beds — and decisions on
+                   transfers out of it
+
+Facts about a centre are reported only by the centre itself (fix list #74):
+officers view them and chase the centre for them. A public demo account may
+act for a centre inside the demo sandbox, and only there — see
+can_report_facts and demo_may_write.
 """
 
 from __future__ import annotations
@@ -184,6 +189,35 @@ def demo_may_plan(p: Principal, state: str) -> bool:
     """A plan covers a whole state, so the sandbox's state is the only one a
     demo account may re-plan; single-medicine plans are what the drill runs."""
     return not is_public_demo(p) or state == settings.demo_sandbox_state
+
+
+def can_report_facts(
+    p: Principal, *, facility_id: str, facility_state: str, facility_district: str
+) -> bool:
+    """Who may state a fact about a centre: its stock, a delivery's arrival, a
+    staff check-in, a ward's beds.
+
+    The centre itself, and nobody else. The two-sided ledger and the
+    attendance checks exist because the other side cannot settle these; an
+    officer who could confirm a centre's delivery or check its staff in would
+    be both sides at once (fix list #74). Officers view and chase instead.
+
+    The one exception is labelled on screen: in the public demo, a demo
+    account may act for a centre inside the sandbox — the emergency drill and
+    the console's demo buttons — still within its own role's area.
+    """
+    if p.role == "facility_user":
+        return p.facility_id == facility_id
+    return (
+        is_public_demo(p)
+        and in_demo_sandbox(facility_state, facility_district)
+        and can_submit_reading(
+            p,
+            facility_id=facility_id,
+            facility_state=facility_state,
+            facility_district=facility_district,
+        )
+    )
 
 
 def next_full_plan_at(

@@ -205,6 +205,24 @@ const post = <T>(path: string, body?: unknown) => request<T>("POST", path, { bod
 export const inDemoSandbox = (u: User, state: string, district: string) =>
   !u.demo_sandbox || (u.demo_sandbox.state === state && u.demo_sandbox.district === district);
 
+/** The area an officer's role oversees (auth.can_view_facility for officers). */
+const oversees = (u: User, f: { state_silo: string; district: string }) =>
+  u.role === "admin" ||
+  (u.role === "state_officer" && u.state_silo === f.state_silo) ||
+  (u.role === "block_mo" && u.state_silo === f.state_silo && u.district === f.district);
+
+export type ChaseTopic = "receipt" | "checkin" | "beds";
+
+export interface ChaseResult {
+  facility_id: string;
+  /** The registered handset, masked — the system holds no phone numbers. */
+  sent_to: string;
+  channel: string;
+  body: string;
+  /** Always "simulated": the reminder goes to the channel simulator's log. */
+  status: string;
+}
+
 export const can = {
   planState: (u: User, state: string) =>
     (u.role === "admin" || (u.role === "state_officer" && u.state_silo === state)) &&
@@ -221,13 +239,18 @@ export const can = {
     (u.role === "admin" || (u.role === "facility_user" && u.facility_id === t.fromId)) &&
     inDemoSandbox(u, t.state, t.fromDistrict) &&
     inDemoSandbox(u, t.state, t.toDistrict),
+  /**
+   * Mirrors auth.can_report_facts: stock, deliveries, check-ins and beds are
+   * stated by the centre itself. A public demo account may act for a centre
+   * inside its sandbox (the drill and the demo buttons), within its role's area.
+   */
   report: (u: User, f: { id: string; state_silo: string; district: string }) => {
-    if (!inDemoSandbox(u, f.state_silo, f.district)) return false;
-    if (u.role === "admin") return true;
-    if (u.role === "state_officer") return u.state_silo === f.state_silo;
-    if (u.role === "block_mo") return u.state_silo === f.state_silo && u.district === f.district;
-    return u.facility_id === f.id;
+    if (u.role === "facility_user") return u.facility_id === f.id && inDemoSandbox(u, f.state_silo, f.district);
+    return !!u.demo_sandbox && inDemoSandbox(u, f.state_silo, f.district) && oversees(u, f);
   },
+  /** Mirrors api.chase_facility: officers chase the centres they oversee. */
+  chase: (u: User, f: { state_silo: string; district: string }) =>
+    u.role !== "facility_user" && inDemoSandbox(u, f.state_silo, f.district) && oversees(u, f),
 };
 
 export const ROLE_LABEL: Record<Role, string> = {
@@ -400,6 +423,9 @@ export const api = {
   myAttendance: () => get<SelfRecord>("/me/attendance"),
   checkin: (facilityId: string, body: Record<string, unknown>) =>
     post<Checkin>(`/facilities/${encodeURIComponent(facilityId)}/checkins`, body),
+  /** Remind a centre to report something only it can report (fix #74). */
+  chase: (facilityId: string, body: { topic: ChaseTopic; movement_id?: number }) =>
+    post<ChaseResult>(`/facilities/${encodeURIComponent(facilityId)}/chase`, body),
   facilityTrust: (facilityId: string) =>
     get<Trust | null>(`/facilities/${encodeURIComponent(facilityId)}/trust`),
   /**
