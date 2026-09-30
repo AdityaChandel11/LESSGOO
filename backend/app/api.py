@@ -64,6 +64,7 @@ from .db import get_session, ping
 from .models import (
     CALL_OUTCOMES,
     LOC_METHODS,
+    Approval,
     CallLog,
     Event,
     Facility,
@@ -891,11 +892,30 @@ class WorkspaceSkuOut(SkuStockOut):
     stockout_on: date | None
 
 
+class OwnRequestOut(BaseModel):
+    """A request this centre raised in the last day, for its medicine card."""
+
+    transfer_id: int
+    sku_code: str
+    qty: float
+    from_facility: str
+    from_name: str
+    status: str
+    lapsed: bool
+    words: str
+    created_at: datetime
+    lapses_at: datetime
+
+
 class WorkspaceOut(BaseModel):
     facility: FacilityOut
     skus: list[WorkspaceSkuOut]
+    # Requests still waiting for a reply; one that lapsed does not count.
     open_requests: int
     max_open_requests: int
+    # What this centre asked for in the last day, so each medicine card can
+    # show its own request instead of offering to ask again (fix list #31).
+    requests: list[OwnRequestOut]
     # Both languages of the computed line, always present and needing no key.
     # The screen renders this on load; the model is an overlay on top of it.
     briefing: dict[str, str]
@@ -1011,6 +1031,9 @@ async def facility_workspace(
         skus=rows,
         open_requests=open_here,
         max_open_requests=settings.max_open_requests_per_facility,
+        requests=[
+            OwnRequestOut(**vars(r)) for r in await workspace.own_requests(session, facility.id)
+        ],
         briefing=workspace.rules_briefing(_briefing_rows(snap.skus, units)),
     )
 
@@ -1476,6 +1499,14 @@ class RequestOut(BaseModel):
     estimated_delivery: date
     estimate_label: str
     assumptions: dict[str, float]
+    # The request's state in words, e.g. "Awaiting reply from Nashik PHC 13
+    # (pharmacist)" — the screen never shows `status` or `approver_role` raw.
+    status_words: str
+    # The approval the estimate depends on (the dispatch cutoff, India time):
+    # "If approved by 14:00 today, about 1 Oct".
+    approve_by: datetime
+    # When the request lapses if nobody replies (fix list #31).
+    lapses_at: datetime
 
 
 @router.get(
@@ -1486,12 +1517,76 @@ async def incoming_requests(
     session: AsyncSession = Depends(get_session),
     user: Principal = Depends(current_user),
 ) -> list[TransferOut]:
-    """Requests waiting for this centre, as the donor, to accept or decline."""
+    """Requests waiting for this centre, as the donor, to accept or decline.
+    A request that lapsed without a reply is no longer waiting, and could not
+    be accepted anyway (fix list #31), so it is not listed."""
     facility = await _facility_in_scope(session, facility_id, user)
     rows = await redistribution.list_transfers(
         session, from_facility=facility.id, statuses=["proposed"], limit=50
     )
-    return [TransferOut.model_validate(r) for r in rows]
+    now = datetime.now(timezone.utc)
+    window = redistribution.request_window()
+    return [
+        TransferOut.model_validate(r)
+        for r in rows
+        if not (
+            r["triggered_by"] == workspace.FACILITY_REQUEST
+            and redistribution.request_lapsed(r["created_at"], now, window)
+        )
+    ]
+
+
+@router.post("/transfers/{transfer_id}/cancel", response_model=TransferOut, tags=["workspace"])
+async def cancel_request(
+    transfer_id: int,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> TransferOut:
+    """Withdraw a request this centre raised, before the donor replies.
+
+    Only the centre that raised it, and only while it is still a request: the
+    plan's own recommendations are changed by re-running the plan, and a
+    decided transfer is history. Taken under the same row lock the donor's
+    decision takes, so a cancel and an accept cannot both win.
+    """
+    transfer = await session.get(Transfer, transfer_id)
+    if transfer is None:
+        raise HTTPException(status_code=404, detail="Request not found")
+    facility = await session.get(Facility, transfer.to_facility)
+    if user.role != "facility_user" or user.facility_id != transfer.to_facility:
+        raise HTTPException(
+            status_code=403, detail="Only the centre that raised a request can cancel it"
+        )
+    _require_demo_write(user, facility)
+    if transfer.triggered_by != workspace.FACILITY_REQUEST:
+        raise HTTPException(
+            status_code=409,
+            detail="This is the plan's recommendation, not a request; it changes when the plan is re-run.",
+        )
+    locked = await session.get(Transfer, transfer_id, with_for_update=True, populate_existing=True)
+    if locked.status != "proposed":
+        raise HTTPException(
+            status_code=409,
+            detail="This request is already closed: {0}.".format(
+                workspace.request_words(locked.status, False, "the donor centre").lower()
+            ),
+        )
+    locked.status = "cancelled"
+    session.add(
+        Approval(
+            transfer_id=locked.id, actor_ref=f"user:{user.id}", actor_role=user.role,
+            decision="cancelled", channel="web",
+        )
+    )
+    await session.commit()
+    await events.record(
+        session,
+        events.TRANSFER_CANCELLED,
+        {"transfer_id": locked.id, "sku_code": locked.sku_code, "facility_id": facility.id,
+         "facility_name": facility.name},
+        state_silo=facility.state_silo,
+    )
+    return TransferOut.model_validate((await redistribution.list_transfers(session, ids=[locked.id]))[0])
 
 
 @router.post(
@@ -1601,6 +1696,27 @@ async def create_request(
     )
     if not verdict.allowed:
         raise HTTPException(status_code=409, detail=verdict.reason)
+    # One live request per medicine: a second would ask two donors for the
+    # same shortfall, and the medicine card shows the first instead of a
+    # "Find supply" button while it waits (fix list #31).
+    waiting = next(
+        (
+            r for r in await workspace.own_requests(session, facility.id)
+            if r.sku_code == payload.sku_code and r.status == "proposed" and not r.lapsed
+        ),
+        None,
+    )
+    if waiting is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This centre already has a request for {0} waiting on {1}, sent at {2}. "
+                "Cancel it first, or wait for the reply."
+            ).format(
+                sku_row.name, waiting.from_name,
+                workspace.in_india(waiting.created_at).strftime("%H:%M"),
+            ),
+        )
 
     rule = workspace.SkuRule(
         code=sku_row.code, name=sku_row.name, unit=sku_row.unit,
@@ -1629,7 +1745,9 @@ async def create_request(
         else 0.0
     )
     now = datetime.now(timezone.utc)
-    estimate = workspace.delivery_estimate(km=km, raised_at=now)
+    # The dispatch cutoff is a local hour, so the estimate reads India time;
+    # reading the UTC hour put every request raised 14:00–19:30 on the wrong day.
+    estimate = workspace.delivery_estimate(km=km, raised_at=workspace.in_india(now))
     eta_hours = round(km / rules.avg_speed_kmh + rules.handling_hours, 2)
     # The donor centre's staff accept or decline (auth.can_decide_transfer).
     approver_role = "donor_facility"
@@ -1692,6 +1810,9 @@ async def create_request(
         estimated_delivery=estimate.expected_on,
         estimate_label=estimate.label,
         assumptions={k: float(v) for k, v in estimate.assumptions.items()},
+        status_words=workspace.request_words("proposed", False, donor_facility.name),
+        approve_by=estimate.approve_by,
+        lapses_at=transfer.created_at + redistribution.request_window(),
     )
 
 

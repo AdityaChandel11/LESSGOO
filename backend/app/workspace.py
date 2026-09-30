@@ -31,7 +31,7 @@ from __future__ import annotations
 import hashlib
 import math
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Literal
 
 from sqlalchemy import func, select, text
@@ -39,12 +39,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
 from .models import FacilityBriefing
-from .redistribution import EARTH_RADIUS_KM, PlanRules, StockNode, split_roles
-
-# The one string this module uses to mark a transfer as a pharmacist's own
-# request. It is written on insert and read by both caps and by the sandbox
-# cleanup, so it lives here once rather than being spelled out three times.
-FACILITY_REQUEST = "facility_request"
+from .redistribution import (
+    EARTH_RADIUS_KM,
+    FACILITY_REQUEST,  # re-exported: api, checks and scripts read it from here
+    INDIA,
+    PlanRules,
+    StockNode,
+    request_lapsed,
+    request_window,
+    split_roles,
+)
 
 # What every distance in this module is. Named rather than described, so a
 # screen cannot accidentally imply a road route (spec: route_source).
@@ -148,6 +152,10 @@ class DeliveryEstimate:
     basis: str
     label: str
     assumptions: dict[str, float | int]
+    # The approval the estimate depends on: the dispatch cutoff on the day
+    # the batch would leave. "If approved by 14:00 today, about 1 Oct" —
+    # never a flat date, because nothing moves until the donor says yes.
+    approve_by: datetime
 
 
 class RequestRefused(Exception):
@@ -371,17 +379,17 @@ def check_caps(open_here: int, open_overall: int, limits: CapLimits) -> CapVerdi
     if open_here >= limits.per_facility:
         return CapVerdict(
             False,
-            "This centre already has {0} open requests, which is the limit of {1}. "
-            "Confirm or cancel one before raising another.".format(
-                open_here, limits.per_facility
-            ),
+            "This centre already has {0} requests waiting for a reply, which is the "
+            "limit of {1}. Cancel one from its medicine card, or wait: a request with "
+            "no reply lapses on its own.".format(open_here, limits.per_facility),
         )
     if open_overall >= limits.overall:
         return CapVerdict(
             False,
-            "Limit reached: {0} requests are open across the platform, which is the "
-            "demonstration cap of {1}. Existing requests must be settled before new "
-            "ones can be raised.".format(open_overall, limits.overall),
+            "Limit reached: {0} requests were raised across the platform in the last 24 "
+            "hours, which is the demonstration cap of {1}. Try again later.".format(
+                open_overall, limits.overall
+            ),
         )
     return CapVerdict(True)
 
@@ -453,7 +461,8 @@ def delivery_estimate(*, km: float, raised_at: datetime) -> DeliveryEstimate:
     travel_hours = km / settings.avg_speed_kmh + settings.handling_hours
 
     # A request raised after the cutoff leaves the next morning; district
-    # stores do not load vehicles at night.
+    # stores do not load vehicles at night. `raised_at` must be local time
+    # (in_india): the cutoff is a local hour.
     start = raised_at.date()
     if raised_at.hour >= settings.dispatch_cutoff_hour:
         start += timedelta(days=1)
@@ -465,7 +474,30 @@ def delivery_estimate(*, km: float, raised_at: datetime) -> DeliveryEstimate:
         basis=STRAIGHT_LINE,
         label="estimate",
         assumptions=assumptions,
+        approve_by=datetime.combine(
+            start, time(settings.dispatch_cutoff_hour), tzinfo=raised_at.tzinfo
+        ),
     )
+
+
+def in_india(moment: datetime) -> datetime:
+    """A stored UTC time as the clock on a centre's wall reads it."""
+    return moment.astimezone(INDIA)
+
+
+def request_words(status: str, lapsed: bool, donor: str) -> str:
+    """A request's state as a pharmacist says it — never `proposed` or
+    `donor_facility` (fix list #31)."""
+    if status == "proposed":
+        return "No reply from {0}".format(donor) if lapsed else (
+            "Awaiting reply from {0} (pharmacist)".format(donor)
+        )
+    return {
+        "approved": "Accepted and sent by {0}".format(donor),
+        "rejected": "Declined by {0}".format(donor),
+        "cancelled": "Cancelled by this centre",
+        "completed": "Delivered from {0}".format(donor),
+    }.get(status, "Closed")
 
 
 # =========================================================== briefing ===
@@ -677,27 +709,96 @@ async def photo_documents(
     }
 
 
-async def open_request_counts(session: AsyncSession, facility_id: str) -> tuple[int, int]:
-    """(open requests for this facility, open requests everywhere).
+async def open_request_counts(
+    session: AsyncSession, facility_id: str, *, now: datetime | None = None
+) -> tuple[int, int]:
+    """(requests this facility is still waiting on, requests raised anywhere in
+    the last 24 hours).
 
-    Counts only `triggered_by = 'facility_request'`. The solver's own proposals
-    are not a pharmacist's queue and must not consume their allowance.
+    The first is the per-centre cap, and counts only live requests: one that
+    lapsed without a reply stops counting, which is what locked Nashik PHC 1
+    out when nothing ever expired (fix list #31). The second is the database
+    size guard, and counts every request raised in a rolling day whatever
+    became of it, so growth stays bounded at the cap a day and the guard frees
+    itself without anything having to write. Both count only
+    `triggered_by = 'facility_request'`: the solver's own proposals are not a
+    pharmacist's queue.
     """
+    now = now or datetime.now(timezone.utc)
+    live_since = now - request_window()
+    day_ago = now - timedelta(hours=24)
     row = (
         await session.execute(
             text(
                 """
                 SELECT
-                    count(*) FILTER (WHERE to_facility = :fid) AS here,
-                    count(*)                                   AS overall
+                    count(*) FILTER (
+                        WHERE to_facility = :fid AND status = 'proposed'
+                          AND created_at > :live_since
+                    ) AS here,
+                    count(*) FILTER (WHERE created_at > :day_ago) AS overall
                 FROM transfers
-                WHERE status = 'proposed' AND triggered_by = :tag
+                WHERE triggered_by = :tag AND created_at > :oldest
                 """
             ),
-            {"fid": facility_id, "tag": FACILITY_REQUEST},
+            {
+                "fid": facility_id,
+                "tag": FACILITY_REQUEST,
+                "live_since": live_since,
+                "day_ago": day_ago,
+                "oldest": min(live_since, day_ago),
+            },
         )
     ).first()
     return (int(row[0]), int(row[1])) if row else (0, 0)
+
+
+@dataclass(frozen=True)
+class OwnRequest:
+    """A request this centre raised, as its medicine card shows it."""
+
+    transfer_id: int
+    sku_code: str
+    qty: float
+    from_facility: str
+    from_name: str
+    status: str
+    lapsed: bool
+    words: str
+    created_at: datetime
+    lapses_at: datetime
+
+
+async def own_requests(
+    session: AsyncSession, facility_id: str, *, now: datetime | None = None
+) -> list[OwnRequest]:
+    """What this centre asked for in the last day, newest first. Bounded by the
+    centre, the request tag and the day."""
+    now = now or datetime.now(timezone.utc)
+    window = request_window()
+    rows = await session.execute(
+        text(
+            """
+            SELECT t.id, t.sku_code, t.qty, t.from_facility, f.name, t.status, t.created_at
+            FROM transfers t JOIN facilities f ON f.id = t.from_facility
+            WHERE t.to_facility = :fid AND t.triggered_by = :tag AND t.created_at > :since
+            ORDER BY t.created_at DESC
+            """
+        ),
+        {"fid": facility_id, "tag": FACILITY_REQUEST, "since": now - timedelta(hours=24)},
+    )
+    out: list[OwnRequest] = []
+    for tid, sku, qty, src, name, status, created in rows.all():
+        lapsed = status == "proposed" and request_lapsed(created, now, window)
+        out.append(
+            OwnRequest(
+                transfer_id=tid, sku_code=sku, qty=float(qty or 0), from_facility=src,
+                from_name=name, status=status, lapsed=lapsed,
+                words=request_words(status, lapsed, name), created_at=created,
+                lapses_at=created + window,
+            )
+        )
+    return out
 
 
 def briefing_rows_from_skus(skus: list[BriefingRow]) -> list[str]:

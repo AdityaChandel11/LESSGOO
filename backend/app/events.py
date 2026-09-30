@@ -31,6 +31,8 @@ TRANSFER_PROPOSED = "transfer.proposed"
 # Separate kind on purpose: the activity feed should say who started it.
 TRANSFER_REQUESTED = "transfer.requested"
 TRANSFER_DECIDED = "transfer.decided"
+# The centre that raised a request withdrew it before the donor replied.
+TRANSFER_CANCELLED = "transfer.cancelled"
 FEDERATION_ROUND = "federation.round"
 TRUST_FLAGGED = "trust.flagged"
 OUTBREAK_SIMULATED = "outbreak.simulated"

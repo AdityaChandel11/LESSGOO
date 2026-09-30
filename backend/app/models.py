@@ -38,7 +38,7 @@ USER_ROLES = ("admin", "state_officer", "block_mo", "facility_user")
 READING_SOURCES = (
     "form", "voice", "photo", "sms", "ivr", "whatsapp", "seed", "transfer",
 )
-TRANSFER_STATUSES = ("proposed", "approved", "rejected", "completed")
+TRANSFER_STATUSES = ("proposed", "approved", "rejected", "completed", "cancelled")
 # Settled states of a batch. "Overdue" is derived from expected_by when read,
 # never stored — see MedicineMovement.
 MOVEMENT_STATUSES = ("in_transit", "received", "short", "over", "cancelled")

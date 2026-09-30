@@ -442,6 +442,8 @@ export const api = {
     get<Transfer[]>(`/facilities/${encodeURIComponent(facilityId)}/incoming`),
   demoRequest: (facilityId: string) =>
     post<Transfer>(`/facilities/${encodeURIComponent(facilityId)}/demo-request`),
+  /** Withdraw a request this centre raised, before the donor replies (fix #31). */
+  cancelRequest: (transferId: number) => post<Transfer>(`/transfers/${transferId}/cancel`),
   outbreakAdvice: (state: string | null) => get<StockingAdvice[]>("/outbreaks/advice", { state }),
   outbreaks: (state: string | null) => get<Outbreaks>("/outbreaks", { state }),
   explainTrust: (facilityId: string) =>
@@ -647,11 +649,30 @@ export interface WorkspaceSku extends SkuStock {
   stockout_on: string | null;
 }
 
+/** A request this centre raised in the last day, as its medicine card shows it. */
+export interface OwnRequest {
+  transfer_id: number;
+  sku_code: string;
+  qty: number;
+  from_facility: string;
+  from_name: string;
+  status: string;
+  /** Waited past the reply window with no answer — derived, never stored. */
+  lapsed: boolean;
+  /** The status in words, e.g. "Declined by Nashik PHC 13". */
+  words: string;
+  created_at: string;
+  lapses_at: string;
+}
+
 export interface WorkspaceView {
   facility: FacilityDetail;
   skus: WorkspaceSku[];
+  /** Requests still waiting for a reply; lapsed ones do not count. */
   open_requests: number;
   max_open_requests: number;
+  /** Newest first. */
+  requests: OwnRequest[];
   /** Both languages of the computed line. Always present, needs no key, and is
    *  what the screen shows until somebody asks the model for its version. */
   briefing: Record<string, string>;
@@ -712,6 +733,12 @@ export interface StockRequest {
   estimated_delivery: string;
   estimate_label: string;
   assumptions: Record<string, number>;
+  /** The status in words — the screen never shows `status` or `approver_role` raw. */
+  status_words: string;
+  /** The approval the estimate depends on: the dispatch cutoff, India time. */
+  approve_by: string;
+  /** When the request lapses if nobody replies. */
+  lapses_at: string;
 }
 
 export type StockDocumentType = "delivery_slip" | "issue_record" | "stock_count" | "unknown";
@@ -894,7 +921,7 @@ export interface TransferRationale {
 
 export interface Transfer {
   id: number;
-  status: "proposed" | "approved" | "rejected" | "completed";
+  status: "proposed" | "approved" | "rejected" | "completed" | "cancelled";
   sku_code: string;
   sku_name: string;
   unit: string;

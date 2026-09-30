@@ -291,6 +291,7 @@ GUARDED = {
     "/transfers/plan",
     "/transfers/{transfer_id}/approve",
     "/transfers/{transfer_id}/reject",
+    "/transfers/{transfer_id}/cancel",
     "/facilities/{facility_id}/stock-photo",
     "/facilities/{facility_id}/demo-request",
     "/facilities/{facility_id}/requests",

@@ -76,11 +76,33 @@ class Promise:
 
 
 # Only the solver's own proposals are a re-plan's to replace. A centre's own
-# request (workspace.FACILITY_REQUEST), and anything of unknown origin, is work
+# request (FACILITY_REQUEST), and anything of unknown origin, is work
 # somebody is waiting on, and a re-plan leaves it alone (fix list #37).
 SOLVER_PROPOSAL = "threshold"
+# A transfer a pharmacist asked for. Written on insert and read by the caps,
+# the reply window and the sandbox cleanup, so it is spelled once, here.
+FACILITY_REQUEST = "facility_request"
 
 INDIA = timezone(timedelta(hours=5, minutes=30))
+
+
+def request_window() -> timedelta:
+    """How long a centre's request waits for the donor's reply (fix list #31)."""
+    if settings.demo_mode:
+        return timedelta(minutes=settings.demo_request_reply_minutes)
+    return timedelta(hours=settings.request_reply_hours)
+
+
+def request_lapsed(created_at: datetime, now: datetime, window: timedelta) -> bool:
+    """A request nobody answered in time. Derived, like a movement's
+    "overdue": nothing writes it, so nothing has to keep it true."""
+    return created_at + window <= now
+
+
+def lapsed_message(lapsed_at: datetime, requester: str) -> str:
+    return (
+        "This request lapsed at {0} (India time) with no reply. Ask {1} to send it again."
+    ).format(lapsed_at.astimezone(INDIA).strftime("%H:%M"), requester)
 
 
 def replaceable_on_replan(triggered_by: str | None) -> bool:
@@ -811,8 +833,19 @@ async def decide_transfer(
     )
     if t is None:
         return None
+    # Re-checked under the row lock, so a cancel or a lapse that lands while
+    # the donor is deciding wins (fix list #31).
+    if t.status == "cancelled":
+        raise TransferConflict("This request was cancelled by the centre that raised it.")
     if t.status != "proposed":
         raise TransferConflict(f"Transfer {transfer_id} was already {t.status}.")
+    if t.triggered_by == FACILITY_REQUEST:
+        window = request_window()
+        if request_lapsed(t.created_at, datetime.now(timezone.utc), window):
+            requester = await session.get(Facility, t.to_facility)
+            raise TransferConflict(
+                lapsed_message(t.created_at + window, requester.name if requester else "the centre")
+            )
 
     if decision == "approved":
         donor = await session.get(

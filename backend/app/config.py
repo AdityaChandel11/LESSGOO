@@ -240,6 +240,13 @@ class Settings(BaseSettings):
     # proposals can never consume a pharmacist's allowance.
     max_open_requests_per_facility: int = 3
     max_open_facility_requests_global: int = 100
+    # How long a centre's request waits for the donor's reply before it lapses
+    # (fix list #31). Derived at read time, never written: a lapsed request
+    # stops counting against the centre's cap and cannot be accepted. Half an
+    # hour in the public demo, so a judge's requests do not lock a centre out
+    # for the rest of the day.
+    request_reply_hours: float = 24.0
+    demo_request_reply_minutes: float = 30.0
     # A request raised after the cutoff leaves the next morning; district
     # stores do not load vehicles at night. Both are assumptions, returned to
     # the browser alongside every estimate and shown on screen as assumptions,

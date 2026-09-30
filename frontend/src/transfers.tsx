@@ -27,7 +27,7 @@ export interface Trip {
   km: number;
   etaHours: number;
   items: Transfer[];
-  status: "proposed" | "approved" | "rejected" | "mixed";
+  status: "proposed" | "approved" | "rejected" | "cancelled" | "mixed";
   urgent: boolean;
   worstDaysBefore: number;
 }
@@ -496,14 +496,21 @@ function TripCard({
               {t.status !== "proposed" && (
                 <div
                   className="text-[11px] font-medium"
-                  style={{ color: t.status === "rejected" ? "#7d858f" : STATUS_COLOR.healthy }}
+                  style={{
+                    color:
+                      t.status === "rejected" || t.status === "cancelled"
+                        ? "#7d858f"
+                        : STATUS_COLOR.healthy,
+                  }}
                 >
                   {/* Approval dispatches the batch; the recipient's stock only
                       rises when someone at the receiving end confirms it
                       arrived, and that pair is tracked under Movements. */}
                   {t.status === "rejected"
                     ? "Rejected"
-                    : "Approved · dispatched, awaiting confirmation"}
+                    : t.status === "cancelled"
+                      ? "Cancelled by the centre that asked for it"
+                      : "Approved · dispatched, awaiting confirmation"}
                 </div>
               )}
               {errors[t.id] && <div className="mt-0.5 text-[11px] text-crit">{errors[t.id]}</div>}

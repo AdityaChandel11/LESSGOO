@@ -17,6 +17,8 @@
 import { useCallback, useEffect, useState } from "react";
 
 import {
+  ApiError,
+  type OwnRequest,
   type ProvenanceKind,
   type Supply,
   type WorkspaceSku,
@@ -60,13 +62,93 @@ function longDate(iso: string): string {
   });
 }
 
+/** "12 min ago", "3 h ago" — how long a request has been waiting. */
+function waited(iso: string): string {
+  const minutes = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  if (minutes < 60) return `${minutes} min ago`;
+  return `${Math.round(minutes / 60)} h ago`;
+}
+
+function clock(iso: string): string {
+  return new Date(iso).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+}
+
+/**
+ * This centre's own request for the medicine, while it waits and after
+ * (fix list #31). A request still waiting replaces "Find supply" — asking a
+ * second donor for the same shortfall is refused anyway — and can be
+ * cancelled here. One that closed says how, in words.
+ */
+function RequestChip({
+  r,
+  unit,
+  onCancel,
+}: {
+  r: OwnRequest;
+  unit: string;
+  onCancel: (r: OwnRequest) => Promise<void>;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const live = r.status === "proposed" && !r.lapsed;
+  return (
+    <div className="border-t border-line px-3.5 py-2.5">
+      <p className="text-[12.5px] leading-snug text-ink">
+        <span className="font-medium">
+          Requested {Math.round(r.qty).toLocaleString("en-IN")} {unit} from {r.from_name}
+        </span>
+        <span className="text-ink-2">
+          {" "}· {live ? `awaiting reply · sent ${waited(r.created_at)}` : r.words}
+        </span>
+      </p>
+      {live ? (
+        <div className="mt-1.5 flex items-center justify-between gap-2">
+          <span className="text-[11px] text-ink-3">
+            Lapses at {clock(r.lapses_at)} if {r.from_name} does not reply.
+          </span>
+          <button
+            onClick={async () => {
+              setBusy(true);
+              setErr(null);
+              try {
+                await onCancel(r);
+              } catch (e) {
+                setErr(e instanceof ApiError ? e.message : String(e));
+              } finally {
+                setBusy(false);
+              }
+            }}
+            disabled={busy}
+            className="min-h-9 shrink-0 rounded-md border border-line px-2.5 text-[12px] font-medium text-ink-2 hover:border-crit hover:text-crit disabled:opacity-50"
+          >
+            {busy ? "Cancelling…" : "Cancel request"}
+          </button>
+        </div>
+      ) : (
+        r.lapsed && (
+          <p className="mt-0.5 text-[11px] text-ink-3">
+            No reply by {clock(r.lapses_at)}. You can ask another centre.
+          </p>
+        )
+      )}
+      {err && <p role="alert" className="mt-1 text-[11.5px] text-crit">{err}</p>}
+    </div>
+  );
+}
+
 function MedicineCard({
   s,
+  request,
   onFindSupply,
+  onCancel,
 }: {
   s: WorkspaceSku;
+  /** This centre's latest request for the medicine in the last day, if any. */
+  request: OwnRequest | undefined;
   onFindSupply: (s: WorkspaceSku) => void;
+  onCancel: (r: OwnRequest) => Promise<void>;
 }) {
+  const waiting = !!request && request.status === "proposed" && !request.lapsed;
   const style = STATUS_STYLE[s.status] ?? STATUS_STYLE.healthy;
   const short = s.status === "critical" || s.status === "at_risk";
   // The rule that produced days-of-cover changes what the date means, so it is
@@ -136,7 +218,8 @@ function MedicineCard({
         </div>
       </dl>
 
-      {short && (
+      {request && <RequestChip r={request} unit={s.unit} onCancel={onCancel} />}
+      {short && !waiting && (
         <div className="border-t border-line px-3.5 py-2.5">
           <button
             onClick={() => onFindSupply(s)}
@@ -199,6 +282,13 @@ export default function Medicines({
   }
 
   const trust = view.facility.trust_score;
+  // Newest first from the server, so the first match is the latest request.
+  const requestFor = (code: string) => view.requests.find((r) => r.sku_code === code);
+  // Errors stay on the chip that raised them (RequestChip); success reloads.
+  const cancel = async (r: OwnRequest) => {
+    await api.cancelRequest(r.transfer_id);
+    onChanged();
+  };
 
   return (
     <>
@@ -251,14 +341,19 @@ export default function Medicines({
             : "Not enough history at this centre to compute a confidence score yet."}
         </p>
         <p className="mt-1.5 text-[11.5px] text-ink-3">
-          {view.open_requests} of {view.max_open_requests} stock requests open
+          {view.open_requests} of {view.max_open_requests} stock requests waiting for a reply
         </p>
       </section>
 
       <ul className="flex flex-col gap-3">
         {view.skus.map((s) => (
           <li key={s.sku_code}>
-            <MedicineCard s={s} onFindSupply={openSupply} />
+            <MedicineCard
+              s={s}
+              request={requestFor(s.sku_code)}
+              onFindSupply={openSupply}
+              onCancel={cancel}
+            />
           </li>
         ))}
       </ul>

@@ -398,11 +398,14 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
   const routes: RouteLine[] = useMemo(() => {
     if (mode !== "transfers") return [];
     const scoped = sku ? transfers.filter((t) => t.sku_code === sku) : transfers;
-    return groupTrips(scoped.filter((t) => t.status !== "rejected")).map((trip) => ({
+    // Nothing moves on a declined or withdrawn request, so neither is a route.
+    const moving = scoped.filter((t) => t.status !== "rejected" && t.status !== "cancelled");
+    return groupTrips(moving).map((trip) => ({
       id: trip.id,
       from: [trip.from.lat, trip.from.lng],
       to: [trip.to.lat, trip.to.lng],
-      status: trip.status === "rejected" ? "proposed" : trip.status,
+      status:
+        trip.status === "rejected" || trip.status === "cancelled" ? "proposed" : trip.status,
       urgent: trip.urgent,
       label: `${trip.from.name} → ${trip.to.name} · ${trip.items.length} medicine${trip.items.length > 1 ? "s" : ""}`,
     }));
