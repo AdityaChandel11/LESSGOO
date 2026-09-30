@@ -297,7 +297,7 @@ Named people ("Pharmacist Rao", "ANM Sunita"), "Play recording" (none exist), em
 badges, "Add as new medicine" from a photo (catalogue pollution, controlled SKUs),
 bounding boxes (#12b cut), refusing negative stock silently.
 
-### Fix #11 — Document-type bug  · APPROVED · P0 · do FIRST · status: TODO
+### Fix #11 — Document-type bug  · APPROVED · P0 · do FIRST · status: DONE f26b8ac
 1. Gemini returns `document_type` (delivery slip / issue-dispensing record / stock count)
    and `unit` per line. Server: slip **adds**, issue **subtracts**, count **sets**.
 2. Slip rule (no double-count):
@@ -467,7 +467,7 @@ In-app "Act as donor" switch (impersonation in auth); auto-responding simulated 
 background timeout job (CLAUDE.md forbids background writers); district store as a donor
 (warehouse stock not modelled — would be invented).
 
-#### Fix #31 — Request basics  · APPROVED · P0 (Tier 0) · status: TODO
+#### Fix #31 — Request basics  · APPROVED · P0 (Tier 0) · status: DONE 895b2a7
 1. **Derived timeout:** a `proposed` request older than a window (configurable; minutes in
    demo mode) reads as **"No response"** — computed at read time like movement "overdue";
    nothing written. The cap counts only live (unexpired) requests → unlocks PHC 1.
@@ -636,7 +636,7 @@ Aditya's direction: higher authorities should not be a gate on routine trips.
 Officer/admin "Approve trip" on routine trips is removed (consistency). Kept: controlled-
 substance manual queue; the labelled sandbox drill where an officer acts for the donor.
 
-### Fix #37 — Re-plan must not destroy work  · Tier 0 · status: TODO
+### Fix #37 — Re-plan must not destroy work  · Tier 0 · status: DONE ff742b0
 `generate_plan` never deletes `facility_request` transfers, nor solver proposals a donor has
 already opened/decided; solver subtracts stock already promised to open requests. Donor sees
 "This recommendation was updated at <time>" if one is replaced. Regression tests.
@@ -860,7 +860,7 @@ source such as Rural Health Statistics, or omit).
   its registered handsets") + a footer feed of this session's reports. Nothing says these are
   messages *centres send in*; an officer "sending" reports makes no sense.
 
-### Fix #74 — Only the centre itself reports facts about the centre  · Tier 0 · status: TODO
+### Fix #74 — Only the centre itself reports facts about the centre  · Tier 0 · status: DONE 1503640
 Receipt confirmation, stock readings, **staff check-ins** and **ward/bed reports** only by users of
 that facility or its registered handsets. Live audit: the officer facility panel offers "Check in from
 the facility" / "Check in by phone call" (proxy attendance — exactly what attendance checks exist to
@@ -898,7 +898,7 @@ are simulated in this prototype; in deployment they come from the state's e-Aush
    trust score before → after in both views via events.
 4. Evidence thresholds from #60.
 
-### Fix #79 — "Send test report" must not paint real centres red  · Tier 0 · status: TODO
+### Fix #79 — "Send test report" must not paint real centres red  · Tier 0 · status: DONE cbc8011 (code; Render repair still needs Aditya's OK)
 Remove it from the officer console, or confine it to the Nashik sandbox with a label ("Demo: sends
 a low ORS count from a Nashik centre"). Never pick a healthy centre elsewhere in India to make it
 critical. Check what's already been written on Render (e.g. Port Blair PHC 1 ORS 4) — repair only
@@ -980,7 +980,7 @@ training-state centre shows "from the shared model's forecast". Show forecast ag
 ("forecast published 29 Sept"). Decide how it stays fresh without a scheduler: manual before judging,
 or check-on-use like #57. Record dashboard % before/after.
 
-### Fix #82 — Public demo roles can't vandalise the database  · Tier 0 · status: TODO
+### Fix #82 — Public demo roles can't vandalise the database  · Tier 0 · status: DONE 4043656 + 7da99ee
 Outside the Nashik sandbox, demo roles are read-only for heavy/destructive actions (Re-run plan,
 test reports, proxy writes); inside it they work, labelled. Rate-limit plan runs (one per state per N
 minutes). The global request cap stays. Tests for each blocked action.
@@ -1046,7 +1046,7 @@ requests answered, trust flags visited, bed and staff availability. Labelled syn
 A whole-UI English/हिंदी switch (the briefing already has one); state language for the demo district
 (Marathi) on the PHC workspace. Scores on "Depth & reach across India".
 
-### Fix #96 — Refresh the always-loaded status lines  · Tier 0 · docs · FIRST · NEEDS ADITYA'S OK · status: TODO
+### Fix #96 — Refresh the always-loaded status lines  · Tier 0 · docs · FIRST · NEEDS ADITYA'S OK · status: DONE de675a4
 CLAUDE.md says "`main` is at `542d8dc`" and that Phase C/D code "was deliberately removed"; SPEC_DIGEST
 §5 says the same. On 2026-09-29 `main` is `e09fb0c` and `app/ingest.py`, `frontend/src/field.tsx`,
 `app/idsp.py` (IDSP outbreaks), the PHC workspace and the live loop all exist. A fresh session loads
@@ -1254,7 +1254,7 @@ Stale bed reports/codes: include in #30's roll-forward.
 
 ## CARRIED OVER — raised earlier in the brainstorm, not yet elsewhere in this file
 
-### Fix #53 — Live link survives a judge's first click  · Tier 0 check · status: TODO
+### Fix #53 — Live link survives a judge's first click  · Tier 0 check · status: DONE 8318c2b (checked; avoiding the cold start is Aditya's call)
 Render free web services sleep when idle → first click can hit a long cold start. Verify the
 plan and cold-start time; document the wake-up in the demo script (#36). Pair with the DB
 30-day deletion date (blocked on Aditya).
