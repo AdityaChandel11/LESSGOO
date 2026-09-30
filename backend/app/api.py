@@ -894,6 +894,9 @@ class WorkspaceSkuOut(SkuStockOut):
     last_receipt: LastReceiptOut | None
     provenance: ProvenanceOut
     stockout_on: date | None
+    # days_of_stock and status above are as of now, not as of the count
+    # (fix #26); past the run-out date the shelf is overdue for a count.
+    count_overdue: bool = False
 
 
 class OwnRequestOut(BaseModel):
@@ -1042,13 +1045,19 @@ async def facility_workspace(
         prov = workspace.provenance(
             s.last_source, s.last_reported_at, receipt, now, document=documents.get(s.sku_code)
         )
+        cover = workspace.cover_now(
+            s.days_of_stock, s.last_reported_at, s.status, now, snap.warning_multiplier
+        )
         rows.append(
             WorkspaceSkuOut(
-                **vars(s),
+                **{**vars(s), "days_of_stock": cover.days_of_stock, "status": cover.status},
                 unit=units.get(s.sku_code, "unit"),
                 last_receipt=LastReceiptOut(**vars(receipt)) if receipt else None,
                 provenance=ProvenanceOut(**vars(prov)),
+                # The run-out day is fixed by the count, so it comes from the
+                # stored cover, not the countdown.
                 stockout_on=workspace.stockout_date(s.days_of_stock, s.last_reported_at),
+                count_overdue=cover.count_overdue,
             )
         )
 
@@ -1060,7 +1069,9 @@ async def facility_workspace(
         requests=[
             OwnRequestOut(**vars(r)) for r in await workspace.own_requests(session, facility.id)
         ],
-        briefing=workspace.rules_briefing(_briefing_rows(snap.skus, units)),
+        briefing=workspace.rules_briefing(
+            _briefing_rows(snap.skus, units, now, snap.warning_multiplier)
+        ),
     )
 
 
@@ -1086,17 +1097,39 @@ class BriefingOut(BaseModel):
     note: str | None = None
 
 
-def _briefing_rows(skus: list[services.SkuStock], units: dict[str, str]) -> list[workspace.BriefingRow]:
-    return [
-        workspace.BriefingRow(
-            sku_name=s.sku_name,
-            unit=units.get(s.sku_code, "unit"),
-            qty=s.qty_on_hand,
-            days_of_stock=s.days_of_stock,
-            status=s.status,
+def _briefing_rows(
+    skus: list[services.SkuStock],
+    units: dict[str, str],
+    now: datetime,
+    warning_multiplier: float,
+) -> list[workspace.BriefingRow]:
+    """The Today card's rows, on the same as-of-now cover as the medicine
+    cards beside it (fix #26)."""
+    rows = []
+    for s in skus:
+        cover = workspace.cover_now(
+            s.days_of_stock, s.last_reported_at, s.status, now, warning_multiplier
         )
-        for s in skus
-    ]
+        rows.append(
+            workspace.BriefingRow(
+                sku_name=s.sku_name,
+                unit=units.get(s.sku_code, "unit"),
+                qty=s.qty_on_hand,
+                days_of_stock=cover.days_of_stock,
+                status=cover.status,
+                last_counted_on=(
+                    s.last_reported_at.date()
+                    if cover.count_overdue and s.last_reported_at
+                    else None
+                ),
+                ran_out_on=(
+                    workspace.stockout_date(s.days_of_stock, s.last_reported_at)
+                    if cover.count_overdue
+                    else None
+                ),
+            )
+        )
+    return rows
 
 
 @router.post(
@@ -1126,7 +1159,9 @@ async def facility_briefing(
     units = {
         row.code: row.unit for row in (await session.execute(select(Sku))).scalars().all()
     }
-    rows = _briefing_rows(snaps[0].skus, units)
+    rows = _briefing_rows(
+        snaps[0].skus, units, datetime.now(timezone.utc), snaps[0].warning_multiplier
+    )
     fallback = workspace.rules_briefing(rows)
     inputs_hash = workspace.briefing_hash(rows)
 

@@ -657,13 +657,17 @@ export interface Provenance {
   detail: string;
 }
 
-export interface WorkspaceSku extends SkuStock {
+export interface WorkspaceSku extends Omit<SkuStock, "status"> {
+  /** As of now (fix #26), so it can also be "count_overdue". */
+  status: Status | "count_overdue";
   /** Sachets, ampoules, blisters — a quantity on a phone needs its unit beside it. */
   unit: string;
   last_receipt: LastReceipt | null;
   provenance: Provenance;
   /** Absent when there is no burn rate: the system does not guess a date. */
   stockout_on: string | null;
+  /** Past the run-out date since the last count (fix #26): status is "count_overdue". */
+  count_overdue: boolean;
 }
 
 /** A request this centre raised in the last day, as its medicine card shows it. */

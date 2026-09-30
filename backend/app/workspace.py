@@ -37,6 +37,7 @@ from typing import Literal
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from . import services
 from .config import settings
 from .models import FacilityBriefing
 from .redistribution import (
@@ -270,6 +271,50 @@ def stockout_date(
     if days_of_stock is None or last_reported_at is None:
         return None
     return (last_reported_at + timedelta(days=days_of_stock)).date()
+
+
+# ================================================== cover, as of now ===
+# Stored cover is measured at the last count; the clock never moved it, so a
+# card could say "5.4 days, at risk, runs out today" (fix #26). The countdown
+# is applied where the card is built, never written back to stored rows.
+
+COUNT_OVERDUE = "count_overdue"
+
+
+@dataclass(frozen=True)
+class Cover:
+    days_of_stock: float | None
+    status: str
+    count_overdue: bool
+
+
+def cover_now(
+    days_of_stock: float | None,
+    last_reported_at: datetime | None,
+    status: str,
+    now: datetime,
+    warning_multiplier: float = 1.0,
+) -> Cover:
+    """Stored cover minus the days since the count (floor 0), reclassified.
+
+    Past the projected run-out the shelf is "count overdue": its real level is
+    unknown and probably empty, and the honest instruction is to count it.
+    """
+    if days_of_stock is None or last_reported_at is None:
+        return Cover(days_of_stock, status, False)
+    elapsed = max(0.0, (now - last_reported_at).total_seconds() / 86400.0)
+    left = days_of_stock - elapsed
+    if left <= 0:
+        return Cover(0.0, COUNT_OVERDUE, True)
+    return Cover(left, services.classify(left, warning_multiplier), False)
+
+
+MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "June", "July", "Aug", "Sept", "Oct", "Nov", "Dec")
+
+
+def day_words(d: date) -> str:
+    """24 Sept — the way the cards and the fix list write a date."""
+    return "{0} {1}".format(d.day, MONTHS[d.month - 1])
 
 
 # ========================================================= find supply ===
@@ -522,6 +567,10 @@ class BriefingRow:
     qty: float
     days_of_stock: float | None
     status: str
+    # Set when the count is overdue (fix #26): the count's date, and the day
+    # the shelf would have run out at the usual use.
+    last_counted_on: date | None = None
+    ran_out_on: date | None = None
 
 
 def _worst(rows: list[BriefingRow]) -> BriefingRow | None:
@@ -551,6 +600,31 @@ def rules_briefing(rows: list[BriefingRow]) -> dict[str, str]:
                   "nothing to act on. Report today's counts to start.",
             "hi": "इस केंद्र के लिए अभी तक कोई स्टॉक दर्ज नहीं हुआ है। आज की "
                   "गिनती दर्ज करें।",
+        }
+
+    overdue = [r for r in rows if r.status == COUNT_OVERDUE]
+    if overdue:
+        first = min(overdue, key=lambda r: r.ran_out_on or date.max)
+        others = len(overdue) - 1
+        counted = day_words(first.last_counted_on) if first.last_counted_on else "an earlier day"
+        ran_out = day_words(first.ran_out_on) if first.ran_out_on else "before today"
+        tail_en = (
+            " {0} other medicine{1} also overdue for a count.".format(
+                others, " is" if others == 1 else "s are"
+            )
+            if others > 0
+            else ""
+        )
+        tail_hi = " {0} और दवाओं की गिनती भी बाकी है।".format(others) if others > 0 else ""
+        return {
+            "en": "Count the {0} shelf today — last counted {1:,.0f} {2} on {3}; at your "
+                  "usual use it would have run out around {4}.{5}".format(
+                      first.sku_name, first.qty, first.unit, counted, ran_out, tail_en
+                  ),
+            "hi": "{0} की अलमारी आज गिनें — आखिरी गिनती {3} को {1:,.0f} {2} थी; सामान्य "
+                  "खपत पर यह लगभग {4} तक खत्म हो गई होगी।{5}".format(
+                      first.sku_name, first.qty, first.unit, counted, ran_out, tail_hi
+                  ),
         }
 
     worst = _worst(rows)
@@ -818,6 +892,16 @@ def briefing_rows_from_skus(skus: list[BriefingRow]) -> list[str]:
     )
     lines = []
     for r in ranked[:BRIEFING_MAX_ROWS]:
+        if r.status == COUNT_OVERDUE:
+            lines.append(
+                "- {0}: last counted {1:,.0f} {2} on {3}, count overdue (would have run "
+                "out around {4} at usual use)".format(
+                    r.sku_name, r.qty, r.unit,
+                    day_words(r.last_counted_on) if r.last_counted_on else "an earlier day",
+                    day_words(r.ran_out_on) if r.ran_out_on else "before today",
+                )
+            )
+            continue
         cover = (
             "no cover estimate yet"
             if r.days_of_stock is None
@@ -831,7 +915,7 @@ def briefing_rows_from_skus(skus: list[BriefingRow]) -> list[str]:
     return lines
 
 
-STATUS_ORDER_FOR_BRIEFING = {"critical": 0, "at_risk": 1, "healthy": 2}
+STATUS_ORDER_FOR_BRIEFING = {COUNT_OVERDUE: -1, "critical": 0, "at_risk": 1, "healthy": 2}
 BRIEFING_MAX_ROWS = 6
 
 

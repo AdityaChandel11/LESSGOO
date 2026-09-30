@@ -37,6 +37,9 @@ const STATUS_STYLE: Record<string, { dot: string; text: string; label: string }>
   critical: { dot: "bg-crit", text: "text-crit", label: "Critical" },
   at_risk: { dot: "bg-risk", text: "text-risk", label: "At risk" },
   healthy: { dot: "bg-ok", text: "text-ok", label: "Healthy" },
+  // Past the run-out date since the last count (fix #26): the real level is
+  // unknown, so the card asks for a count rather than showing a colour.
+  count_overdue: { dot: "bg-ink-2", text: "text-ink", label: "Count overdue" },
 };
 
 const PROVENANCE_LABEL: Record<ProvenanceKind, string> = {
@@ -185,14 +188,22 @@ function MedicineCard({
         <div className="flex items-baseline justify-between gap-3 px-3.5 py-2.5">
           <dt className="text-[12px] text-ink-2">{both("daysOfCover")}</dt>
           <dd className="text-right text-[12.5px] font-medium text-ink">
-            {formatDays(s.days_of_stock)}
+            {s.count_overdue ? both("countOverdue") : formatDays(s.days_of_stock)}
           </dd>
         </div>
 
         <div className="px-3.5 py-2.5">
           <dt className="text-[12px] text-ink-2">{both("runsOut")}</dt>
           <dd className="mt-0.5 text-[12.5px] text-ink">
-            {s.stockout_on ? (
+            {s.count_overdue && s.stockout_on && s.last_reported_at ? (
+              // As of now, not as of the count (fix #26).
+              <>
+                Last counted {Math.round(s.qty_on_hand).toLocaleString("en-IN")} {s.unit} on{" "}
+                {longDate(s.last_reported_at)}. At your usual use it would have run out around{" "}
+                <span className="font-medium">{longDate(s.stockout_on)}</span>.{" "}
+                <span className="font-medium">{both("countTheShelf")}.</span>
+              </>
+            ) : s.stockout_on ? (
               <>
                 <span className="font-medium">{longDate(s.stockout_on)}</span>
                 <span className="text-ink-3"> — {rule}</span>
