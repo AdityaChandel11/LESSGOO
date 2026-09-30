@@ -13,20 +13,30 @@
  * that out is the small rudeness that loses the first thirty seconds.
  */
 
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 
 import DataNotice from "./DataNotice";
-import { ApiError, type DemoAccount, ROLE_LABEL, type Session, auth } from "./api";
+import {
+  ApiError,
+  type DemoAccount,
+  ROLE_LABEL,
+  ROLE_LABEL_HI,
+  type Session,
+  auth,
+} from "./api";
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 export default function SignInPanel({
   onSignedIn,
   showNotice = true,
+  demoGuide,
 }: {
   onSignedIn: (s: Session) => void;
   /** The front door carries its own notice in the footer; the bare page does not. */
   showNotice?: boolean;
+  /** Shown under the demo cards, only when there are demo cards (the front door's script). */
+  demoGuide?: ReactNode;
 }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -100,12 +110,21 @@ export default function SignInPanel({
                 >
                   <span className="min-w-0">
                     <span className="block text-[13.5px] font-medium text-ink">
-                      {ROLE_LABEL[a.role]}
+                      {ROLE_LABEL[a.role]}{" "}
+                      <span lang="hi" className="font-normal text-ink-3">
+                        · {ROLE_LABEL_HI[a.role]}
+                      </span>{" "}
+                      <span className="text-[11.5px] font-normal text-ink-3">(demo role)</span>
                     </span>
                     <span className="block truncate text-[12px] text-ink-3">
                       {a.name}
                       {a.role !== "admin" && a.role !== "facility_user" ? ` · ${a.scope}` : ""}
                     </span>
+                    {a.sees && (
+                      <span className="mt-0.5 block text-[12px] leading-snug text-ink-2">
+                        {a.sees}
+                      </span>
+                    )}
                   </span>
                   <span className="shrink-0 text-[12.5px] font-medium text-brand">
                     {demoBusy === a.email ? "Opening…" : "Continue →"}
@@ -114,6 +133,7 @@ export default function SignInPanel({
               </li>
             ))}
           </ul>
+          {demoGuide}
           <div className="mt-8 flex items-center gap-3 text-[11.5px] text-ink-3">
             <span className="h-px flex-1 bg-line" />
             or sign in with an account

@@ -38,6 +38,9 @@ from .geo import STATE_BY_CODE
 from .models import LoginFailure, User
 
 DEMO_EMAIL_DOMAIN = "@demo.swasthsetu.in"
+# The neighbouring centre's pharmacist, so a request can be shown from both
+# ends in two windows (fix list #36). Created by `scripts.users demo`.
+DEMO_DONOR_EMAIL = "donor.pharmacist" + DEMO_EMAIL_DOMAIN
 
 _hasher = PasswordHash.recommended()
 # Verified against when the email is unknown, so a failed sign-in takes the
@@ -505,6 +508,34 @@ class DemoAccountOut(BaseModel):
     name: str
     role: str
     scope: str
+    # What you will see behind this card, in a line (fix list #72).
+    sees: str = ""
+
+
+_DEMO_ROLE_ORDER = {"admin": 0, "state_officer": 1, "block_mo": 2, "facility_user": 3}
+
+
+def demo_account_order(u) -> tuple:
+    """Admin, state, district, then the pharmacist before the donor centre."""
+    return (_DEMO_ROLE_ORDER.get(u.role, 9), u.email == DEMO_DONOR_EMAIL, u.name)
+
+
+def demo_account_sees(
+    *, role: str, email: str, name: str, state: str | None, district: str | None
+) -> str:
+    """One line on a demo role card: what that person sees, not who they are."""
+    if role == "admin":
+        return "Every state: federation, outbreaks, redistribution oversight, data trust"
+    if role == "state_officer":
+        s = STATE_BY_CODE.get(state or "")
+        return "{0}: recommendations, outbreak warnings, which centres to visit".format(
+            s.name if s else state
+        )
+    if role == "block_mo":
+        return "{0}: its centres, deliveries in transit, spot checks".format(district)
+    if email == DEMO_DONOR_EMAIL:
+        return "The neighbouring centre, for the two-screen demo: answers requests for its stock"
+    return "Demo PHC interface: stock, orders, beds and attendance on a phone-style screen"
 
 
 class DemoLoginIn(BaseModel):
@@ -519,21 +550,25 @@ def _require_demo() -> None:
 @router.get("/demo-accounts", response_model=list[DemoAccountOut])
 async def demo_accounts(session: AsyncSession = Depends(get_session)) -> list[DemoAccountOut]:
     _require_demo()
-    order = {"admin": 0, "state_officer": 1, "block_mo": 2, "facility_user": 3}
     users = (
         await session.execute(
             select(User).where(User.email.like(f"%{DEMO_EMAIL_DOMAIN}"), User.is_active.is_(True))
         )
     ).scalars().all()
     out = []
-    for u in sorted(users, key=lambda u: order.get(u.role, 9)):
+    for u in sorted(users, key=demo_account_order):
         scope = (
             "All of India" if u.role == "admin"
             else u.state_silo if u.role == "state_officer"
             else f"{u.district}, {u.state_silo}" if u.role == "block_mo"
             else u.facility_id or ""
         )
-        out.append(DemoAccountOut(email=u.email, name=u.name, role=u.role, scope=scope or ""))
+        sees = demo_account_sees(
+            role=u.role, email=u.email, name=u.name, state=u.state_silo, district=u.district
+        )
+        out.append(
+            DemoAccountOut(email=u.email, name=u.name, role=u.role, scope=scope or "", sees=sees)
+        )
     return out
 
 

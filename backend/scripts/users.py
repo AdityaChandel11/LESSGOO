@@ -14,7 +14,8 @@ so deploy automation never puts it on a command line or in shell history):
 
     python -m scripts.users deactivate --email someone@example.org
 
-Demo accounts, one per role (only while DEMO_MODE is on):
+Demo accounts, one per role, plus the neighbouring centre's pharmacist for
+the two-screen request demo (only while DEMO_MODE is on):
 
     python -m scripts.users demo
 """
@@ -30,7 +31,7 @@ import sys
 
 from sqlalchemy import select
 
-from app.auth import MIN_PASSWORD_LENGTH, hash_password
+from app.auth import DEMO_DONOR_EMAIL, MIN_PASSWORD_LENGTH, hash_password
 from app.config import settings
 from app.db import SessionLocal
 from app.geo import STATE_BY_CODE
@@ -166,17 +167,14 @@ async def cmd_deactivate(args: argparse.Namespace) -> None:
     print(f"Deactivated {args.email}. Existing sessions stop working on their next request.")
 
 
-async def cmd_demo(args: argparse.Namespace) -> None:
-    if not settings.demo_mode:
-        raise SystemExit("Demo accounts are only created while DEMO_MODE is on.")
-    async with SessionLocal() as session:
-        facility = await session.scalar(
-            select(Facility).where(Facility.state_silo == "MH", Facility.district == "Nashik").limit(1)
-        )
-    if facility is None:
-        raise SystemExit("Seed facility data first (python -m scripts.seed).")
+# The neighbouring centre for the two-screen request demo (fix list #36),
+# found by name because facility ids differ between databases.
+DONOR_CENTRE_NAME = "Nashik PHC 13"
 
-    password = args.password or os.environ.get("DEMO_PASSWORD") or secrets.token_urlsafe(12)
+
+def demo_account_specs(facility, donor) -> list[dict]:
+    """One demo account per role, plus the donor centre's pharmacist when the
+    database has a second Nashik centre to give it."""
     accounts = [
         dict(email="admin@demo.swasthsetu.in", name="Platform Admin", role="admin"),
         dict(email="mh.officer@demo.swasthsetu.in", name="Maharashtra NHM Officer",
@@ -186,10 +184,39 @@ async def cmd_demo(args: argparse.Namespace) -> None:
         dict(email="pharmacist@demo.swasthsetu.in", name=f"Pharmacist, {facility.name}",
              role="facility_user", facility=facility.id),
     ]
+    if donor is not None and donor.id != facility.id:
+        accounts.append(
+            dict(email=DEMO_DONOR_EMAIL, name=f"Pharmacist, {donor.name}",
+                 role="facility_user", facility=donor.id)
+        )
+    return accounts
+
+
+async def cmd_demo(args: argparse.Namespace) -> None:
+    if not settings.demo_mode:
+        raise SystemExit("Demo accounts are only created while DEMO_MODE is on.")
+    async with SessionLocal() as session:
+        facility = await session.scalar(
+            select(Facility).where(Facility.state_silo == "MH", Facility.district == "Nashik").limit(1)
+        )
+        donor = await session.scalar(
+            select(Facility).where(
+                Facility.state_silo == "MH",
+                Facility.district == "Nashik",
+                Facility.name == DONOR_CENTRE_NAME,
+            )
+        )
+    if facility is None:
+        raise SystemExit("Seed facility data first (python -m scripts.seed).")
+
+    password = args.password or os.environ.get("DEMO_PASSWORD") or secrets.token_urlsafe(12)
+    accounts = demo_account_specs(facility, donor)
     for a in accounts:
         user, created = await upsert_user(password=password, **a)
-        print(f"  {'created' if created else 'updated'}  {user.email:34} {user.role}")
-    print(f"\nDemo password for all four: {password}")
+        print(f"  {'created' if created else 'updated'}  {user.email:38} {user.role}")
+    if len(accounts) == 4:
+        print(f"  skipped  {DEMO_DONOR_EMAIL:38} no '{DONOR_CENTRE_NAME}' in this database")
+    print(f"\nDemo password for all {len(accounts)}: {password}")
 
 
 def main() -> None:

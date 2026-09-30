@@ -265,7 +265,17 @@ export interface DemoAccount {
   name: string;
   role: Role;
   scope: string;
+  /** What you will see behind this card, in a line. */
+  sees?: string;
 }
+
+/** Hindi beside the English role titles on the demo cards. */
+export const ROLE_LABEL_HI: Record<Role, string> = {
+  admin: "प्रशासक",
+  state_officer: "राज्य अधिकारी",
+  block_mo: "ज़िला अधिकारी",
+  facility_user: "स्वास्थ्य केंद्र कर्मी",
+};
 
 export const auth = {
   me: () => get<Session>("/auth/me"),
