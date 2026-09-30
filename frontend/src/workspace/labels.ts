@@ -50,6 +50,14 @@ export const L = {
   randomChecks: ["Random verification", "आकस्मिक जाँच"],
   onlyYou: ["Only you can see this page.", "यह पृष्ठ केवल आप देख सकते हैं।"],
 
+  // Field simulator (fix list #24)
+  openFieldSimulator: ["Open the field simulator", "फ़ील्ड सिम्युलेटर खोलें"],
+  fieldSimulator: ["Field simulator", "फ़ील्ड सिम्युलेटर"],
+  backToMedicines: ["Back to medicines", "दवाइयों पर वापस"],
+  sentToMap: ["Sent to the district map", "ज़िला नक्शे पर भेजा गया"],
+  rowWritten: ["Row written", "दर्ज रिकॉर्ड"],
+  statusWas: ["Status", "स्थिति"],
+
   // Beds
   bedsOccupied: ["Beds occupied", "भरे हुए बिस्तर"],
   bedsFree: ["Beds free", "खाली बिस्तर"],

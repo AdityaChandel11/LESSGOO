@@ -950,6 +950,28 @@ def _require_facts(user: Principal, facility: Facility) -> None:
         )
 
 
+def _require_own_handset(user: Principal, owner: Facility) -> None:
+    """Sending as a registered handset is stating its centre's facts, so the
+    same rule decides it (auth.can_report_facts; fix list #24). The refusal
+    never names the centre that owns the number: a 403 must not become a way
+    to look up whose number something is."""
+    _require_demo_write(user, owner)
+    if not can_report_facts(
+        user,
+        facility_id=owner.id,
+        facility_state=owner.state_silo,
+        facility_district=owner.district,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Messages can be sent only as a handset registered to your own centre: "
+                "a handset reports its centre's stock, deliveries, check-ins and beds, "
+                "and only the centre can state them."
+            ),
+        )
+
+
 async def _facility_in_scope(
     session: AsyncSession, facility_id: str, user: Principal
 ) -> Facility:
@@ -2950,6 +2972,12 @@ class SimulatedReadingOut(BaseModel):
     qty: float
     days_of_stock: float | None
     status: str | None
+    # The loop, closed where the sender can see it (fix list #24): the row
+    # written, and what the district map showed for this medicine before it.
+    reading_id: int | None = None
+    qty_before: float | None = None
+    days_before: float | None = None
+    status_before: str | None = None
 
 
 class SimulateOut(BaseModel):
@@ -2961,6 +2989,11 @@ class SimulateOut(BaseModel):
     duplicate: bool
     readings: list[SimulatedReadingOut]
     actions: list[str]
+    # The event the district map and the live feed poll for; None when
+    # nothing was committed.
+    event_id: int | None = None
+    # Rows written other than stock readings, in words: "check-in #412".
+    written: list[str] = []
 
 
 class HandsetOut(BaseModel):
@@ -2999,9 +3032,10 @@ async def facility_handsets(
     facility = await session.get(Facility, facility_id)
     if facility is None:
         raise HTTPException(status_code=404, detail="Facility not found")
-    # A handset is a way to write for its centre, so a public demo account is
-    # offered only the sandbox's.
-    _require_demo_write(user, facility)
+    # A handset is a way to write for its centre, so it is offered only to
+    # whoever may state that centre's facts: its own staff, or a public demo
+    # account inside the sandbox.
+    _require_own_handset(user, facility)
     out: list[HandsetOut] = []
     for role in ("reporter", "supervisor"):
         number = ingest.demo_number(facility_id, role)
@@ -3025,15 +3059,16 @@ async def ingest_simulate(
 ) -> SimulateOut:
     if not settings.demo_mode:
         raise HTTPException(status_code=404, detail="Not found")
-    # The sender decides which centre the message writes for, so a public demo
-    # account may send only as a handset registered to a sandbox centre. An
-    # unregistered number writes nothing: the spine refuses it at identify.
-    if is_public_demo(user):
-        contact = await ingest.identify(session, payload.sender)
-        if contact is not None:
-            owner = await session.get(Facility, contact.facility_id)
-            if owner is not None:
-                _require_demo_write(user, owner)
+    # The sender decides which centre the message writes for, so the sender
+    # must be a handset registered to a centre this account may state facts
+    # for: a pharmacist, only their own centre's (fix list #24); a public demo
+    # account, a sandbox centre's. An unregistered number belongs to no
+    # centre and writes nothing: the spine refuses it at identify.
+    contact = await ingest.identify(session, payload.sender)
+    if contact is not None:
+        owner = await session.get(Facility, contact.facility_id)
+        if owner is not None:
+            _require_own_handset(user, owner)
     submission = ingest.RawSubmission(
         channel=payload.channel,
         sender_ref=payload.sender,
@@ -3052,11 +3087,20 @@ async def ingest_simulate(
         duplicate=outcome.duplicate,
         readings=[
             SimulatedReadingOut(
-                sku_code=r.sku_code, qty=r.qty, days_of_stock=r.days_of_stock, status=r.status
+                sku_code=r.sku_code,
+                qty=r.qty,
+                days_of_stock=r.days_of_stock,
+                status=r.status,
+                reading_id=r.reading_id,
+                qty_before=r.qty_before,
+                days_before=r.days_before,
+                status_before=r.status_before,
             )
             for r in outcome.readings
         ],
         actions=outcome.actions,
+        event_id=outcome.event_id,
+        written=outcome.written,
     )
 
 

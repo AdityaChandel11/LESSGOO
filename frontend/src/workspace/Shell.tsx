@@ -17,6 +17,7 @@ import { useEffect, useState } from "react";
 import BrandMark from "../Brand";
 import DataNotice from "../DataNotice";
 import { type FacilityDetail, type Session, api, can } from "../api";
+import { FieldSimulator } from "../field";
 import Beds from "./Beds";
 import Medicines from "./Medicines";
 import MyAttendance from "./MyAttendance";
@@ -75,6 +76,10 @@ export default function Workspace({
   const facilityId = session.user.facility_id;
   const tabs = tabsFor(session.user.has_staff_record);
   const [tab, setTab] = useState<Tab>("medicines");
+  // The field simulator is a screen inside the workspace, opened by state,
+  // never by a URL: a page load would drop the signed-in reader on the front
+  // door (fix list #24).
+  const [fieldOpen, setFieldOpen] = useState(false);
   const [facility, setFacility] = useState<FacilityDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Bumped by a child when it changes something the other tab reads, so
@@ -131,7 +136,10 @@ export default function Workspace({
                 key={t.id}
                 role="tab"
                 aria-selected={active}
-                onClick={() => setTab(t.id)}
+                onClick={() => {
+                  setTab(t.id);
+                  setFieldOpen(false);
+                }}
                 className={`min-h-11 flex-1 border-b-2 px-1.5 text-[12.5px] font-medium ${
                   active
                     ? "border-brand text-brand"
@@ -156,14 +164,49 @@ export default function Workspace({
       )}
 
       <main className="min-h-0 flex-1 px-4 py-4">
-        {tab === "medicines" && (
+        {fieldOpen && (
+          <section aria-label={en("fieldSimulator")}>
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <h2 className="text-[14px] font-semibold text-ink">{both("fieldSimulator")}</h2>
+              <button
+                type="button"
+                onClick={() => {
+                  setFieldOpen(false);
+                  // A message may have changed the shelf; the cards reload.
+                  setRefreshKey((k) => k + 1);
+                }}
+                className="-mr-1 min-h-11 shrink-0 px-2 text-[12.5px] font-medium text-brand"
+              >
+                {both("backToMedicines")}
+              </button>
+            </div>
+            <p className="mb-3 text-[12px] leading-relaxed text-ink-2">
+              Messages go out only as this centre's own registered handsets. The
+              carrier is simulated; the reading, the map and the event are real.{" "}
+              <span lang="hi">
+                संदेश केवल इसी केंद्र के पंजीकृत फ़ोन से भेजे जाते हैं। केवल नेटवर्क
+                सिम्युलेटेड है; रिकॉर्ड, नक्शा और इवेंट असली हैं।
+              </span>
+            </p>
+            {/* A handset, drawn flat: the screen a worker in the field sees. */}
+            <div className="mx-auto max-w-[380px] rounded-[18px] border-[6px] border-ink-2 bg-panel">
+              <div className="flex items-center justify-between border-b border-line px-3 py-1.5 text-[10.5px] text-ink-3">
+                <span className="truncate">{facility?.name ?? ""}</span>
+                <span className="shrink-0">via channel simulator</span>
+              </div>
+              <FieldSimulator facilityId={facilityId} ownCentre />
+            </div>
+          </section>
+        )}
+        {!fieldOpen && tab === "medicines" && (
           <Medicines
             facilityId={facilityId}
             refreshKey={refreshKey}
             onChanged={() => setRefreshKey((k) => k + 1)}
+            onOpenField={() => setFieldOpen(true)}
           />
         )}
-        {tab === "orders" && (
+        {!fieldOpen && tab === "orders" && (
           <Orders
             facilityId={facilityId}
             demoMode={session.demo_mode}
@@ -180,10 +223,10 @@ export default function Workspace({
             sandboxLabel={session.user.demo_sandbox?.label}
           />
         )}
-        {tab === "beds" && (
+        {!fieldOpen && tab === "beds" && (
           <Beds facilityId={facilityId} facility={facility} refreshKey={refreshKey} />
         )}
-        {tab === "attendance" && <MyAttendance refreshKey={refreshKey} />}
+        {!fieldOpen && tab === "attendance" && <MyAttendance refreshKey={refreshKey} />}
       </main>
     </div>
   );
