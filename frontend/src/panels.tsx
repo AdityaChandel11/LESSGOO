@@ -611,26 +611,30 @@ export function ActivityFeed({
   events,
   onSimulate,
   canSimulate,
+  sandboxDistrict,
 }: {
   events: LiveEvent[];
   onSimulate: () => void;
   canSimulate: boolean;
+  /** Where the demo report lands — never a centre outside it (fix #79). */
+  sandboxDistrict: string;
 }) {
   const readings = events.filter((e) => e.kind === "reading.committed").slice(0, 3);
   return (
     // shrink-0: the footer keeps its own height whatever the panel above it
     // does, instead of being compressed while that panel overflows through it.
     <div className="shrink-0 border-t border-line bg-canvas/60 px-4 py-2.5">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-2">
         <Eyebrow>Field reports</Eyebrow>
-        <button
-          onClick={onSimulate}
-          disabled={!canSimulate}
-          className="text-[11px] font-medium text-brand hover:underline disabled:text-ink-3 disabled:no-underline"
-          title="Sends a report through the same pipeline an SMS will use"
-        >
-          Send test report
-        </button>
+        {canSimulate && (
+          <button
+            onClick={onSimulate}
+            className="text-right text-[11px] font-medium text-brand hover:underline"
+            title={`Writes a real report of 4 ORS sachets for a healthy centre in the ${sandboxDistrict} demo sandbox, through the same pipeline an SMS uses, so you can watch it turn red. Never a centre outside the sandbox.`}
+          >
+            Demo: send a low ORS count from a {sandboxDistrict} centre
+          </button>
+        )}
       </div>
       {readings.length === 0 ? (
         <p className="mt-1 text-[11.5px] text-ink-3">No reports this session yet.</p>

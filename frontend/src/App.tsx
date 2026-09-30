@@ -33,7 +33,7 @@ import {
   POLL_VISIBLE_MS,
   useLiveUpdates,
 } from "./api";
-import { LiveLoopPanel, SANDBOX, pickSku } from "./liveloop";
+import { LiveLoopPanel, SANDBOX, inSandbox, pickSku } from "./liveloop";
 import { ActivityFeed, FacilityPanel, NationalPanel, StatePanel } from "./panels";
 import { FederationPanel } from "./federation";
 import { FieldSimulator } from "./field";
@@ -465,29 +465,29 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
     }
   };
 
-  // Demo-only: sends an SMS-shaped report through the real pipeline. Offered
-  // only when the server is in demo mode, and only for a facility this
-  // person is allowed to report for.
+  // Demo-only: sends an SMS-shaped report through the real pipeline, always
+  // for a centre inside the sandbox district. It used to pick a healthy centre
+  // anywhere the account could reach — for the administrator, anywhere in
+  // India — and paint it red for real (fix list #79).
   const canSendTestReports =
-    session.demo_mode && (user.role !== "facility_user" || !!user.facility_id);
+    session.demo_mode &&
+    can.report(user, { id: "", state_silo: SANDBOX.state, district: SANDBOX.district });
 
   const sendTestReport = async () => {
     let target: Pin | undefined;
-    if (user.role === "facility_user" && user.facility_id) {
-      target = pinFromDetail(await api.facility(user.facility_id));
-    } else if (selected && can.report(user, selected)) {
+    if (selected && inSandbox(selected) && can.report(user, selected)) {
       target = selected;
     } else {
-      const stateCode =
-        user.role === "admin" ? (activeState ?? states[0]?.key) : user.state_silo;
-      if (!stateCode) return;
-      const pins = (await api.pinsInState(stateCode, "ORS", 400)).filter((p) =>
-        can.report(user, p),
+      const pins = (await api.pinsInState(SANDBOX.state, "ORS", 400)).filter(
+        (p) => inSandbox(p) && can.report(user, p),
       );
       // A facility that is currently fine, so the report visibly changes it.
       target = [...pins].reverse().find((p) => p.status === "healthy") ?? pins[0];
     }
-    if (!target) return;
+    if (!target) {
+      setLoadError(`No centre in ${SANDBOX.label} can take a test report right now.`);
+      return;
+    }
     setSelected(target);
     fly(target.lat, target.lng, Math.max(view.zoom, FACILITY_ZOOM + 2));
     try {
@@ -859,7 +859,8 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
           <ActivityFeed
             events={events}
             onSimulate={sendTestReport}
-            canSimulate={canSendTestReports && states.length > 0}
+            canSimulate={canSendTestReports}
+            sandboxDistrict={SANDBOX.district}
           />
         </aside>
 
