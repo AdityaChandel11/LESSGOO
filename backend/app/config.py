@@ -289,6 +289,9 @@ class Settings(BaseSettings):
     outbreak_min_rise: float = 0.10
     # The largest expected surge an officer may type, as a percentage.
     outbreak_max_surge_pct: float = 300.0
+    # IDSP reports read by the model are kept for this many weeks, newest
+    # first, then pruned in the same write (retention, CLAUDE.md).
+    idsp_reports_kept: int = 12
 
     # --- phone channels (spec 13) ---
     # Salt for hashing inbound phone numbers. Deliberately NOT derived from

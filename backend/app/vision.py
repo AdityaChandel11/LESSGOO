@@ -864,6 +864,124 @@ def _mock_stock_extraction() -> StockExtraction:
     )
 
 
+# ============================================ IDSP weekly report (#42) ===
+# Gemini reads the outbreak rows out of the IDSP Weekly Outbreak Report PDF.
+# Every row carries the text it was read from, so the regex parser can re-read
+# it and flag disagreement (idsp.cross_check). No mock: without the live model
+# a report cannot be read, and the panel says so.
+
+MAX_REPORT_BYTES = 12 * 1024 * 1024
+REPORT_TIMEOUT_S = 120.0
+
+IDSP_PROMPT = (
+    "This PDF is an IDSP Weekly Outbreak Report published by NCDC, India. It lists "
+    "disease outbreaks reported by states in one week, one row per outbreak, each "
+    "starting with a unique ID such as MH/NSK/2026/38/1021.\n"
+    "Return the report's year and week, and every outbreak row with:\n"
+    "- unique_id: exactly as printed\n"
+    "- state, district, disease: exactly as printed\n"
+    "- cases, deaths: the numbers printed in those columns\n"
+    "- start_date, reported_date: as printed, DD-MM-YYYY; empty if the column is absent\n"
+    "- status: the Current Status column as printed; empty if absent\n"
+    "- row_text: the row's printed text from the unique ID to the status, verbatim, "
+    "leaving out the Comments/Action Taken column\n"
+    "Copy numbers exactly. Never estimate, total or infer a value; if a row cannot "
+    "be read, leave it out."
+)
+
+IDSP_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "year": {"type": "integer"},
+        "week": {"type": "integer"},
+        "rows": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "unique_id": {"type": "string"},
+                    "state": {"type": "string"},
+                    "district": {"type": "string"},
+                    "disease": {"type": "string"},
+                    "cases": {"type": "integer"},
+                    "deaths": {"type": "integer"},
+                    "start_date": {"type": "string"},
+                    "reported_date": {"type": "string"},
+                    "status": {"type": "string"},
+                    "row_text": {"type": "string"},
+                },
+                "required": ["unique_id", "state", "district", "disease", "cases", "deaths", "row_text"],
+            },
+        },
+    },
+    "required": ["rows"],
+}
+
+
+@dataclass
+class IdspRead:
+    year: int | None
+    week: int | None
+    rows: list[dict]
+    # Rows the model returned that were dropped as unreadable.
+    dropped: int
+    model: str
+
+
+async def read_idsp_report(
+    pdf: bytes, *, client: httpx.AsyncClient | None = None
+) -> IdspRead:
+    """Every outbreak row in one IDSP weekly report, read by the model."""
+    if settings.llm_mode != "live" or not settings.gemini_api_key:
+        raise VisionError(
+            "reading an IDSP report needs the live model (LLM_MODE=live); this deployment "
+            "runs without it"
+        )
+    if not pdf:
+        raise VisionError("A PDF is required")
+    if len(pdf) > MAX_REPORT_BYTES:
+        raise VisionError("The report is too large to read in one request")
+
+    from . import idsp
+
+    model = settings.gemini_model
+    body = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": IDSP_PROMPT},
+                    {
+                        "inline_data": {
+                            "mime_type": "application/pdf",
+                            "data": base64.b64encode(pdf).decode(),
+                        }
+                    },
+                ]
+            }
+        ],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": IDSP_SCHEMA,
+            "temperature": 0.0,
+        },
+    }
+    data = await _post_generate(
+        model, body, client=client, what="IDSP report", timeout_s=REPORT_TIMEOUT_S
+    )
+    try:
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise VisionError("The model returned no readable answer") from exc
+    parsed = _first_json_object(text)
+    raw_rows = parsed.get("rows") if isinstance(parsed.get("rows"), list) else []
+    rows = [r for r in (idsp.normalise_row(x) for x in raw_rows if isinstance(x, dict)) if r]
+    year = parsed.get("year") if isinstance(parsed.get("year"), int) else None
+    week = parsed.get("week") if isinstance(parsed.get("week"), int) else None
+    if rows and (year is None or week is None):
+        year, week = rows[0]["year"], rows[0]["week"]
+    return IdspRead(year=year, week=week, rows=rows, dropped=len(raw_rows) - len(rows), model=model)
+
+
 async def read_stock_photo(
     image: bytes | None,
     mime_type: str = "image/jpeg",

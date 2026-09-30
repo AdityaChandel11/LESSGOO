@@ -464,6 +464,9 @@ export const api = {
   activeOutbreaks: (state: string | null) => get<ActiveOutbreaks>("/outbreaks/active", { state }),
   declareOutbreak: (body: { state: string; district: string; disease: string; surge_pct: number | null }) =>
     post<DeclaredOutbreak>("/outbreaks/declare", body),
+  latestIdspReport: () => get<IdspReport | null>("/outbreaks/idsp-reports/latest"),
+  readIdspReport: (body: { pdf_base64: string; filename: string }) =>
+    post<IdspReport>("/outbreaks/idsp-report", body),
   endOutbreak: (id: number) => post<{ id: number; ended_at: string }>(`/outbreaks/${id}/end`),
   explainTrust: (facilityId: string) =>
     post<Explanation>(`/facilities/${encodeURIComponent(facilityId)}/trust/explain`),
@@ -1327,6 +1330,44 @@ export interface ActiveOutbreaks {
   max_surge_pct: number;
   diseases: string[];
   outbreaks: ActiveOutbreak[];
+}
+
+/** Fix #42: one IDSP weekly report as Gemini read it, row by row, with the
+ *  regex parser's verdict on each. */
+export interface IdspRow {
+  unique_id: string;
+  year: number;
+  week: number;
+  state: string;
+  state_code: string | null;
+  district: string;
+  disease: string;
+  cases: number;
+  deaths: number;
+  start_date: string | null;
+  reported_date: string | null;
+  status: string | null;
+  row_text: string;
+  check: { verdict: "agrees" | "disagrees" | "unparsed"; fields: string[] };
+  in_network: boolean;
+  activated: boolean;
+}
+
+export interface IdspReport {
+  year: number | null;
+  week: number | null;
+  source: string | null;
+  model: string;
+  read_by: string | null;
+  read_at: string | null;
+  cached: boolean;
+  rows: IdspRow[];
+  dropped: number;
+  agrees: number;
+  disagrees: number;
+  unparsed: number;
+  activated: number;
+  trips_proposed: number;
 }
 
 export interface DeclaredOutbreak {

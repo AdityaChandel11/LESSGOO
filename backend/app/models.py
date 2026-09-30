@@ -550,6 +550,28 @@ class OutbreakEvent(Base):
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class IdspReport(Base):
+    """One IDSP weekly report as the model read it (fix #42): its rows, each
+    with the regex parser's verdict. Keyed by the PDF's hash, so a report is
+    never read twice; only the newest `idsp_reports_kept` are kept."""
+
+    __tablename__ = "idsp_reports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    sha256: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    year: Mapped[int | None] = mapped_column(Integer)
+    week: Mapped[int | None] = mapped_column(Integer)
+    # An uploaded file's name, or the NCDC address it was fetched from.
+    source: Mapped[str | None] = mapped_column(Text)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    read_by: Mapped[str | None] = mapped_column(Text)
+    read_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    rows: Mapped[list] = mapped_column(JSONB, nullable=False)
+    dropped: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+
+
 class RouteMatrixCache(Base):
     __tablename__ = "route_matrix_cache"
 

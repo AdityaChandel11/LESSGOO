@@ -143,6 +143,31 @@ def may_declare(p: Principal, state: str, district: str) -> str | None:
     return None
 
 
+def idsp_expiry(row: dict, now: datetime) -> datetime | None:
+    """An IDSP row is active for the spec's ttl from the day it was reported
+    (or began, when the report does not say). A row whose window has already
+    closed is history, not an active outbreak."""
+    day = row.get("reported_date") or row.get("start_date")
+    if not day:
+        return None
+    start = datetime.fromisoformat(day).replace(tzinfo=now.tzinfo)
+    expires = start + timedelta(days=settings.outbreak_ttl_days)
+    return expires if expires > now else None
+
+
+def match_district(names: list[str], district: str) -> str | None:
+    """The network's own spelling of an IDSP district, ignoring case and
+    spacing. No fuzzy matching: "Nasik" is not "Nashik" until someone says so."""
+    key = " ".join(district.split()).lower()
+    return next((n for n in names if " ".join(n.split()).lower() == key), None)
+
+
+def may_activate(row: dict) -> bool:
+    """Only a row the parser read the same way the model did, in a state the
+    network knows, may raise demand anywhere."""
+    return bool(row.get("state_code")) and (row.get("check") or {}).get("verdict") == "agrees"
+
+
 # ================================================================ database ===
 
 
@@ -159,6 +184,63 @@ async def active(
     if state:
         stmt = stmt.where(OutbreakEvent.state_silo == state)
     return list((await session.execute(stmt.order_by(OutbreakEvent.triggered_at.desc()))).scalars())
+
+
+async def activate_idsp(
+    session: AsyncSession,
+    rows: list[dict],
+    now: datetime,
+    allowed,
+) -> list[OutbreakEvent]:
+    """Rows the parser agrees with, in districts the network has centres in,
+    for diseases the medicine map covers, from a report still inside the ttl,
+    become (or refresh) active outbreaks. Marks each row with what happened."""
+    names_by_state: dict[str, list[str]] = {}
+    touched: list[OutbreakEvent] = []
+    for row in rows:
+        row["activated"] = False
+        state = row.get("state_code")
+        if state and state not in names_by_state:
+            names_by_state[state] = list(
+                (
+                    await session.execute(
+                        select(Facility.district).where(Facility.state_silo == state).distinct()
+                    )
+                ).scalars()
+            )
+        district = match_district(names_by_state.get(state, []), row["district"]) if state else None
+        row["in_network"] = district is not None
+        expires = idsp_expiry(row, now)
+        if (
+            district is None
+            or expires is None
+            or not may_activate(row)
+            or not medicines_for(row["disease"])
+            or not allowed(state, district)
+        ):
+            continue
+        existing = await session.scalar(
+            select(OutbreakEvent).where(
+                OutbreakEvent.state_silo == state,
+                OutbreakEvent.district == district,
+                OutbreakEvent.disease_category == row["disease"],
+                OutbreakEvent.ended_at.is_(None),
+                OutbreakEvent.expires_at > now,
+            )
+        )
+        if existing is None:
+            existing = OutbreakEvent(
+                state_silo=state, district=district, disease_category=row["disease"],
+                source="idsp", triggered_at=now,
+                declared_by="IDSP week {0}/{1}".format(row["week"], row["year"]),
+            )
+            session.add(existing)
+        existing.source_ref = row["unique_id"]
+        existing.expires_at = max(existing.expires_at or expires, expires)
+        row["activated"] = True
+        touched.append(existing)
+    await session.flush()
+    return touched
 
 
 async def district_ids(session: AsyncSession, state: str, district: str) -> list[str]:

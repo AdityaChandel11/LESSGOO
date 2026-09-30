@@ -12,6 +12,7 @@ the adapter, where the fallback and the tests live.
 
 import base64
 import binascii
+import hashlib
 import math
 from uuid import uuid4
 from dataclasses import asdict
@@ -23,7 +24,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -71,6 +72,7 @@ from .models import (
     Facility,
     FacilityContact,
     FederationRound,
+    IdspReport,
     MedicineMovement,
     OutbreakEvent,
     Sku,
@@ -3216,6 +3218,148 @@ async def declare_outbreak(
             1 for t in trips if (t.get("rationale") or {}).get("outbreak")
         ),
     )
+
+
+class IdspReportIn(BaseModel):
+    pdf_base64: str
+    filename: str | None = Field(default=None, max_length=200)
+
+
+class IdspRowOut(BaseModel):
+    unique_id: str
+    year: int
+    week: int
+    state: str
+    state_code: str | None
+    district: str
+    disease: str
+    cases: int
+    deaths: int
+    start_date: str | None
+    reported_date: str | None
+    status: str | None
+    row_text: str
+    check: dict
+    in_network: bool = False
+    activated: bool = False
+
+
+class IdspReportOut(BaseModel):
+    year: int | None
+    week: int | None
+    source: str | None
+    model: str
+    read_by: str | None
+    read_at: datetime | None
+    cached: bool
+    rows: list[IdspRowOut]
+    dropped: int
+    agrees: int
+    disagrees: int
+    unparsed: int
+    activated: int
+    trips_proposed: int = 0
+
+
+def _idsp_out(report: IdspReport, *, cached: bool, trips: int = 0) -> IdspReportOut:
+    rows = [IdspRowOut(**r) for r in report.rows]
+    verdicts = [r.check.get("verdict") for r in rows]
+    return IdspReportOut(
+        year=report.year, week=report.week, source=report.source, model=report.model,
+        read_by=report.read_by, read_at=report.read_at, cached=cached, rows=rows,
+        dropped=report.dropped or 0,
+        agrees=verdicts.count("agrees"), disagrees=verdicts.count("disagrees"),
+        unparsed=verdicts.count("unparsed"),
+        activated=sum(1 for r in rows if r.activated), trips_proposed=trips,
+    )
+
+
+async def ingest_idsp_pdf(
+    session: AsyncSession, pdf: bytes, *, source: str | None, user: Principal
+) -> IdspReportOut:
+    """Read one report with the model, cross-check it, keep it, and turn the
+    rows both readings agree on into active outbreaks (#41). A report already
+    read is returned from the table; the model is never asked twice."""
+    digest = hashlib.sha256(pdf).hexdigest()
+    cached = await session.scalar(select(IdspReport).where(IdspReport.sha256 == digest))
+    if cached is not None:
+        return _idsp_out(cached, cached=True)
+    try:
+        read = await vision.read_idsp_report(pdf)
+    except vision.VisionError as exc:
+        status = 503 if "live model" in str(exc) else 502
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    now = datetime.now(timezone.utc)
+    rows = [{**r, "check": idsp.cross_check(r)} for r in read.rows]
+    touched = await outbreak.activate_idsp(
+        session, rows, now,
+        allowed=lambda st, d: can_plan_state(user, st) and demo_may_write(user, state=st, district=d),
+    )
+    report = IdspReport(
+        sha256=digest, year=read.year, week=read.week, source=source, model=read.model,
+        read_by=user.name, read_at=now, rows=rows, dropped=read.dropped,
+    )
+    session.add(report)
+    await session.flush()
+    # Retention: the newest reports only, pruned in the same write.
+    keep = select(IdspReport.id).order_by(IdspReport.read_at.desc()).limit(settings.idsp_reports_kept)
+    await session.execute(delete(IdspReport).where(IdspReport.id.not_in(keep)))
+    await events.record(
+        session,
+        events.IDSP_READ,
+        {"year": read.year, "week": read.week, "rows": len(rows), "model": read.model,
+         "activated": [o.id for o in touched]},
+    )
+    await session.commit()
+
+    trips = 0
+    by_state: dict[str, set[str]] = {}
+    for o in touched:
+        by_state.setdefault(o.state_silo or "", set()).update(
+            outbreak.medicines_for(o.disease_category or "")
+        )
+    for state, skus in by_state.items():
+        trips += len(await _replan_medicines(session, state, sorted(skus)))
+    return _idsp_out(report, cached=False, trips=trips)
+
+
+@router.post("/outbreaks/idsp-report", response_model=IdspReportOut, tags=["outbreaks"])
+async def read_idsp_report(
+    payload: IdspReportIn,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> IdspReportOut:
+    """An officer gives the platform an IDSP weekly report PDF; Gemini reads
+    it (fix #42). Public demo accounts read NCDC's latest report instead, so a
+    stranger cannot spend the model's daily quota on uploads."""
+    if user.role not in ("admin", "state_officer"):
+        raise HTTPException(status_code=403, detail="Only state and national officers read IDSP reports")
+    if is_public_demo(user):
+        raise HTTPException(
+            status_code=403,
+            detail="Uploading a report is for officer accounts; the public demo reads NCDC's latest report instead",
+        )
+    try:
+        pdf = base64.b64decode(payload.pdf_base64, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise HTTPException(status_code=422, detail="The report is not valid base64") from exc
+    if not pdf.startswith(b"%PDF"):
+        raise HTTPException(status_code=422, detail="That file is not a PDF")
+    if len(pdf) > vision.MAX_REPORT_BYTES:
+        raise HTTPException(status_code=413, detail="The report is too large")
+    return await ingest_idsp_pdf(session, pdf, source=payload.filename, user=user)
+
+
+@router.get("/outbreaks/idsp-reports/latest", response_model=IdspReportOut | None, tags=["outbreaks"])
+async def latest_idsp_report(
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> IdspReportOut | None:
+    report = await session.scalar(
+        select(IdspReport).order_by(IdspReport.read_at.desc()).limit(1)
+    )
+    return _idsp_out(report, cached=True) if report is not None else None
 
 
 @router.post("/outbreaks/{outbreak_id}/end", tags=["outbreaks"])

@@ -3,6 +3,8 @@ import {
   type ActiveOutbreak,
   type ActiveOutbreaks,
   ApiError,
+  type IdspReport,
+  type IdspRow,
   type Outbreaks,
   type StockingAdvice,
   type User,
@@ -124,6 +126,8 @@ export function OutbreakWarnings({
         />
       )}
 
+      <IdspReader user={user} onRead={() => setBump((b) => b + 1)} />
+
       {data && (
         <div className="mt-3 border-t border-line pt-2">
           <h3 className="text-[12px] font-semibold text-ink">
@@ -155,6 +159,129 @@ export function OutbreakWarnings({
         </div>
       )}
     </section>
+  );
+}
+
+const VERDICT: Record<IdspRow["check"]["verdict"], { label: string; className: string }> = {
+  agrees: { label: "parser agrees", className: "border-ok/40 text-ok" },
+  disagrees: { label: "parser disagrees", className: "border-crit/40 text-crit" },
+  unparsed: { label: "parser could not read it", className: "border-risk/40 text-risk" },
+};
+
+/**
+ * Fix #42: Gemini reads the IDSP weekly report. The regex parser re-reads each
+ * row from the printed text the model transcribed; only rows the two agree on,
+ * in districts the network has centres in, become active outbreaks. An officer
+ * account uploads a report here; the model is never asked twice for the same
+ * PDF.
+ */
+function IdspReader({ user, onRead }: { user: User; onRead: () => void }) {
+  const [report, setReport] = useState<IdspReport | null>(null);
+  const [all, setAll] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const mayUpload = (user.role === "admin" || user.role === "state_officer") && !user.demo_sandbox;
+
+  useEffect(() => {
+    let alive = true;
+    api
+      .latestIdspReport()
+      .then((r) => alive && setReport(r))
+      .catch(() => alive && setReport(null));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const upload = async (file: File) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      let binary = "";
+      for (let i = 0; i < bytes.length; i += 0x8000) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      }
+      const out = await api.readIdspReport({ pdf_base64: btoa(binary), filename: file.name });
+      setReport(out);
+      onRead();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not read the report");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const rows = report ? (all ? report.rows : report.rows.slice(0, WARNINGS_SHOWN)) : [];
+
+  return (
+    <div className="mt-3 border-t border-line pt-2">
+      <h3 className="text-[12px] font-semibold text-ink">
+        IDSP report read by Gemini · जेमिनी द्वारा पढ़ी गई आईडीएसपी रिपोर्ट
+      </h3>
+      {!report ? (
+        <p className="mt-0.5 text-[11px] text-ink-2">
+          No weekly report has been read yet. Reading one turns its outbreaks in network districts into active
+          outbreaks, checked row by row against the report's own printed text.
+        </p>
+      ) : (
+        <>
+          <p className="mt-0.5 text-[10.5px] text-ink-3">
+            Week {report.week ?? "?"}/{report.year ?? "?"} · read by {report.model}
+            {report.read_by && ` for ${report.read_by}`} · {day(report.read_at)}
+            {report.source && ` · ${report.source}`}
+          </p>
+          <p className="mt-1 text-[11px] text-ink-2">
+            {report.rows.length} outbreak rows: {report.agrees} agree with the parser, {report.disagrees} disagree,{" "}
+            {report.unparsed} the parser could not read
+            {report.dropped > 0 && `, ${report.dropped} dropped as unreadable`}. {report.activated} became active
+            outbreaks in the network
+            {report.trips_proposed > 0 && ` · ${report.trips_proposed} trips proposed`}.
+          </p>
+          <ul className="mt-1 flex flex-col gap-1">
+            {rows.map((r) => (
+              <li key={r.unique_id} className="text-[11px] leading-snug" title={r.row_text}>
+                <span className="font-medium text-ink">{r.disease}</span> · {r.district}, {r.state} ·{" "}
+                <span className="font-mono tabular-nums">{r.cases}</span> cases,{" "}
+                <span className="font-mono tabular-nums">{r.deaths}</span> deaths
+                <span className={`ml-1 rounded border px-1 text-[9.5px] font-medium ${VERDICT[r.check.verdict].className}`}>
+                  {VERDICT[r.check.verdict].label}
+                  {r.check.fields.length > 0 && `: ${r.check.fields.join(", ")}`}
+                </span>
+                {r.activated && <span className="ml-1 text-[10px] font-medium text-brand">active in network</span>}
+                {!r.activated && r.in_network && <span className="ml-1 text-[10px] text-ink-3">in network, not activated</span>}
+              </li>
+            ))}
+          </ul>
+          {report.rows.length > WARNINGS_SHOWN && (
+            <button onClick={() => setAll((a) => !a)} className="mt-0.5 text-[11px] font-medium text-brand hover:underline">
+              {all ? "Show fewer" : `Show all ${report.rows.length}`}
+            </button>
+          )}
+        </>
+      )}
+      {mayUpload && (
+        <label className="mt-1.5 block text-[11px] text-ink-2">
+          <span className="font-medium text-brand">{busy ? "Reading with Gemini…" : "Read a weekly report (PDF) →"}</span>
+          <input
+            type="file"
+            accept="application/pdf"
+            disabled={busy}
+            className="sr-only"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void upload(f);
+              e.target.value = "";
+            }}
+          />
+        </label>
+      )}
+      {error && (
+        <p role="alert" className="mt-1 text-[11px] text-crit">
+          {error}
+        </p>
+      )}
+    </div>
   );
 }
 

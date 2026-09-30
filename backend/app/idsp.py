@@ -114,6 +114,111 @@ def parse_report(text: str, state_names: list[str]) -> list[dict]:
     return rows
 
 
+# =============================================== reading a new report (#42) ===
+# Gemini reads the rows out of the PDF (vision.read_idsp_report). Each row
+# comes back with the printed text it was read from, and the regex parser
+# above re-reads that text: a field the two disagree on is flagged, and only
+# rows they agree on may become active outbreaks (#41).
+
+STATE_ALIASES = {"Jammu and Kashmir": "Jammu & Kashmir", "Orissa": "Odisha"}
+CHECKED_FIELDS = (
+    "unique_id", "state", "district", "disease", "cases", "deaths", "start_date", "status",
+)
+
+
+def state_names() -> list[str]:
+    from . import geo
+
+    return [s.name for s in geo.INDIA_STATES] + list(STATE_ALIASES)
+
+
+def canonical_state(name: str) -> tuple[str, str | None]:
+    from . import geo
+
+    canonical = STATE_ALIASES.get(name.strip(), name.strip())
+    codes = {s.name.lower(): s.code for s in geo.INDIA_STATES}
+    return canonical, codes.get(canonical.lower())
+
+
+def _as_count(value) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
+
+
+def _as_date(value) -> str | None:
+    if not value or not isinstance(value, str):
+        return None
+    text = value.strip()
+    try:
+        return datetime.fromisoformat(text).date().isoformat()
+    except ValueError:
+        pass
+    try:
+        return _date(text)
+    except ValueError:
+        return None
+
+
+def _status(value) -> str | None:
+    if not value or not isinstance(value, str):
+        return None
+    return re.sub(r"\s+", " ", value).strip().title() or None
+
+
+def normalise_row(raw: dict) -> dict | None:
+    """One model row in the committed file's shape, or None when a field that
+    matters is missing or implausible. A row is dropped, never repaired: a
+    guessed case count is worse than a missing row."""
+    uid = str(raw.get("unique_id") or "").strip().upper()
+    found = UNIQUE_ID.fullmatch(uid)
+    cases, deaths = _as_count(raw.get("cases")), _as_count(raw.get("deaths"))
+    state_raw = str(raw.get("state") or "").strip()
+    district = re.sub(r"\s+", " ", str(raw.get("district") or "")).strip()
+    disease = re.sub(r"\s+", " ", str(raw.get("disease") or "")).strip()
+    if not found or cases is None or deaths is None or not state_raw or not district or not disease:
+        return None
+    state, code = canonical_state(state_raw)
+    return {
+        "unique_id": uid,
+        "year": int(found.group(3)),
+        "week": int(found.group(4)),
+        "state": state,
+        "state_code": code,
+        "district": district,
+        "disease": disease,
+        "cases": cases,
+        "deaths": deaths,
+        "start_date": _as_date(raw.get("start_date")),
+        "reported_date": _as_date(raw.get("reported_date")),
+        "status": _status(raw.get("status")),
+        "row_text": re.sub(r"\s+", " ", str(raw.get("row_text") or "")).strip(),
+    }
+
+
+def _same(field: str, a, b) -> bool:
+    if isinstance(a, str) or isinstance(b, str):
+        return re.sub(r"\s+", " ", str(a or "")).strip().lower() == re.sub(
+            r"\s+", " ", str(b or "")
+        ).strip().lower()
+    return a == b
+
+
+def cross_check(row: dict) -> dict:
+    """The regex parser's reading of the printed row, against the model's."""
+    parsed = parse_report(row.get("row_text") or "", state_names())
+    if not parsed:
+        return {"verdict": "unparsed", "fields": []}
+    p = parsed[0]
+    p["state"] = STATE_ALIASES.get(p["state"], p["state"])
+    fields = [f for f in CHECKED_FIELDS if not _same(f, p.get(f), row.get(f))]
+    return {"verdict": "agrees" if not fields else "disagrees", "fields": fields}
+
+
 @lru_cache(maxsize=1)
 def load() -> dict:
     """The committed rows, read once per process."""
