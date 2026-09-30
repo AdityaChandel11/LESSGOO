@@ -46,7 +46,7 @@ export default function SignInPanel({
     e.preventDefault();
     const trimmed = email.trim();
     if (!EMAIL_PATTERN.test(trimmed)) {
-      setEmailError("Enter the email address of your account, for example name@health.gov.in");
+      setEmailError("Enter the email address of your account, for example name@example.org");
       return;
     }
     setBusy(true);
@@ -149,7 +149,7 @@ export default function SignInPanel({
               setEmail(e.target.value);
               setEmailError(null);
             }}
-            placeholder="name@health.gov.in"
+            placeholder="name@example.org"
             className="mt-1.5 h-10 w-full rounded-md border border-line bg-panel px-3 text-[14px] placeholder:text-ink-3/70 focus:border-brand focus:ring-2 focus:ring-brand/15 focus:outline-none aria-[invalid]:border-crit"
           />
           {emailError && (

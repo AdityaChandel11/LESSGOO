@@ -49,20 +49,22 @@ const STEPS = [
   },
   {
     n: "02",
-    title: "A shared model forecasts",
-    hindi: "साझा मॉडल पूर्वानुमान लगाता है",
+    title: "Four states train a shared forecasting model today",
+    hindi: "आज चार राज्य मिलकर एक पूर्वानुमान मॉडल प्रशिक्षित करते हैं",
     body:
-      "Each state trains on its own rows and sends back model weights only — never a facility " +
-      "record, never a row of stock. The national model those weights build predicts when each " +
-      "shelf runs out, and the warning fires while there is still time to act on it.",
+      "Maharashtra, Kerala, Bihar and Uttar Pradesh each train on their own rows and send back " +
+      "model weights only — never a facility record, never a row of stock. Where no fresh " +
+      "forecast exists, days of stock come from the last 28 days of readings instead, and the " +
+      "screen says which of the two it used.",
   },
   {
     n: "03",
-    title: "A human approves the transfer",
-    hindi: "मंज़ूरी इंसान देता है",
+    title: "The donor centre accepts; an officer handles exceptions",
+    hindi: "दाता केंद्र स्वीकार करता है; अपवाद अधिकारी सँभालते हैं",
     body:
-      "The optimiser proposes a route from a district holding surplus to one running short, " +
-      "with the reasoning and the distance attached. An officer approves or rejects it. " +
+      "The optimiser proposes a route from a centre holding surplus to one running short, with " +
+      "the reasoning and the distance attached. The centre that would give the stock accepts " +
+      "or declines; officers see the whole picture and step in where something is stuck. " +
       "Nothing moves on its own, and no proposal takes a donor below its own safety stock.",
   },
 ] as const;
@@ -147,16 +149,20 @@ export default function Landing({
                     <span className="font-semibold text-white">
                       {fmt(summary.critical)} centres
                     </span>{" "}
-                    are below their reorder floor right now. Every figure on this page is read
-                    from the live database as it loads.
+                    are below their reorder floor, as of each centre's last report. Figures are
+                    read from the live database as this page loads.
+                    <span lang="hi" className="mt-1 block text-white/60">
+                      आँकड़े लाइव डेटाबेस से; स्टॉक की स्थिति हर केंद्र की पिछली रिपोर्ट के अनुसार।
+                    </span>
                   </span>
                 </p>
               </div>
             )}
           </div>
 
-          <p className="relative z-10 text-[11.5px] text-white/50">
-            Authorised health department staff only. Activity is recorded.
+          <p className="relative z-10 text-[11.5px] text-white/60">
+            Prototype — not an official government system.{" "}
+            <span lang="hi">प्रोटोटाइप — यह कोई आधिकारिक सरकारी प्रणाली नहीं है।</span>
           </p>
 
           <svg
@@ -214,7 +220,8 @@ export default function Landing({
           </h2>
           <p className="mt-3 max-w-2xl text-[16px] leading-relaxed text-ink-2">
             Three steps, and a person at the end of them. The forecast is shared across states
-            without the rows ever leaving one; the decision stays with an officer.
+            without the rows ever leaving one; the decision stays with people — the centre that
+            gives the stock, and an officer for the exceptions.
           </p>
 
           <ol className="mt-10 grid gap-px overflow-hidden rounded-lg border border-line bg-line sm:grid-cols-3">
