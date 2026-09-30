@@ -38,7 +38,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import redistribution, services
@@ -48,6 +48,7 @@ from app.models import (
     BedReport,
     Facility,
     MedicineMovement,
+    OutbreakEvent,
     StockReading,
     Transfer,
 )
@@ -110,6 +111,14 @@ async def survey(session: AsyncSession, ids: list[str]) -> dict[str, int]:
             "AND transfer_id IS NOT NULL",
             **p,
         ),
+        # The outbreak drill (fix #44) declares one here; a reset ends it.
+        "active outbreaks": await _count(
+            session,
+            "SELECT count(*) FROM outbreak_events WHERE state_silo = :state "
+            "AND district = :district AND ended_at IS NULL AND expires_at > now()",
+            state=STATE,
+            district=DISTRICT,
+        ),
     }
 
 
@@ -152,6 +161,16 @@ async def reset(session: AsyncSession, ids: list[str]) -> None:
         delete(StockReading).where(
             StockReading.facility_id.in_(ids), StockReading.source != SEED_SOURCE
         )
+    )
+    # Ended, not deleted: the record that a drill declared it stays.
+    await session.execute(
+        update(OutbreakEvent)
+        .where(
+            OutbreakEvent.state_silo == STATE,
+            OutbreakEvent.district == DISTRICT,
+            OutbreakEvent.ended_at.is_(None),
+        )
+        .values(ended_at=func.now())
     )
     await session.commit()
 

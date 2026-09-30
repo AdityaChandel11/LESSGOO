@@ -65,6 +65,29 @@ interface Step {
   ai: boolean | null;
 }
 
+/**
+ * The outbreak drill (fix #44) declares the outbreak itself, so its one input
+ * is a scripted scenario: an expected rise entered as the declaring officer's
+ * assumption. The platform uses it only when Nashik's own readings show no
+ * rise, and every step that shows it says so.
+ */
+const DRILL_DISEASE = "Acute Diarrhoeal Disease";
+const DRILL_SURGE_PCT = 100;
+
+export type DrillKind = "stockout" | "outbreak";
+
+const OUTBREAK_TITLES: [string, string][] = [
+  ["outbreak", "Outbreak declared"],
+  ["surge", "Expected use raised for its medicines"],
+  ["warnings", "Early warnings"],
+  ["plan", "Optimiser pre-positions stock"],
+  ["why", "Gemini explains the transfer"],
+  ["approve", "Donor centre accepts"],
+  ["moved", "Donor dispatches"],
+  ["receipt", "Receiver confirms arrival"],
+  ["feed", "Activity feed"],
+];
+
 const STEP_TITLES: [string, string][] = [
   ["reading", "Reading committed"],
   ["recompute", "Days of stock recomputed"],
@@ -78,8 +101,8 @@ const STEP_TITLES: [string, string][] = [
   ["feed", "Activity feed"],
 ];
 
-const freshSteps = (): Step[] =>
-  STEP_TITLES.map(([id, title]) => ({
+const freshSteps = (kind: DrillKind = "stockout"): Step[] =>
+  (kind === "outbreak" ? OUTBREAK_TITLES : STEP_TITLES).map(([id, title]) => ({
     id,
     title,
     call: null,
@@ -159,6 +182,7 @@ export function LiveLoopPanel({
   facility,
   user,
   events,
+  kind = "stockout",
   autoStart = false,
   onClose,
   onChanged,
@@ -169,6 +193,8 @@ export function LiveLoopPanel({
   user: User;
   /** The app's own poll, so the last step reports the feed rather than a copy. */
   events: LiveEvent[];
+  /** "outbreak": the emergency chain of fix #44; "stockout": one centre's shelf. */
+  kind?: DrillKind;
   /** Start the chain on open, for the one-click "Simulate emergency". */
   autoStart?: boolean;
   onClose: () => void;
@@ -177,7 +203,13 @@ export function LiveLoopPanel({
   onFocus: (lat: number, lng: number) => void;
   onOpenFederation?: () => void;
 }) {
-  const [steps, setSteps] = useState<Step[]>(freshSteps);
+  const [steps, setSteps] = useState<Step[]>(() => freshSteps(kind));
+  // The centre the stock goes to: the drill's facility in a stock-out, the
+  // pre-positioning trip's receiver in an outbreak.
+  const [receiver, setReceiver] = useState<{ id: string; name: string } | null>(null);
+  const [outbreakId, setOutbreakId] = useState<number | null>(null);
+  const [ended, setEnded] = useState(false);
+  const here = receiver ?? { id: facility.id, name: facility.name };
   const [phase, setPhase] = useState<
     "idle" | "running" | "awaiting" | "receiving" | "done" | "failed"
   >("idle");
@@ -210,10 +242,11 @@ export function LiveLoopPanel({
     [mark],
   );
 
-  const run = useCallback(async () => {
+  const runStockOut = useCallback(async () => {
     started.current = performance.now();
     sinceRef.current = new Date().toISOString();
-    setSteps(freshSteps());
+    setSteps(freshSteps("stockout"));
+    setReceiver(null);
     setTransfer(null);
     setError(null);
     setBefore(null);
@@ -347,13 +380,148 @@ export function LiveLoopPanel({
     onChanged();
   }, [facility, mark, fail, onChanged, onFocus]);
 
+  // ---------------------------------------------- the outbreak drill (#44) ---
+  // Spec v3 §12.5 end to end on real endpoints: an outbreak raises expected
+  // use where it is, the warnings count the days, the same solver
+  // pre-positions stock, and a person still says yes to every trip.
+  const runOutbreak = useCallback(async () => {
+    started.current = performance.now();
+    sinceRef.current = new Date().toISOString();
+    setSteps(freshSteps("outbreak"));
+    setTransfer(null);
+    setReceiver(null);
+    setOutbreakId(null);
+    setEnded(false);
+    setError(null);
+    setBefore(null);
+    setAfter(null);
+    setPhase("running");
+
+    mark("outbreak", {
+      state: "running",
+      call: `POST /api/outbreaks/declare {state: "${SANDBOX.state}", district: "${SANDBOX.district}", disease: "${DRILL_DISEASE}", surge_pct: ${DRILL_SURGE_PCT}}`,
+    });
+    let declared;
+    try {
+      declared = await api.declareOutbreak({
+        state: SANDBOX.state,
+        district: SANDBOX.district,
+        disease: DRILL_DISEASE,
+        surge_pct: DRILL_SURGE_PCT,
+      });
+    } catch (e) {
+      return fail("outbreak", e);
+    }
+    const o = declared.outbreak;
+    setOutbreakId(o.id);
+    mark("outbreak", {
+      state: "done",
+      detail: `${o.disease} in ${o.district}: active until ${o.expires_at ? new Date(o.expires_at).toLocaleDateString("en-IN", { day: "numeric", month: "short" }) : "—"}, across ${o.facilities} centres in the district.`,
+      note: "Scripted scenario: the drill declares the outbreak itself. A real one is declared by an officer or comes from the IDSP report Gemini reads.",
+    });
+
+    const assumed = o.medicines.some((m) => m.basis === "assumption");
+    mark("surge", {
+      state: "done",
+      call: "same response · outbreak.evaluate",
+      detail: o.medicines
+        .map((m) =>
+          m.multiplier !== null
+            ? `${m.sku_name} ×${m.multiplier.toFixed(2)} (${m.basis === "observed" ? "observed" : "assumption"})`
+            : `${m.sku_name}: no rise`,
+        )
+        .join(" · "),
+      note: assumed
+        ? `Scripted scenario: an expected ${DRILL_SURGE_PCT}% rise, entered as the declaring officer's assumption — used only because ${o.district}'s own readings show no rise.`
+        : `Measured from ${o.district}'s own readings: the last 14 days against the 14 before.`,
+    });
+
+    mark("warnings", {
+      state: "done",
+      call: "same response · outbreak.warnings",
+      detail: o.warnings.length
+        ? `${o.warnings.length} centre–medicine pairs in ${o.district} run out within 14 days at the outbreak rate. First: ${o.warnings[0].line}.`
+        : `No centre in ${o.district} runs out within 14 days at the outbreak rate.`,
+      note: o.count_overdue
+        ? `${o.count_overdue} more would already be empty at that rate; they are asked to count the shelf.`
+        : "Each date is counted from the centre's last count, with and without the outbreak.",
+    });
+    onChanged();
+
+    mark("plan", { state: "running", call: `GET /api/transfers?state=${SANDBOX.state}` });
+    let pick: Transfer | undefined;
+    try {
+      const trips = await api.transfers(SANDBOX.state);
+      // Both ends inside the sandbox, so this account can act for the donor.
+      const ours = trips
+        .filter(
+          (t) =>
+            t.status === "proposed" &&
+            t.rationale.outbreak?.outbreak_id === o.id &&
+            t.from.district === SANDBOX.district &&
+            t.to.district === SANDBOX.district,
+        )
+        .sort((a, b) => (a.rationale.recipient_days_before ?? 99) - (b.rationale.recipient_days_before ?? 99));
+      pick = ours[0];
+      if (!pick) {
+        mark("plan", {
+          state: "failed",
+          detail: `${declared.trips_proposed} trips proposed, ${declared.pre_positioning_trips} pre-positioning — none with both ends in ${SANDBOX.label}, so this drill cannot act for the donor.`,
+          note: "The plan stands on the Redistribution tab for the state's officers and the donor centres.",
+        });
+        setPhase("failed");
+        return;
+      }
+      setTransfer(pick);
+      setReceiver({ id: pick.to.id, name: pick.to.name });
+      onFocus(pick.to.lat, pick.to.lng);
+      mark("plan", {
+        state: "done",
+        detail: `${declared.trips_proposed} trips proposed for its medicines, ${declared.pre_positioning_trips} pre-positioning. Following ${pick.from.name} → ${pick.to.name}: ${qty(pick.qty, pick.unit)} of ${pick.sku_name} over ${pick.route_km} km.`,
+        note: `Receiver has ${formatDays(pick.rationale.outbreak?.recipient_days_without_outbreak ?? null)} without the outbreak, ${formatDays(pick.rationale.recipient_days_before)} at the outbreak rate · donor keeps ${formatDays(pick.rationale.donor_days_after_this)} of its own cover`,
+      });
+    } catch (e) {
+      return fail("plan", e);
+    }
+
+    mark("why", { state: "running", call: "POST /api/transfers/explain" });
+    try {
+      const w = await api.explainTrip([pick.id]);
+      mark("why", {
+        state: "done",
+        ai: w.ai,
+        detail: w.text,
+        note: w.ai
+          ? `${w.model} · ${seconds(w.latency_ms ?? 0)}${w.cached ? " · cached answer for the same figures" : ""}`
+          : `Computed line, not Gemini${w.note ? ` — ${w.note}` : ""}`,
+      });
+    } catch (e) {
+      mark("why", { state: "skipped", detail: e instanceof ApiError ? e.message : String(e) });
+    }
+    setPhase("awaiting");
+    onChanged();
+  }, [mark, fail, onChanged, onFocus]);
+
+  const run = kind === "outbreak" ? runOutbreak : runStockOut;
+
+  const endOutbreak = useCallback(async () => {
+    if (outbreakId === null) return;
+    try {
+      await api.endOutbreak(outbreakId);
+      setEnded(true);
+      onChanged();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    }
+  }, [outbreakId, onChanged]);
+
   const approve = useCallback(async () => {
     if (!transfer) return;
     setPhase("running");
     try {
       setBefore({
         donor: await holding(transfer.from.id, transfer.sku_code),
-        here: await holding(facility.id, transfer.sku_code),
+        here: await holding(here.id, transfer.sku_code),
       });
     } catch {
       setBefore(null);
@@ -374,21 +542,21 @@ export function LiveLoopPanel({
     // -------------------------------------------- 8. the donor dispatches ---
     mark("moved", { state: "running", call: `GET /api/facilities/${transfer.from.id}` });
     try {
-      const [donor, here] = await Promise.all([
+      const [donor, recv] = await Promise.all([
         holding(transfer.from.id, transfer.sku_code),
-        holding(facility.id, transfer.sku_code),
+        holding(here.id, transfer.sku_code),
       ]);
       mark("moved", {
         state: "done",
         detail: `${donor.name} is down to ${qty(donor.qty, transfer.unit)}; batch TRF-${decided.id} is in transit.`,
-        note: `Here: still ${qty(here.qty, transfer.unit)} — the recipient is credited when the delivery is confirmed, not when the lorry leaves.`,
+        note: `${recv.name}: still ${qty(recv.qty, transfer.unit)} — the recipient is credited when the delivery is confirmed, not when the lorry leaves.`,
       });
     } catch (e) {
       return fail("moved", e);
     }
     onChanged();
     setPhase("receiving");
-  }, [transfer, user.name, facility.id, mark, fail, onChanged]);
+  }, [transfer, user.name, here.id, mark, fail, onChanged]);
 
   // ------------------------------------------- 9. the receiver confirms ---
   // A second person at the other end, in the real system. Kept as its own
@@ -396,10 +564,10 @@ export function LiveLoopPanel({
   const confirmArrival = useCallback(async () => {
     if (!transfer) return;
     setPhase("running");
-    mark("receipt", { state: "running", call: `GET /api/movements?facility=${facility.id}` });
+    mark("receipt", { state: "running", call: `GET /api/movements?facility=${here.id}` });
     try {
       const ledger = await api.movements({
-        facility: facility.id,
+        facility: here.id,
         sku: transfer.sku_code,
         view: "all",
         limit: 50,
@@ -408,21 +576,21 @@ export function LiveLoopPanel({
       if (!batch) {
         mark("receipt", {
           state: "failed",
-          detail: `No batch for transfer ${transfer.id} is on ${facility.name}'s ledger yet.`,
+          detail: `No batch for transfer ${transfer.id} is on ${here.name}'s ledger yet.`,
         });
         setPhase("failed");
         return;
       }
       mark("receipt", { state: "running", call: `POST /api/movements/${batch.id}/receipt` });
       const r = await api.confirmReceipt(batch.id, batch.qty_dispatched, "Confirmed in the emergency drill");
-      const [donor, here] = await Promise.all([
+      const [donor, recv] = await Promise.all([
         holding(transfer.from.id, transfer.sku_code),
-        holding(facility.id, transfer.sku_code),
+        holding(here.id, transfer.sku_code),
       ]);
-      setAfter({ donor, here });
+      setAfter({ donor, here: recv });
       mark("receipt", {
         state: "done",
-        detail: `${qty(r.movement.qty_received ?? batch.qty_dispatched, transfer.unit)} received at ${facility.name}; it now holds ${qty(r.qty_on_hand, transfer.unit)}.`,
+        detail: `${qty(r.movement.qty_received ?? batch.qty_dispatched, transfer.unit)} received at ${here.name}; it now holds ${qty(r.qty_on_hand, transfer.unit)}.`,
         note: "Dispatch and receipt are logged independently, so a short delivery would surface on the Movements tab rather than being assumed away.",
       });
     } catch (e) {
@@ -430,7 +598,7 @@ export function LiveLoopPanel({
     }
     onChanged();
     setPhase("done");
-  }, [transfer, facility.id, facility.name, mark, fail, onChanged]);
+  }, [transfer, here.id, here.name, mark, fail, onChanged]);
 
   const autoRan = useRef(false);
   useEffect(() => {
@@ -446,7 +614,7 @@ export function LiveLoopPanel({
     if (phase === "idle") return;
     const mine = events.filter(
       (e) =>
-        e.facility_id === facility.id ||
+        e.facility_id === here.id ||
         e.facility_id === transfer?.from.id ||
         (e.transfer_id != null && e.transfer_id === transfer?.id),
     );
@@ -466,13 +634,16 @@ export function LiveLoopPanel({
           : s,
       ),
     );
-  }, [events, phase, facility.id, transfer]);
+  }, [events, phase, here.id, transfer]);
 
   // The backend's sandbox override (api.py's _decide) lets an admin or an
   // officer accept on the donor centre's behalf here; a facility_user is
   // never the donor in this drill (the drill's facility is the receiver), so
   // showing them an Approve button that will 403 is worse than not showing it.
-  const mayWrite = can.report(user, facility) && user.role !== "facility_user";
+  const mayWrite =
+    can.report(user, facility) &&
+    user.role !== "facility_user" &&
+    (kind === "stockout" || can.planState(user, SANDBOX.state));
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -480,13 +651,26 @@ export function LiveLoopPanel({
         <button onClick={onClose} className="text-[12px] font-medium text-brand hover:underline">
           ← {facility.name}
         </button>
-        <h2 className="mt-2 text-[13px] font-semibold text-ink">
-          Simulate an emergency · आपात स्थिति का पूर्वाभ्यास
-        </h2>
-        <p className="mt-0.5 text-[12px] text-ink-2">
-          A stock-out at {facility.name}, carried through the whole chain on real endpoints. Each
-          step shows what it called and what came back; the two decisions stay with a person.
-        </p>
+        {kind === "outbreak" ? (
+          <>
+            <h2 className="mt-2 text-[13px] font-semibold text-ink">
+              Simulate an outbreak emergency · प्रकोप आपात स्थिति का पूर्वाभ्यास
+            </h2>
+            <p className="mt-0.5 text-[12px] text-ink-2">
+              {DRILL_DISEASE} declared in {SANDBOX.district} and carried through the whole chain on real endpoints:
+              surge, early warnings, pre-positioning, the donor's yes, dispatch and receipt. Each step shows what it
+              called and what came back; the decisions stay with a person.
+            </p>
+          </>
+        ) : (
+          <>
+            <h2 className="mt-2 text-[13px] font-semibold text-ink">Stock-out drill · स्टॉक समाप्ति पूर्वाभ्यास</h2>
+            <p className="mt-0.5 text-[12px] text-ink-2">
+              A stock-out at {facility.name}, carried through the whole chain on real endpoints. Each step shows
+              what it called and what came back; the two decisions stay with a person.
+            </p>
+          </>
+        )}
         <p className="mt-1.5 text-[11px] leading-snug text-ink-3">
           Writes are confined to {SANDBOX.label}. <code className="font-mono">scripts/reset_nashik.py</code>{" "}
           puts the sandbox back.
@@ -496,8 +680,9 @@ export function LiveLoopPanel({
       <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2.5">
         {!mayWrite && (
           <p className="mb-2.5 rounded-md border border-risk/30 bg-risk/5 px-2.5 py-2 text-[12px] text-ink-2">
-            This account cannot report for {facility.name} or decide its transfers, so the loop
-            would stop at the first write.
+            {kind === "outbreak"
+              ? "This account cannot declare an outbreak in the sandbox or act for its centres, so the drill would stop at the first write."
+              : `This account cannot report for ${facility.name} or decide its transfers, so the loop would stop at the first write.`}
           </p>
         )}
 
@@ -565,14 +750,14 @@ export function LiveLoopPanel({
         {phase === "receiving" && transfer && (
           <div className="mt-3 rounded-md border border-brand/30 bg-brand/[0.04] px-2.5 py-2.5">
             <p className="text-[12.5px] leading-snug text-ink">
-              The batch is on the road. {facility.name} is credited only when someone there confirms
-              what arrived.
+              The batch is on the road. {here.name} is credited only when someone there confirms what
+              arrived.
             </p>
             <button
               onClick={confirmArrival}
               className="mt-2 h-9 w-full rounded-md bg-brand text-[13px] font-medium text-white hover:bg-brand/90 focus:ring-2 focus:ring-brand/30 focus:outline-none"
             >
-              Confirm arrival at {facility.name}
+              Confirm arrival at {here.name}
             </button>
           </div>
         )}
@@ -617,6 +802,21 @@ export function LiveLoopPanel({
           </div>
         )}
 
+        {kind === "outbreak" && outbreakId !== null && phase !== "running" && (
+          <div className="mt-3 rounded-md border border-line bg-canvas px-2.5 py-2">
+            <p className="text-[12px] leading-snug text-ink-2">
+              {ended
+                ? "The drill's outbreak has ended; its medicines were re-planned without the surge."
+                : `The drill's outbreak stays active for 14 days and keeps raising the plan for ${SANDBOX.district}'s medicines until it is ended.`}
+            </p>
+            {!ended && (
+              <button onClick={endOutbreak} className="mt-1.5 text-[12px] font-medium text-brand hover:underline">
+                End the drill's outbreak →
+              </button>
+            )}
+          </div>
+        )}
+
         {phase === "done" && (
           <div className="mt-3 rounded-md border border-line bg-canvas px-2.5 py-2">
             <p className="text-[12px] leading-snug text-ink-2">
@@ -649,7 +849,9 @@ export function LiveLoopPanel({
           className="h-9 w-full rounded-md bg-brand text-[13px] font-medium text-white hover:bg-brand/90 focus:ring-2 focus:ring-brand/30 focus:outline-none disabled:opacity-55"
         >
           {phase === "idle"
-            ? "Simulate a stock-out"
+            ? kind === "outbreak"
+              ? "Declare the outbreak and run the chain"
+              : "Simulate a stock-out"
             : phase === "running"
               ? "Running…"
               : "Run it again"}

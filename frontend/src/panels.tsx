@@ -481,7 +481,7 @@ export function FacilityPanel({
                 onClick={() => onSimulateStockOut(detail)}
                 className="mt-3 h-9 w-full rounded-md border border-brand bg-brand/[0.04] text-[13px] font-medium text-brand hover:bg-brand/10 focus:ring-2 focus:ring-brand/30 focus:outline-none"
               >
-                Simulate a stock-out →
+                Stock-out drill →
               </button>
             )}
             <div className="mt-3.5 grid grid-cols-3 gap-2 text-center">

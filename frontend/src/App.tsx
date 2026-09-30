@@ -200,6 +200,9 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
   const [loopFor, setLoopFor] = useState<FacilityDetail | null>(null);
   // Set when the loop was opened by "Simulate emergency", which starts it too.
   const [loopAuto, setLoopAuto] = useState(false);
+  // "Simulate emergency" runs the outbreak chain (fix #44); a facility's own
+  // button runs the stock-out drill.
+  const [loopKind, setLoopKind] = useState<"stockout" | "outbreak">("stockout");
   const [emergencyBusy, setEmergencyBusy] = useState(false);
   const [emergencyError, setEmergencyError] = useState<string | null>(null);
   // Which states train the shared model, reported by the federation panel so
@@ -441,7 +444,8 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
   // sandbox district and offered only to someone who may write there.
   const canRunEmergency =
     session.demo_mode &&
-    can.report(user, { id: "", state_silo: SANDBOX.state, district: SANDBOX.district });
+    can.report(user, { id: "", state_silo: SANDBOX.state, district: SANDBOX.district }) &&
+    can.planState(user, SANDBOX.state);
 
   const startEmergency = async () => {
     setEmergencyBusy(true);
@@ -456,6 +460,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
         const detail = await api.facility(pin.id);
         if (pickSku(detail.skus)) {
           setSelected(null);
+          setLoopKind("outbreak");
           setLoopAuto(true);
           setLoopFor(detail);
           return;
@@ -671,8 +676,9 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
         <aside className="z-[1000] flex w-[400px] shrink-0 flex-col border-r border-line bg-panel">
           {loopFor ? (
             <LiveLoopPanel
-              key={`${loopFor.id}:${loopAuto}`}
+              key={`${loopFor.id}:${loopAuto}:${loopKind}`}
               facility={loopFor}
+              kind={loopKind}
               autoStart={loopAuto}
               user={user}
               events={events}
@@ -725,7 +731,10 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               user={user}
               demoMode={session.demo_mode}
               llmMode={llmMode}
-              onSimulateStockOut={setLoopFor}
+              onSimulateStockOut={(d) => {
+                setLoopKind("stockout");
+                setLoopFor(d);
+              }}
               onOpenEvidence={(e, facility) => {
                 if (e.tab !== "movements") return;
                 setEvidenceFor(facility);
@@ -914,7 +923,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
                 <button
                   onClick={startEmergency}
                   disabled={emergencyBusy}
-                  title={`Drops one medicine at a ${SANDBOX.label} facility below the critical line and carries it through detection, Gemini, the optimiser, approval and receipt. The stock report, approval and receipt stay in the sandbox; the plan it runs covers that medicine across the whole state.`}
+                  title={`Declares a scripted acute diarrhoeal outbreak in ${SANDBOX.label} and carries it through the surge, early warnings, pre-positioning, Gemini, the donor's yes, dispatch and receipt. Writes stay in the sandbox; the plans it runs cover the outbreak's medicines across the state.`}
                   className="rounded-lg bg-crit px-3 py-1.5 text-[12px] font-semibold text-white shadow-sm hover:bg-crit/90 focus:ring-2 focus:ring-crit/30 focus:outline-none disabled:opacity-60"
                 >
                   {emergencyBusy ? "Choosing a facility…" : "Simulate emergency"}
