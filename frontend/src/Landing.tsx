@@ -49,21 +49,66 @@ const STEPS = [
   },
   {
     n: "02",
-    title: "A shared model forecasts",
-    hindi: "साझा मॉडल पूर्वानुमान लगाता है",
+    title: "Four states train a shared forecasting model today",
+    hindi: "आज चार राज्य मिलकर एक पूर्वानुमान मॉडल प्रशिक्षित करते हैं",
     body:
-      "Each state trains on its own rows and sends back model weights only — never a facility " +
-      "record, never a row of stock. The national model those weights build predicts when each " +
-      "shelf runs out, and the warning fires while there is still time to act on it.",
+      "Maharashtra, Kerala, Bihar and Uttar Pradesh each train on their own rows and send back " +
+      "model weights only — never a facility record, never a row of stock. Where no fresh " +
+      "forecast exists, days of stock come from the last 28 days of readings instead, and the " +
+      "screen says which of the two it used.",
   },
   {
     n: "03",
-    title: "A human approves the transfer",
-    hindi: "मंज़ूरी इंसान देता है",
+    title: "The donor centre accepts; an officer handles exceptions",
+    hindi: "दाता केंद्र स्वीकार करता है; अपवाद अधिकारी सँभालते हैं",
     body:
-      "The optimiser proposes a route from a district holding surplus to one running short, " +
-      "with the reasoning and the distance attached. An officer approves or rejects it. " +
+      "The optimiser proposes a route from a centre holding surplus to one running short, with " +
+      "the reasoning and the distance attached. The centre that would give the stock accepts " +
+      "or declines; officers see the whole picture and step in where something is stuck. " +
       "Nothing moves on its own, and no proposal takes a donor below its own safety stock.",
+  },
+] as const;
+
+/**
+ * What runs live, what is recorded, what is next — answered before a judge
+ * has to ask. The deployed database is a small free instance: anything that
+ * writes a handful of rows per action runs live; anything heavy (training,
+ * a reseed) was run once and its proof is stored; the rest is roadmap and is
+ * called that. Update a row when the thing it describes moves.
+ */
+const RUNS = [
+  {
+    key: "live",
+    title: "Live on this site",
+    hindi: "इस साइट पर लाइव",
+    items: [
+      "Stock counts, bill photos read by Gemini, requests between centres, dispatches and confirmed receipts",
+      "Days-of-stock warnings, the redistribution solver and trust scores, computed from the database each time you look",
+      "Ward bed reports read by Gemini, staff check-ins and the daily briefing",
+    ],
+    why: "Each action writes a handful of small rows.",
+  },
+  {
+    key: "recorded",
+    title: "Recorded, with proof",
+    hindi: "रिकॉर्ड किया गया, प्रमाण सहित",
+    items: [
+      "Federated training: four state processes on a laptop. Every round's bytes and weights hash are stored and shown on the Federation tab",
+      "The forecasts published from that run — used while fresh, otherwise the 28-day burn rate",
+      "The synthetic dataset, and outbreak rows parsed from NCDC's weekly IDSP reports",
+    ],
+    why: "Heavy compute or bulk writes, run once and kept.",
+  },
+  {
+    key: "next",
+    title: "Next, said plainly",
+    hindi: "आगे का काम",
+    items: [
+      "A real SMS, WhatsApp and voice carrier (needs DLT registration) — the demo uses a built-in handset simulator",
+      "One database per state, instead of one database separated by state",
+      "District warehouse stock and indents; differential privacy and secure aggregation",
+    ],
+    why: "Not built. Named here so nobody mistakes it for a feature.",
   },
 ] as const;
 
@@ -147,16 +192,20 @@ export default function Landing({
                     <span className="font-semibold text-white">
                       {fmt(summary.critical)} centres
                     </span>{" "}
-                    are below their reorder floor right now. Every figure on this page is read
-                    from the live database as it loads.
+                    are below their reorder floor, as of each centre's last report. Figures are
+                    read from the live database as this page loads.
+                    <span lang="hi" className="mt-1 block text-white/60">
+                      आँकड़े लाइव डेटाबेस से; स्टॉक की स्थिति हर केंद्र की पिछली रिपोर्ट के अनुसार।
+                    </span>
                   </span>
                 </p>
               </div>
             )}
           </div>
 
-          <p className="relative z-10 text-[11.5px] text-white/50">
-            Authorised health department staff only. Activity is recorded.
+          <p className="relative z-10 text-[11.5px] text-white/60">
+            Prototype — not an official government system.{" "}
+            <span lang="hi">प्रोटोटाइप — यह कोई आधिकारिक सरकारी प्रणाली नहीं है।</span>
           </p>
 
           <svg
@@ -214,7 +263,8 @@ export default function Landing({
           </h2>
           <p className="mt-3 max-w-2xl text-[16px] leading-relaxed text-ink-2">
             Three steps, and a person at the end of them. The forecast is shared across states
-            without the rows ever leaving one; the decision stays with an officer.
+            without the rows ever leaving one; the decision stays with people — the centre that
+            gives the stock, and an officer for the exceptions.
           </p>
 
           <ol className="mt-10 grid gap-px overflow-hidden rounded-lg border border-line bg-line sm:grid-cols-3">
@@ -234,6 +284,43 @@ export default function Landing({
               </li>
             ))}
           </ol>
+        </div>
+      </section>
+
+      {/* ------------------------------------------ live, recorded, next --- */}
+      <section aria-labelledby="live-recorded-next" className="border-t border-line">
+        <div className="mx-auto max-w-6xl px-5 py-14 sm:px-8 lg:py-16">
+          <h2
+            id="live-recorded-next"
+            className="scroll-mt-6 text-[12px] font-semibold tracking-[0.14em] text-ink-3 uppercase"
+          >
+            What runs live, what's recorded, what's next
+          </h2>
+          <p lang="hi" className="mt-1 text-[13px] text-ink-3">
+            क्या लाइव चलता है, क्या रिकॉर्ड है, आगे क्या है
+          </p>
+          <p className="mt-3 max-w-2xl text-[16px] leading-relaxed text-ink-2">
+            The demo runs on a small free database. What costs a few rows per action runs live;
+            what needs heavy compute ran once and its proof is kept; the rest is roadmap.
+          </p>
+          <div className="mt-8 grid gap-px overflow-hidden rounded-lg border border-line bg-line md:grid-cols-3">
+            {RUNS.map((col) => (
+              <div key={col.key} className="flex flex-col bg-panel p-6">
+                <h3 className="text-[16px] leading-snug font-semibold tracking-tight">
+                  {col.title}
+                </h3>
+                <span lang="hi" className="mt-0.5 block text-[13px] text-ink-3">
+                  {col.hindi}
+                </span>
+                <ul className="mt-3.5 list-disc space-y-2 pl-4 text-[13.5px] leading-relaxed text-ink-2">
+                  {col.items.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+                <p className="mt-auto pt-4 text-[12.5px] text-ink-3">{col.why}</p>
+              </div>
+            ))}
+          </div>
         </div>
       </section>
 

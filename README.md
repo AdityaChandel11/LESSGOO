@@ -50,6 +50,16 @@ A two-minute path:
 3. Open Stocking advice (demo) on the outbreak panel.
 4. Open Federation.
 
+## What runs live, what's recorded, what's next
+
+The deployed database is a small free instance, so the rule is: live where an action writes a handful of rows, recorded where the work is heavy, and future only for what is not core, each labelled as such. The same table is on the landing page.
+
+| Category | What | Why |
+|---|---|---|
+| Live on the deployed site | Stock counts, bill and ward photos read by Gemini, requests between centres, dispatches and confirmed receipts, check-ins, days-of-stock warnings, the solver, trust scores, the daily briefing | Each action writes a handful of small rows |
+| Recorded, with proof | Federated training (one Flower SuperLink and four SuperNodes on a laptop; every round's bytes and weights hash stored and shown on the Federation tab), the forecasts published from it, the synthetic seed, outbreak rows parsed from NCDC's weekly IDSP reports | Heavy compute or bulk writes, run once and kept |
+| Next, said plainly | A real SMS, WhatsApp and voice carrier (DLT registration), one database per state, district warehouse stock and indents, differential privacy and secure aggregation | Not built; the roadmap |
+
 ## What is live and what is not
 
 | Part | Status | Detail |
