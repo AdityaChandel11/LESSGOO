@@ -537,6 +537,17 @@ class OutbreakEvent(Base):
     triggered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    # Fix #41: an active outbreak is a temporary multiplier into the solver
+    # (spec 12.5). District names repeat across states, so the state is part
+    # of the key. `source` is "officer" or "idsp"; `surge_pct` is the
+    # officer's stated expectation, used only when the readings show no rise.
+    state_silo: Mapped[str | None] = mapped_column(Text, index=True)
+    source: Mapped[str] = mapped_column(Text, nullable=False, server_default="officer")
+    source_ref: Mapped[str | None] = mapped_column(Text)
+    surge_pct: Mapped[Decimal | None] = mapped_column(Numeric)
+    declared_by: Mapped[str | None] = mapped_column(Text)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class RouteMatrixCache(Base):

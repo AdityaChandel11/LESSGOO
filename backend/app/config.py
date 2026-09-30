@@ -278,6 +278,18 @@ class Settings(BaseSettings):
     # and a ward is photographed once a day (data-trust-layer.md §2).
     bed_stale_hours: int = 24
 
+    # --- outbreak pre-positioning (spec v3 §12.5, fix #41) ---
+    # How long a declared outbreak raises demand: the spec's ttl_days=14.
+    outbreak_ttl_days: int = 14
+    # Observed rise = use over the last N days against the N before.
+    outbreak_window_days: int = 14
+    # Below this rise the readings do not show a surge, and only the
+    # officer's stated expectation (labelled an assumption) can set one. A
+    # rule parameter, not a claim about any outbreak.
+    outbreak_min_rise: float = 0.10
+    # The largest expected surge an officer may type, as a percentage.
+    outbreak_max_surge_pct: float = 300.0
+
     # --- phone channels (spec 13) ---
     # Salt for hashing inbound phone numbers. Deliberately NOT derived from
     # JWT_SECRET: rotating a session secret must never orphan every registered

@@ -34,7 +34,7 @@ from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from . import maps, movements, services
+from . import maps, movements, outbreak, services
 from .config import settings
 from .models import (
     Approval,
@@ -495,6 +495,21 @@ def _refresh_plan_outcomes(
         p.rationale["donor_days_after_plan"] = round((d.qty - sum(x.qty for x in outs)) / d.burn, 2)
 
 
+def _outbreak_note(
+    p: Proposal,
+    surges: dict[tuple[str, str], "outbreak.Surge"],
+    unsurged: dict[tuple[str, str], StockNode],
+) -> dict:
+    """Why a trip is pre-positioning: which outbreak, how big, on what basis,
+    and the recipient's cover without it."""
+    surge = surges.get((p.to_id, p.sku_code))
+    if surge is None:
+        return {}
+    base = unsurged.get((p.to_id, p.sku_code))
+    days = round(base.qty / base.burn, 2) if base is not None and base.burn > 0 else None
+    return {"outbreak": surge.rationale(days)}
+
+
 @dataclass
 class PlanResult:
     state: str
@@ -553,6 +568,18 @@ async def generate_plan(
         code: after_promises(nodes, promises.get(code, []))
         for code, nodes in (await load_state_nodes(session, state, sku)).items()
     }
+    # Spec 12.5: an active outbreak is a temporary multiplier on the burn of
+    # the medicines it drives in its district — the same solver then sees the
+    # shorter cover and proposes pre-positioning trips (fix #41).
+    surges = await outbreak.surges_for_state(session, state, datetime.now(timezone.utc))
+    if sku:
+        surges = {k: v for k, v in surges.items() if k[1] == sku}
+    unsurged = {
+        (n.facility_id, code): n for code, ns in nodes_by_sku.items() for n in ns
+    }
+    nodes_by_sku = outbreak.apply_surges(
+        nodes_by_sku, {k: v.multiplier for k, v in surges.items()}
+    )
 
     in_state = select(Facility.id).where(Facility.state_silo == state)
     replaceable = select(
@@ -670,6 +697,7 @@ async def generate_plan(
             rationale={
                 **p.rationale,
                 **replacement_note((p.from_id, p.to_id, p.sku_code), replaced, replaced_at),
+                **_outbreak_note(p, surges, unsurged),
             },
         )
         for _, p in kept

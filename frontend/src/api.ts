@@ -461,6 +461,10 @@ export const api = {
   cancelRequest: (transferId: number) => post<Transfer>(`/transfers/${transferId}/cancel`),
   outbreakAdvice: (state: string | null) => get<StockingAdvice[]>("/outbreaks/advice", { state }),
   outbreaks: (state: string | null) => get<Outbreaks>("/outbreaks", { state }),
+  activeOutbreaks: (state: string | null) => get<ActiveOutbreaks>("/outbreaks/active", { state }),
+  declareOutbreak: (body: { state: string; district: string; disease: string; surge_pct: number | null }) =>
+    post<DeclaredOutbreak>("/outbreaks/declare", body),
+  endOutbreak: (id: number) => post<{ id: number; ended_at: string }>(`/outbreaks/${id}/end`),
   explainTrust: (facilityId: string) =>
     post<Explanation>(`/facilities/${encodeURIComponent(facilityId)}/trust/explain`),
 };
@@ -951,6 +955,16 @@ export interface TransferRationale {
    *  receiver and medicine (fix #37): the donor is told it was updated. */
   replaces_transfer?: number;
   updated_at?: string;
+  /** Pre-positioning for an active outbreak (fix #41, spec v3 §12.5). */
+  outbreak?: {
+    outbreak_id: number;
+    disease: string;
+    district: string;
+    multiplier: number;
+    basis: "observed" | "assumption";
+    detail: string;
+    recipient_days_without_outbreak: number | null;
+  };
 }
 
 export interface Transfer {
@@ -1253,14 +1267,70 @@ export interface Outbreaks {
   rows: Outbreak[];
 }
 
-/** Demo: an outbreak turned into a stocking action. Demand rise is simulated. */
+/** An IDSP outbreak turned into a stocking action. How much demand rises is
+ *  never guessed: declaring the outbreak measures it (fix #41). */
 export interface StockingAdvice {
   unique_id: string;
   district: string;
   state_code: string;
   disease: string;
   medicines: string[];
-  demand_rise_pct: number;
   signals: string[];
   action: string;
+}
+
+/** Fix #41 (spec v3 §12.5): an active outbreak and what it does to supply. */
+export interface OutbreakMedicine {
+  sku_code: string;
+  sku_name: string;
+  observed_ratio: number | null;
+  multiplier: number | null;
+  /** "observed" from the district's readings, or the officer's "assumption". */
+  basis: "observed" | "assumption" | null;
+  detail: string;
+}
+
+export interface OutbreakWarning {
+  outbreak_id: number;
+  facility_id: string;
+  facility_name: string;
+  district: string;
+  sku_code: string;
+  sku_name: string;
+  runs_out_on: string;
+  runs_out_without: string;
+  basis: "observed" | "assumption";
+  line: string;
+}
+
+export interface ActiveOutbreak {
+  id: number;
+  state: string;
+  district: string;
+  disease: string;
+  source: string;
+  source_ref: string | null;
+  surge_pct: number | null;
+  declared_by: string | null;
+  declared_at: string | null;
+  expires_at: string | null;
+  facilities: number;
+  count_overdue: number;
+  medicines: OutbreakMedicine[];
+  warnings: OutbreakWarning[];
+}
+
+export interface ActiveOutbreaks {
+  ttl_days: number;
+  window_days: number;
+  min_rise_pct: number;
+  max_surge_pct: number;
+  diseases: string[];
+  outbreaks: ActiveOutbreak[];
+}
+
+export interface DeclaredOutbreak {
+  outbreak: ActiveOutbreak;
+  trips_proposed: number;
+  pre_positioning_trips: number;
 }

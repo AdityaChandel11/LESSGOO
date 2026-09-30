@@ -138,13 +138,13 @@ def network_districts() -> set[tuple[str, str]]:
     }
 
 
-# ================================================== stocking advice (demo) ===
-# How the platform would turn an outbreak into supply action: the IDSP row
-# names the disease and district, a disease-to-medicine map names what it
-# drives, the state's monsoon calendar says whether the season amplifies it,
-# and the district's recent consumption says whether demand is already rising.
-# The consumption trend here is SIMULATED from a fixed seed per outbreak; the
-# response and the screen say so.
+# ======================================================== stocking advice ===
+# How an outbreak turns into supply action: the IDSP row names the disease and
+# district, the disease-to-medicine map below names what it drives, and the
+# state's monsoon calendar says whether the season amplifies it. How much
+# demand rises is not guessed here: declaring the outbreak active (#41,
+# app/outbreak.py) measures it from the district's own readings, or takes the
+# officer's stated expectation, labelled as an assumption.
 
 DISEASE_MEDICINES: dict[str, list[str]] = {
     "Acute Diarrheal Disease": ["ORS", "ZINC", "IVFLUID"],
@@ -171,9 +171,6 @@ MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
 
 
 def stocking_advice(state_code: str | None, today_month: int) -> list[dict]:
-    import math
-    import random
-
     from . import geo
 
     calendar = {s.code: s.monsoon_months for s in geo.INDIA_STATES}
@@ -182,19 +179,20 @@ def stocking_advice(state_code: str | None, today_month: int) -> list[dict]:
         codes = DISEASE_MEDICINES.get(r["disease"])
         if not codes or r["state_code"] is None:
             continue
-        rnd = random.Random(r["unique_id"])
-        rise = round(min(80, 12 + 8 * math.log1p(r["cases"]) + rnd.uniform(0, 10)))
         months = calendar.get(r["state_code"], ())
         start_month = int(r["start_date"][5:7]) if r["start_date"] else None
-        signals = [f"IDSP: {r['cases']} cases, {r['deaths']} deaths ({r['status'] or 'status not stated'})"]
+        signals = [
+            f"IDSP week {r['week']}/{r['year']}: {r['cases']} cases, {r['deaths']} deaths "
+            f"({r['status'] or 'status not stated'})"
+        ]
         if start_month in months or today_month in months:
             signals.append(f"Monsoon months in {r['state']}: {', '.join(MONTHS[m - 1] for m in months)}")
-        signals.append(f"Demand for {MEDICINE_NAMES[codes[0]]} up {rise}% over 14 days (simulated)")
+        medicines = [MEDICINE_NAMES[c] for c in codes]
         out.append({
             "unique_id": r["unique_id"], "district": r["district"], "state_code": r["state_code"],
-            "disease": r["disease"], "medicines": [MEDICINE_NAMES[c] for c in codes],
-            "demand_rise_pct": rise, "signals": signals,
-            "action": f"Pre-position {', '.join(MEDICINE_NAMES[c] for c in codes[:2])} in {r['district']}: "
-                      f"raise the reorder target by {rise}% for 3 weeks and let the redistribution plan fill it.",
+            "disease": r["disease"], "medicines": medicines, "signals": signals,
+            "action": f"Declare it active to pre-position {', '.join(medicines[:2])} in "
+                      f"{r['district']}. The rise comes from {r['district']}'s own readings, or "
+                      "from the surge you expect, labelled as your assumption.",
         })
     return out

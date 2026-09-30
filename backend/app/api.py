@@ -36,6 +36,7 @@ from . import (
     federation_live,
     idsp,
     movements,
+    outbreak,
     redistribution,
     services,
     comms,
@@ -71,6 +72,7 @@ from .models import (
     FacilityContact,
     FederationRound,
     MedicineMovement,
+    OutbreakEvent,
     Sku,
     StockReading,
     Transfer,
@@ -2986,17 +2988,267 @@ class StockingAdviceOut(BaseModel):
     state_code: str
     disease: str
     medicines: list[str]
-    demand_rise_pct: int
     signals: list[str]
     action: str
 
 
 @router.get("/outbreaks/advice", response_model=list[StockingAdviceOut], tags=["outbreaks"])
 async def outbreak_advice(state: str | None = None) -> list[StockingAdviceOut]:
-    """Demo: stocking advice from IDSP outbreaks, the monsoon calendar and a
-    simulated demand trend. Computed on request; nothing is stored."""
+    """Stocking advice from IDSP outbreaks and the monsoon calendar. How much
+    demand rises is not guessed here; declaring the outbreak measures it (#41).
+    Computed on request; nothing is stored."""
     month = datetime.now(timezone.utc).month
     return [StockingAdviceOut(**a) for a in idsp.stocking_advice(state, month)]
+
+
+
+# ================================================= active outbreaks (#41) ===
+# Spec v3 §12.5: an outbreak is a temporary multiplier into the §12.3 solver,
+# not a new subsystem. Declaring one re-plans exactly the medicines its
+# disease drives — single-medicine plans through the same solver and the same
+# approval gate — and ending it re-plans them without the surge.
+
+
+class OutbreakMedicineOut(BaseModel):
+    sku_code: str
+    sku_name: str
+    observed_ratio: float | None
+    multiplier: float | None
+    basis: str | None
+    detail: str
+
+
+class OutbreakWarningOut(BaseModel):
+    outbreak_id: int
+    facility_id: str
+    facility_name: str
+    district: str
+    sku_code: str
+    sku_name: str
+    runs_out_on: date
+    runs_out_without: date
+    basis: str
+    line: str
+
+
+class ActiveOutbreakOut(BaseModel):
+    id: int
+    state: str
+    district: str
+    disease: str
+    source: str
+    source_ref: str | None
+    surge_pct: float | None
+    declared_by: str | None
+    declared_at: datetime | None
+    expires_at: datetime | None
+    facilities: int
+    # Centres whose shelf would already be empty at the surge rate: count them.
+    count_overdue: int
+    medicines: list[OutbreakMedicineOut]
+    warnings: list[OutbreakWarningOut]
+
+
+class ActiveOutbreaksOut(BaseModel):
+    ttl_days: int
+    window_days: int
+    min_rise_pct: int
+    max_surge_pct: float
+    diseases: list[str]
+    outbreaks: list[ActiveOutbreakOut]
+
+
+class DeclareOutbreakIn(BaseModel):
+    state: str
+    district: str
+    disease: str
+    # The officer's expected surge, used only when the readings show no rise,
+    # and shown as their assumption wherever it is used.
+    surge_pct: float | None = Field(default=None, ge=0, le=settings.outbreak_max_surge_pct)
+
+
+class DeclaredOutbreakOut(BaseModel):
+    outbreak: ActiveOutbreakOut
+    trips_proposed: int
+    pre_positioning_trips: int
+
+
+def _active_out(view, warnings: list[dict]) -> ActiveOutbreakOut:
+    row = view.row
+    return ActiveOutbreakOut(
+        id=row.id,
+        state=row.state_silo or "",
+        district=row.district or "",
+        disease=row.disease_category or "",
+        source=row.source or "officer",
+        source_ref=row.source_ref,
+        surge_pct=float(row.surge_pct) if row.surge_pct is not None else None,
+        declared_by=row.declared_by,
+        declared_at=row.triggered_at,
+        expires_at=row.expires_at,
+        facilities=len(view.ids),
+        count_overdue=view.overdue,
+        medicines=[OutbreakMedicineOut(**m) for m in view.medicines],
+        warnings=[OutbreakWarningOut(**w) for w in warnings],
+    )
+
+
+@router.get("/outbreaks/active", response_model=ActiveOutbreaksOut, tags=["outbreaks"])
+async def active_outbreaks(
+    state: str | None = None,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> ActiveOutbreaksOut:
+    """Active outbreaks with their surge per medicine and the centres that run
+    out inside the horizon at the surge rate. Each outbreak's reads are bounded
+    by its district's facility ids."""
+    now = datetime.now(timezone.utc)
+    out: list[ActiveOutbreakOut] = []
+    for row in await outbreak.active(session, now, state):
+        view = await outbreak.evaluate(session, row, now)
+        out.append(_active_out(view, await outbreak.warnings(session, view, now)))
+    return ActiveOutbreaksOut(
+        ttl_days=settings.outbreak_ttl_days,
+        window_days=settings.outbreak_window_days,
+        min_rise_pct=round(settings.outbreak_min_rise * 100),
+        max_surge_pct=settings.outbreak_max_surge_pct,
+        diseases=sorted(idsp.DISEASE_MEDICINES),
+        outbreaks=out,
+    )
+
+
+async def _open_outbreak(
+    session: AsyncSession, state: str, district: str, disease: str, now: datetime
+) -> OutbreakEvent | None:
+    return await session.scalar(
+        select(OutbreakEvent).where(
+            OutbreakEvent.state_silo == state,
+            OutbreakEvent.district == district,
+            OutbreakEvent.disease_category == disease,
+            OutbreakEvent.ended_at.is_(None),
+            OutbreakEvent.expires_at > now,
+        )
+    )
+
+
+async def _replan_medicines(session: AsyncSession, state: str, skus: list[str]) -> list[int]:
+    """Single-medicine plans, one per medicine, each recorded like any plan."""
+    ids: list[int] = []
+    for sku in skus:
+        result = await redistribution.generate_plan(session, state, sku)
+        ids.extend(result.transfer_ids)
+        await events.record(
+            session,
+            events.TRANSFER_PROPOSED,
+            {
+                "state": state,
+                "sku": sku,
+                "transfers": len(result.transfer_ids),
+                "replaced": result.replaced_ids,
+                "triggered_by": "outbreak",
+            },
+            state_silo=state,
+        )
+    await session.commit()
+    return ids
+
+
+@router.post("/outbreaks/declare", response_model=DeclaredOutbreakOut, tags=["outbreaks"])
+async def declare_outbreak(
+    payload: DeclareOutbreakIn,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> DeclaredOutbreakOut:
+    refusal = outbreak.may_declare(user, payload.state, payload.district)
+    if refusal:
+        raise HTTPException(status_code=403, detail=refusal)
+    skus = outbreak.medicines_for(payload.disease)
+    if not skus:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "That disease is not in the disease-to-medicine map, so nothing can be "
+                "pre-positioned for it"
+            ),
+        )
+    if not await outbreak.district_ids(session, payload.state, payload.district):
+        raise HTTPException(status_code=404, detail="No centres in that district")
+
+    now = datetime.now(timezone.utc)
+    row = await _open_outbreak(session, payload.state, payload.district, payload.disease, now)
+    if row is None:
+        row = OutbreakEvent(
+            state_silo=payload.state,
+            district=payload.district,
+            disease_category=payload.disease,
+            source="officer",
+        )
+        session.add(row)
+    # Declaring again refreshes the expectation and the clock; it never adds a
+    # second copy of the same outbreak.
+    row.surge_pct = payload.surge_pct
+    row.declared_by = user.name
+    row.expires_at = now + timedelta(days=settings.outbreak_ttl_days)
+    row.triggered_at = now
+    await session.flush()
+    await events.record(
+        session,
+        events.OUTBREAK_DECLARED,
+        {
+            "outbreak_id": row.id,
+            "state": payload.state,
+            "district": payload.district,
+            "disease": payload.disease,
+            "surge_pct": payload.surge_pct,
+            "declared_by": user.name,
+        },
+        state_silo=payload.state,
+    )
+    await session.commit()
+
+    trip_ids = await _replan_medicines(session, payload.state, skus)
+    trips = await redistribution.list_transfers(session, ids=trip_ids)
+    view = await outbreak.evaluate(session, row, now)
+    return DeclaredOutbreakOut(
+        outbreak=_active_out(view, await outbreak.warnings(session, view, now)),
+        trips_proposed=len(trips),
+        pre_positioning_trips=sum(
+            1 for t in trips if (t.get("rationale") or {}).get("outbreak")
+        ),
+    )
+
+
+@router.post("/outbreaks/{outbreak_id}/end", tags=["outbreaks"])
+async def end_outbreak(
+    outbreak_id: int,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> dict:
+    row = await session.get(OutbreakEvent, outbreak_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="No such outbreak")
+    refusal = outbreak.may_declare(user, row.state_silo or "", row.district or "")
+    if refusal:
+        raise HTTPException(status_code=403, detail=refusal)
+    if row.ended_at is None:
+        row.ended_at = datetime.now(timezone.utc)
+        await events.record(
+            session,
+            events.OUTBREAK_ENDED,
+            {
+                "outbreak_id": row.id,
+                "state": row.state_silo,
+                "district": row.district,
+                "disease": row.disease_category,
+                "ended_by": user.name,
+            },
+            state_silo=row.state_silo,
+        )
+        await session.commit()
+        await _replan_medicines(
+            session, row.state_silo or "", outbreak.medicines_for(row.disease_category or "")
+        )
+    return {"id": row.id, "ended_at": row.ended_at}
 
 
 # ==================================================== the ingestion spine ===

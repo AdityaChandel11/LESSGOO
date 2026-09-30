@@ -493,6 +493,16 @@ function TripCard({
                   donor keeps at least {formatDays(r.donor_days_after_plan)}
                 </span>
               </div>
+              {r.outbreak && (
+                // Why this trip exists: an active outbreak raised the
+                // receiver's expected use (spec v3 §12.5), on a stated basis.
+                <div className="text-[11px] text-ink-2">
+                  <span className="font-medium text-ink">Pre-positioning</span> for {r.outbreak.disease} in{" "}
+                  {r.outbreak.district} · use ×{r.outbreak.multiplier.toFixed(2)}{" "}
+                  ({r.outbreak.basis === "observed" ? "observed" : "officer's assumption"}) · receiver has{" "}
+                  {formatDays(r.outbreak.recipient_days_without_outbreak)} without the outbreak
+                </div>
+              )}
               {t.status !== "proposed" && (
                 <div
                   className="text-[11px] font-medium"

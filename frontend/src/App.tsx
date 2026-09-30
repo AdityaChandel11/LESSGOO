@@ -837,7 +837,13 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
             )
           ) : activeState ? (
             <>
-            <OutbreakWarnings state={activeState} stateLabel={stateName(activeState)} />
+            <OutbreakWarnings
+              state={activeState}
+              stateLabel={stateName(activeState)}
+              user={user}
+              refreshKey={refreshKey}
+              onOpenTransfers={() => setMode("transfers")}
+            />
             <StatePanel
               key={`${activeState}:${sku ?? "all"}`}
               stateCode={activeState}
@@ -852,7 +858,13 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
             </>
           ) : (
             <>
-            <OutbreakWarnings state={null} stateLabel="India" />
+            <OutbreakWarnings
+              state={null}
+              stateLabel="India"
+              user={user}
+              refreshKey={refreshKey}
+              onOpenTransfers={() => setMode("transfers")}
+            />
             <NationalPanel
               summary={summary}
               states={states}
