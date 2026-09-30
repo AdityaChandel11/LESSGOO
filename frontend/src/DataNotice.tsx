@@ -18,7 +18,18 @@ export default function DataNotice({ className = "" }: { className?: string }) {
       <span className="font-medium text-ink-2">Synthetic demonstration data</span>
       {" · "}
       Facilities, stock, beds and attendance are simulated for this prototype. No real patient
-      or facility records exist in this system.
+      or facility records exist in this system.{" "}
+      {/* A new tab, so reading the rules never costs anybody their place in
+          the console (a same-tab load would drop them at the front door). */}
+      <a
+        href="/demo-data"
+        target="_blank"
+        rel="noopener"
+        className="font-medium text-brand underline-offset-2 hover:underline focus:ring-2 focus:ring-brand/30 focus:outline-none"
+      >
+        How this data is generated
+        <span className="sr-only"> (opens in a new tab)</span>
+      </a>
     </p>
   );
 }
