@@ -19,9 +19,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
-from . import trust
+from . import beds, trust
 from .models import (
-    BedStatus,
     Facility,
     FacilitySkuState,
     FacilityTrust,
@@ -102,7 +101,11 @@ class FacilitySnapshot:
     lat: float
     lng: float
     beds_total: int
+    # The latest verified ward count and when it was verified (fix #68). A
+    # stale one is shown with its date and never counted as available.
     beds_occupied: int | None
+    beds_verified_at: datetime | None
+    beds_stale: bool
     bed_occupancy_pct: float | None
     staff_checkin_pct: float | None
     # Data confidence (spec 12.6) and the threshold widening it causes.
@@ -251,15 +254,7 @@ async def get_snapshots(
         series[key].append((at, float(qty), source))
         latest_meta[key] = (at, source, float(conf) if conf is not None else None)
 
-    beds_stmt = (
-        select(BedStatus.facility_id, BedStatus.beds_occupied)
-        .where(BedStatus.facility_id.in_(ids))
-        .order_by(BedStatus.facility_id, BedStatus.recorded_at.desc())
-    )
-    latest_beds: dict[str, int] = {}
-    for fid, occupied in (await session.execute(beds_stmt)).all():
-        if fid not in latest_beds and occupied is not None:
-            latest_beds[fid] = occupied
+    bed_figures = await beds.latest_verified(session, ids, now)
 
     # Staff presence, aggregated to the facility only — never per person (rule 8).
     roster: dict[str, set[str]] = defaultdict(set)
@@ -316,7 +311,8 @@ async def get_snapshots(
 
         stock_status = worst([s.status for s in sku_rows])
 
-        occupied = latest_beds.get(fac.id)
+        bed_figure = bed_figures.get(fac.id)
+        occupied = bed_figure.occupied if bed_figure is not None else None
         occupancy_pct = (
             round(100.0 * occupied / fac.beds_total, 1)
             if occupied is not None and fac.beds_total
@@ -334,6 +330,7 @@ async def get_snapshots(
             reasons.append(trust_line)
         if (
             occupancy_pct is not None
+            and not bed_figure.stale
             and occupancy_pct > settings.bed_occupancy_escalate_pct
         ):
             reasons.append(f"bed occupancy {occupancy_pct}%")
@@ -354,6 +351,8 @@ async def get_snapshots(
                 lng=fac.lng,
                 beds_total=fac.beds_total,
                 beds_occupied=occupied,
+                beds_verified_at=bed_figure.as_of if bed_figure is not None else None,
+                beds_stale=bed_figure.stale if bed_figure is not None else False,
                 bed_occupancy_pct=occupancy_pct,
                 staff_checkin_pct=checkin_pct,
                 trust_score=trust_score,

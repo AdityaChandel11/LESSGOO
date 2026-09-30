@@ -20,7 +20,7 @@ import hashlib
 import math
 import secrets
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -41,6 +41,14 @@ UNVERIFIED = "unverified"
 REJECTED = "rejected"
 
 EARTH_RADIUS_KM = 6371.0088
+
+# What scripts/seed.py writes into a seeded report's notes. A seeded row was
+# never a photograph, so it is labelled as seeded rather than "read by mock".
+SEED_NOTE = "Seeded ward photo extraction."
+
+# How far back a centre's latest verified count is looked for. Bounds the
+# query by date as well as by facility; anything older is long stale anyway.
+LOOKBACK_DAYS = 30
 
 
 def generate_code(rng: secrets.SystemRandom | None = None) -> str:
@@ -117,9 +125,31 @@ def verify(
     loc_method: str | None,
     distance: float | None,
     register_admissions: int | None,
+    registered_total: int | None = None,
 ) -> Checks:
-    """Apply the three checks. Rejection needs evidence, not just absence of it."""
+    """Apply the three checks. Rejection needs evidence, not just absence of it.
+
+    `registered_total` is the centre's registered bed capacity. A report that
+    shows a different ward size, or more occupied beds than exist, contradicts
+    a registered fact and is rejected with the reason (fix #68).
+    """
     checks = Checks()
+
+    # --- the capacity: does the count fit the beds this centre has? ---
+    over_capacity = False
+    if registered_total is not None:
+        if extraction.beds_total is not None and extraction.beds_total != registered_total:
+            over_capacity = True
+            checks.reasons.append(
+                f"The report shows {extraction.beds_total} beds; this centre is registered "
+                f"for {registered_total}. Not counted."
+            )
+        elif extraction.beds_occupied is not None and extraction.beds_occupied > registered_total:
+            over_capacity = True
+            checks.reasons.append(
+                f"{extraction.beds_occupied} occupied is more than the {registered_total} "
+                f"registered beds. Not counted."
+            )
 
     # --- the code: was this taken today? ---
     if extraction.code_read is None:
@@ -174,7 +204,7 @@ def verify(
     # Only a contradiction rejects: a code that says another day, or a precise
     # location that says another place. A missing check leaves the report
     # unverified, which is a request for a better photo, not an accusation.
-    contradicted = checks.code_ok is False or (
+    contradicted = over_capacity or checks.code_ok is False or (
         checks.geofence_ok is False and loc_method == "gps"
     )
     # "Verified" has to mean both halves: from today, and from here. A channel
@@ -229,6 +259,7 @@ async def record_report(
         loc_method=loc_method,
         distance=distance,
         register_admissions=register_admissions,
+        registered_total=facility.beds_total,
     )
 
     report = BedReport(
@@ -322,3 +353,53 @@ async def recent_reports(
             )
         ).scalars()
     )
+
+
+@dataclass(frozen=True)
+class BedFigure:
+    """A centre's one bed figure: its latest verified count, and when."""
+
+    occupied: int
+    as_of: datetime
+    stale: bool
+
+
+def is_stale(as_of: datetime, now: datetime) -> bool:
+    """Older than the window, a verified count is not counted as available."""
+    return now - as_of > timedelta(hours=settings.bed_stale_hours)
+
+
+async def latest_verified(
+    session: AsyncSession, ids: list[str], now: datetime
+) -> dict[str, BedFigure]:
+    """Each centre's latest verified ward count — the only bed figure any view
+    shows (fix #68). Bounded by facility and by date."""
+    rows = await session.execute(
+        select(BedReport.facility_id, BedReport.beds_occupied, BedReport.reported_at)
+        .where(
+            BedReport.facility_id.in_(ids),
+            BedReport.verification == VERIFIED,
+            BedReport.beds_occupied.is_not(None),
+            BedReport.reported_at >= now - timedelta(days=LOOKBACK_DAYS),
+        )
+        .order_by(BedReport.facility_id, BedReport.reported_at.desc())
+    )
+    figures: dict[str, BedFigure] = {}
+    for fid, occupied, at in rows.all():
+        if fid not in figures:
+            figures[fid] = BedFigure(occupied=occupied, as_of=at, stale=is_stale(at, now))
+    return figures
+
+
+CHANNEL_WORDS = {"sms": "SMS", "ivr": "IVR", "whatsapp": "WhatsApp", "voice": "a voice call"}
+
+
+def read_by(*, model: str | None, notes: str | None, source: str) -> str:
+    """Who produced a report's numbers, in words a judge will not misread."""
+    if notes == SEED_NOTE:
+        return "Seeded demonstration report (no photo)"
+    if model == "typed":
+        return f"Typed over {CHANNEL_WORDS.get(source, source)} (no photo)"
+    if model == "mock":
+        return "Test extractor — no model was called"
+    return f"Read by {model}" if model else f"Reported over {source}"

@@ -24,6 +24,7 @@
 import { useEffect, useState } from "react";
 
 import { type BedCode, type BedReport, type FacilityDetail, api } from "../api";
+import BedFigure from "../bedfigure";
 import { both } from "./labels";
 
 const VERIFICATION: Record<
@@ -69,9 +70,6 @@ export default function Beds({
     };
   }, [facilityId, refreshKey]);
 
-  const total = facility?.beds_total ?? null;
-  const occupied = facility?.beds_occupied ?? null;
-  const free = total !== null && occupied !== null ? total - occupied : null;
 
   return (
     <div>
@@ -82,22 +80,17 @@ export default function Beds({
         <h2 className="text-[11px] font-semibold uppercase tracking-[0.09em] text-ink-3">
           {both("bedsOccupied")}
         </h2>
-        {occupied === null || total === null ? (
-          <p className="mt-1.5 text-[12.5px] text-ink-2">
-            No ward report yet today. The count below is whatever was last confirmed.
-          </p>
+        {facility ? (
+          <BedFigure
+            total={facility.beds_total}
+            occupied={facility.beds_occupied}
+            verifiedAt={facility.beds_verified_at}
+            stale={facility.beds_stale}
+            reports={reports}
+            large
+          />
         ) : (
-          <>
-            <div className="mt-1.5 flex items-baseline gap-2">
-              <span className="font-mono text-[22px] leading-none font-semibold tabular-nums text-ink">
-                {occupied}
-              </span>
-              <span className="text-[12.5px] text-ink-2">of {total} beds</span>
-            </div>
-            <p className="mt-1 text-[11.5px] text-ink-3">
-              {both("bedsFree")}: {free}
-            </p>
-          </>
+          <p className="mt-1.5 text-[12.5px] text-ink-3">Loading…</p>
         )}
       </section>
 
@@ -175,13 +168,12 @@ export default function Beds({
                 </p>
                 {/* Never hidden: a count the model did not produce must not be
                     allowed to look like one it did. */}
-                {r.model && (
-                  <p className="mt-0.5 text-[11px] text-ink-3">
-                    Read by {r.model}
-                    {r.model_confidence !== null &&
-                      ` · confidence ${(r.model_confidence * 100).toFixed(0)}%`}
-                  </p>
-                )}
+                <p className="mt-0.5 text-[11px] text-ink-3">
+                  {r.read_by}
+                  {r.model_confidence !== null &&
+                    r.model !== "typed" &&
+                    ` · the model's own confidence ${(r.model_confidence * 100).toFixed(0)}%`}
+                </p>
                 {r.reasons.length > 0 && (
                   <p className="mt-0.5 text-[11px] leading-snug text-ink-2">
                     {r.reasons.join(" · ")}

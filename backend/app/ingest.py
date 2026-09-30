@@ -414,6 +414,17 @@ async def process(session: AsyncSession, submission: RawSubmission) -> Outcome:
             reported_at=now,
         )
         await session.commit()
+        if report.verification == beds.REJECTED:
+            # Stored for the trust score, never counted (fix #68).
+            return Outcome(
+                False,
+                f"Not counted: {checks.reasons[0]}",
+                "beds",
+                facility_id,
+                masked,
+                actions=[f"beds:{occupied}:{report.verification}"],
+                written=[f"bed report #{report.id} (rejected)"],
+            )
         return Outcome(
             True,
             f"Bed occupancy {occupied} of {facility.beds_total} recorded, "

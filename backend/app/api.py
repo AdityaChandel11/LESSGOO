@@ -202,6 +202,8 @@ class FacilityOut(BaseModel):
     escalation_reasons: list[str]
     beds_total: int
     beds_occupied: int | None
+    beds_verified_at: datetime | None
+    beds_stale: bool
     bed_occupancy_pct: float | None
     staff_checkin_pct: float | None
     trust_score: float | None
@@ -255,6 +257,8 @@ def _to_out(snap: services.FacilitySnapshot) -> FacilityOut:
         escalation_reasons=snap.escalation_reasons,
         beds_total=snap.beds_total,
         beds_occupied=snap.beds_occupied,
+        beds_verified_at=snap.beds_verified_at,
+        beds_stale=snap.beds_stale,
         bed_occupancy_pct=snap.bed_occupancy_pct,
         staff_checkin_pct=snap.staff_checkin_pct,
         trust_score=snap.trust_score,
@@ -2291,6 +2295,8 @@ class BedReportOut(BaseModel):
     register_admissions: int | None
     model_confidence: float | None
     model: str | None
+    # Who produced the numbers, in plain words: seeded, typed, or which model.
+    read_by: str
     reasons: list[str]
 
 
@@ -2313,6 +2319,9 @@ def _bed_report_out(report) -> BedReportOut:
         register_admissions=report.register_admissions,
         model_confidence=report.model_confidence,
         model=payload.get("model"),
+        read_by=beds.read_by(
+            model=payload.get("model"), notes=payload.get("notes"), source=report.source
+        ),
         reasons=payload.get("reasons", []),
     )
 

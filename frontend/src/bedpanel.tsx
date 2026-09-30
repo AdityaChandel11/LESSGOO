@@ -10,6 +10,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, api, type BedCode, type BedReport, type User, can } from "./api";
+import BedFigure from "./bedfigure";
 import { ChaseButton } from "./chase";
 import { drawWardBoard, plausibleOccupancy } from "./wardboard";
 
@@ -77,6 +78,10 @@ export function BedPanel({
     district: string;
     /** Capacity on the facility register — what the photo is counted against. */
     beds_total: number;
+    /** The one bed figure (fix #68): latest verified count and its age. */
+    beds_occupied: number | null;
+    beds_verified_at: string | null;
+    beds_stale: boolean;
   };
   user: User;
   refreshKey: number;
@@ -165,7 +170,6 @@ export function BedPanel({
   };
 
   const latest = reports[0];
-  const lastVerified = reports.find((r) => r.verification === "verified");
 
   return (
     <div className="border-t border-line px-4 py-3">
@@ -187,29 +191,16 @@ export function BedPanel({
         <p className="mt-1.5 text-[12px] text-ink-3">No ward photo has been submitted yet.</p>
       ) : (
         <>
-          <div className="mt-1.5 flex items-baseline gap-2">
-            <span className="font-mono text-[19px] font-semibold tabular-nums text-ink">
-              {lastVerified?.beds_occupied ?? "—"}
-            </span>
-            <span className="text-[12px] text-ink-2">
-              of {lastVerified?.beds_total ?? latest.beds_total ?? "—"} beds counted in the photo
-              {facility.beds_total > 0 && (
-                <span className="text-ink-3"> · {facility.beds_total} registered</span>
-              )}
-            </span>
-            <span
-              className={`ml-auto shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-medium ${
-                VERIFICATION_TONE[latest.verification]?.className ?? ""
-              }`}
-            >
-              {VERIFICATION_TONE[latest.verification]?.label ?? latest.verification}
-            </span>
-          </div>
-          <p className="mt-0.5 text-[11.5px] text-ink-3">
-            {lastVerified
-              ? `Last verified ${when(lastVerified.reported_at)}`
-              : "No verified count in the recent history"}
-            {latest.verification !== "verified" && ` · latest attempt ${when(latest.reported_at)}`}
+          <BedFigure
+            total={facility.beds_total}
+            occupied={facility.beds_occupied}
+            verifiedAt={facility.beds_verified_at}
+            stale={facility.beds_stale}
+            reports={reports}
+          />
+          <p className="mt-1.5 text-[11px] font-medium text-ink-3">
+            Checks on the latest report ({when(latest.reported_at)}) ·{" "}
+            {VERIFICATION_TONE[latest.verification]?.label ?? latest.verification}
           </p>
 
           <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
@@ -264,10 +255,9 @@ export function BedPanel({
                 counts the beds and reads the code back out of the same image — so an old photo
                 fails, because yesterday's code cannot appear in it.
               </p>
-              {latest.model === "mock" ? (
+              {latest.model === "mock" || latest.model === "typed" ? (
                 <p className="mt-1.5 text-[11px] text-ink-3">
-                  This deployment is running the mock extractor: no photograph was analysed, and
-                  these counts are simulated.
+                  {latest.read_by}: no photograph was analysed for this report.
                 </p>
               ) : (
                 <p className="mt-1.5 text-[11px] text-ink-3">

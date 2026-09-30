@@ -96,7 +96,10 @@ export interface FacilityDetail {
   escalated: boolean;
   escalation_reasons: string[];
   beds_total: number;
+  /** Latest verified ward count, when, and whether it is older than a day (fix #68). */
   beds_occupied: number | null;
+  beds_verified_at: string | null;
+  beds_stale: boolean;
   bed_occupancy_pct: number | null;
   staff_checkin_pct: number | null;
   trust_score: number | null;
@@ -628,6 +631,8 @@ export interface BedReport {
   model_confidence: number | null;
   /** "mock" when no photograph was analysed — shown, never hidden. */
   model: string | null;
+  /** Who produced the numbers in words: seeded, typed, or which model. */
+  read_by: string;
   reasons: string[];
 }
 

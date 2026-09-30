@@ -273,6 +273,10 @@ class Settings(BaseSettings):
     bed_register_tolerance: float = 0.25
     # Below this the model is not sure enough to record a count unreviewed.
     bed_confidence_floor: float = 0.45
+    # A verified ward count older than this is stale and not counted as
+    # available (fix #68). A day, because the verification code changes daily
+    # and a ward is photographed once a day (data-trust-layer.md §2).
+    bed_stale_hours: int = 24
 
     # --- phone channels (spec 13) ---
     # Salt for hashing inbound phone numbers. Deliberately NOT derived from
