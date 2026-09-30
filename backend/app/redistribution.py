@@ -25,8 +25,8 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 import numpy as np
@@ -34,7 +34,7 @@ from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from . import maps, movements
+from . import maps, movements, services
 from .config import settings
 from .models import (
     Approval,
@@ -63,6 +63,71 @@ class StockNode:
     burn: float
     days: float | None
     status: str
+
+
+@dataclass(frozen=True)
+class Promise:
+    """Stock already asked for in an open request: it leaves `from_id` and
+    reaches `to_id` if the donor says yes."""
+
+    from_id: str
+    to_id: str
+    qty: float
+
+
+# Only the solver's own proposals are a re-plan's to replace. A centre's own
+# request (workspace.FACILITY_REQUEST), and anything of unknown origin, is work
+# somebody is waiting on, and a re-plan leaves it alone (fix list #37).
+SOLVER_PROPOSAL = "threshold"
+
+INDIA = timezone(timedelta(hours=5, minutes=30))
+
+
+def replaceable_on_replan(triggered_by: str | None) -> bool:
+    return triggered_by == SOLVER_PROPOSAL
+
+
+def after_promises(nodes: list[StockNode], promises: list[Promise]) -> list[StockNode]:
+    """Each centre's stock as the solver should see it: a donor's less what it
+    has already been asked for, a receiver's plus what is already owed to it.
+
+    Without this the solver can offer the same spare stock twice — against
+    spec 12.3's "never propose taking a donor below its own safety stock" —
+    and plan a second delivery to a centre whose first is still pending.
+    Status is re-derived from the adjusted cover with no trust multiplier; it
+    only orders and weights recipients, and never decides eligibility.
+    """
+    outgoing: dict[str, float] = defaultdict(float)
+    incoming: dict[str, float] = defaultdict(float)
+    for p in promises:
+        outgoing[p.from_id] += p.qty
+        incoming[p.to_id] += p.qty
+    adjusted: list[StockNode] = []
+    for n in nodes:
+        qty = max(0.0, n.qty - outgoing.get(n.facility_id, 0.0) + incoming.get(n.facility_id, 0.0))
+        if qty == n.qty:
+            adjusted.append(n)
+            continue
+        days = qty / n.burn if n.burn > 0 else n.days
+        adjusted.append(replace(n, qty=qty, days=days, status=services.classify(days)))
+    return adjusted
+
+
+def replacement_note(
+    key: tuple[str, str, str], replaced: dict[tuple[str, str, str], int], at: datetime
+) -> dict:
+    """What a new proposal carries when it repeats one the re-plan removed
+    (same donor, receiver and medicine), so the donor sees it was updated
+    rather than finding a different card under their thumb."""
+    old = replaced.get(key)
+    return {} if old is None else {"replaces_transfer": old, "updated_at": at.isoformat()}
+
+
+def replaced_message(at: datetime) -> str:
+    return (
+        "This recommendation was replaced when the plan was recomputed at {0} (India "
+        "time). The list now shows the current one."
+    ).format(at.astimezone(INDIA).strftime("%H:%M"))
 
 
 @dataclass(frozen=True)
@@ -417,26 +482,79 @@ class PlanResult:
     transfer_ids: list[int]
     unmet: list[dict]
     manual_review: list[dict]
+    # The solver's own earlier proposals this run removed, so anyone acting on
+    # one can be told it was replaced, and when (see replaced_message).
+    replaced_ids: list[int] = field(default_factory=list)
+
+
+async def open_promises(
+    session: AsyncSession, state: str, sku: str | None = None
+) -> dict[str, list[Promise]]:
+    """Stock already asked for in open requests touching this state, per
+    medicine. Bounded by status and state; open requests are few by design
+    (workspace caps them)."""
+    in_state = select(Facility.id).where(Facility.state_silo == state)
+    stmt = select(Transfer.sku_code, Transfer.from_facility, Transfer.to_facility, Transfer.qty).where(
+        Transfer.status == "proposed",
+        Transfer.triggered_by.is_distinct_from(SOLVER_PROPOSAL),
+        Transfer.to_facility.in_(in_state) | Transfer.from_facility.in_(in_state),
+    )
+    if sku:
+        stmt = stmt.where(Transfer.sku_code == sku)
+    out: dict[str, list[Promise]] = defaultdict(list)
+    for code, src, dst, qty in (await session.execute(stmt)).all():
+        out[code].append(Promise(src, dst, float(qty or 0)))
+    return out
 
 
 async def generate_plan(
     session: AsyncSession, state: str, sku: str | None = None
 ) -> PlanResult:
-    """Replace this state's open proposals with a freshly solved plan.
+    """Replace the solver's own open proposals for this state with a freshly
+    solved plan.
 
-    Decided transfers (approved or rejected) are history and are never touched.
+    Only the solver's own proposals are replaced (replaceable_on_replan): a
+    centre's request is work somebody is waiting on and survives any number of
+    re-plans, and the stock it already promises is taken off the donor before
+    the solver sees it (after_promises). Decided transfers (approved or
+    rejected) are history and are never touched. One plan per state at a
+    time: a second run for the same state waits for the first to commit, so
+    two runs cannot interleave their deletes and inserts.
     """
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": "plan:" + state}
+    )
     rules = PlanRules.from_settings()
     skus = {s.code: s for s in (await session.execute(select(Sku))).scalars().all()}
-    nodes_by_sku = await load_state_nodes(session, state, sku)
+    promises = await open_promises(session, state, sku)
+    nodes_by_sku = {
+        code: after_promises(nodes, promises.get(code, []))
+        for code, nodes in (await load_state_nodes(session, state, sku)).items()
+    }
 
     in_state = select(Facility.id).where(Facility.state_silo == state)
-    stmt = delete(Transfer).where(
-        Transfer.status == "proposed", Transfer.to_facility.in_(in_state)
+    replaceable = select(
+        Transfer.id, Transfer.from_facility, Transfer.to_facility, Transfer.sku_code
+    ).where(
+        Transfer.status == "proposed",
+        Transfer.triggered_by == SOLVER_PROPOSAL,
+        Transfer.to_facility.in_(in_state),
     )
     if sku:
-        stmt = stmt.where(Transfer.sku_code == sku)
-    await session.execute(stmt)
+        replaceable = replaceable.where(Transfer.sku_code == sku)
+    replaced = {
+        (src, dst, code): tid for tid, src, dst, code in (await session.execute(replaceable)).all()
+    }
+    if replaced:
+        # Re-checked at delete time: a donor's decision that committed while
+        # this plan was solving has moved the row out of 'proposed', and the
+        # delete leaves it alone.
+        await session.execute(
+            delete(Transfer).where(
+                Transfer.id.in_(list(replaced.values())), Transfer.status == "proposed"
+            )
+        )
+    replaced_at = datetime.now(timezone.utc)
 
     unmet: list[dict] = []
     manual: list[dict] = []
@@ -526,8 +644,11 @@ async def generate_plan(
             eta_hours=p.eta_hours,
             route_source=p.rationale["distance_source"],
             status="proposed",
-            triggered_by="threshold",
-            rationale=p.rationale,
+            triggered_by=SOLVER_PROPOSAL,
+            rationale={
+                **p.rationale,
+                **replacement_note((p.from_id, p.to_id, p.sku_code), replaced, replaced_at),
+            },
         )
         for _, p in kept
     ]
@@ -543,6 +664,7 @@ async def generate_plan(
         transfer_ids=[r.id for r in rows],
         unmet=unmet,
         manual_review=manual,
+        replaced_ids=sorted(replaced.values()),
     )
 
 

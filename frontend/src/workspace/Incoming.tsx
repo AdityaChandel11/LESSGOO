@@ -52,6 +52,8 @@ export default function Incoming({
       onChanged();
     } catch (e) {
       setNote(e instanceof ApiError ? e.message : "Could not record the decision");
+      // A re-plan may have replaced this recommendation; show the current list.
+      load();
     } finally {
       setBusy(null);
     }
@@ -103,6 +105,16 @@ export default function Incoming({
                 {t.rationale.donor_days_after_plan != null &&
                   ` · you keep ${formatDays(t.rationale.donor_days_after_plan)}`}
               </p>
+              {t.rationale.updated_at && (
+                <p className="mt-0.5 text-[11px] text-ink-3">
+                  This recommendation was updated at{" "}
+                  {new Date(t.rationale.updated_at).toLocaleTimeString("en-IN", {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}{" "}
+                  when the plan was recomputed.
+                </p>
+              )}
               {mayDecide && !mayDecide(t) ? (
                 <p className="mt-1.5 text-[11.5px] text-ink-3">
                   {sandboxLabel

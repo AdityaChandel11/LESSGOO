@@ -886,6 +886,10 @@ export interface TransferRationale {
   distance_limit_km?: number;
   cold_chain?: boolean;
   distance_basis?: string;
+  /** Set when a re-plan replaced an earlier proposal for the same donor,
+   *  receiver and medicine (fix #37): the donor is told it was updated. */
+  replaces_transfer?: number;
+  updated_at?: string;
 }
 
 export interface Transfer {

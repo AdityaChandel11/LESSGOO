@@ -23,7 +23,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -529,7 +529,9 @@ async def plan_transfers(
     await events.record(
         session,
         events.TRANSFER_PROPOSED,
-        {"state": payload.state, "sku": payload.sku, **totals},
+        # `replaced` lets a donor acting on a removed proposal be told when the
+        # plan replaced it (_replaced_at), instead of "not found".
+        {"state": payload.state, "sku": payload.sku, **totals, "replaced": result.replaced_ids},
         state_silo=payload.state,
     )
     return PlanOut(
@@ -622,11 +624,38 @@ async def explain_trip(
     )
 
 
+async def _replaced_at(session: AsyncSession, transfer_id: int) -> datetime | None:
+    """When a re-plan removed this solver proposal, if one did in the last
+    week. Each plan run's event lists the ids it replaced; the time bound and
+    the kind keep this to a short index range over events.created_at."""
+    return await session.scalar(
+        text(
+            """
+            SELECT created_at FROM events
+            WHERE created_at >= :since AND kind = :kind
+              AND payload->'replaced' @> jsonb_build_array(CAST(:tid AS bigint))
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ),
+        {
+            "since": datetime.now(timezone.utc) - timedelta(days=7),
+            "kind": events.TRANSFER_PROPOSED,
+            "tid": transfer_id,
+        },
+    )
+
+
 async def _decide(
     transfer_id: int, decision: str, session: AsyncSession, user: Principal
 ) -> TransferOut:
     existing = await redistribution.list_transfers(session, ids=[transfer_id])
     if not existing:
+        # A donor can be looking at a recommendation a re-plan has just
+        # replaced (fix list #37). Say so, with the time, rather than "not found".
+        replaced_at = await _replaced_at(session, transfer_id)
+        if replaced_at is not None:
+            raise HTTPException(status_code=409, detail=redistribution.replaced_message(replaced_at))
         raise HTTPException(status_code=404, detail="Transfer not found")
     before = existing[0]
     ends = [before["from"]["id"], before["to"]["id"]]

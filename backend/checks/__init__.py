@@ -1,6 +1,6 @@
 """Integration checks that live in the repository rather than in a scrollback.
 
-Eleven checks, one per claim the platform makes about itself:
+Twelve checks, one per claim the platform makes about itself:
 
     platform      it stands up with no credentials, and refuses what it should
     ledger        dispatch against receipt, and overdue derived from the clock
@@ -13,6 +13,7 @@ Eleven checks, one per claim the platform makes about itself:
     comms         the phone channels, the signed door, and what is not kept
     stockphoto    a photographed document changes the shelf the way it means
     facts         only a centre states its own facts; officers chase
+    replan        re-running a plan leaves requests and says what it replaced
 
     python -m checks                 run all of them
     python -m checks ledger trust    run some of them
@@ -30,6 +31,7 @@ from . import (
     ingestion,
     ledger,
     platform,
+    replan,
     stockphoto,
     trustlayer,
     workspace,
@@ -47,6 +49,7 @@ CHECKS = {
     "comms": comms.run,
     "stockphoto": stockphoto.run,
     "facts": facts.run,
+    "replan": replan.run,
 }
 
 __all__ = ["CHECKS"]
