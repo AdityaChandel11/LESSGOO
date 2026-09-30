@@ -695,16 +695,18 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
             // Ahead of the facility panel on purpose: choosing the tab is a
             // decision to look at the channels, and it still reads whichever
             // centre is selected on the map so the two stay in step.
+            // A handset states its centre's facts, so it is offered only to
+            // whoever may state them (can.report, fix list #24 on #74's rule).
             <FieldSimulator
-              facilityId={
-                selected && inDemoSandbox(user, selected.state_silo, selected.district)
-                  ? selected.id
-                  : null
-              }
+              facilityId={selected && can.report(user, selected) ? selected.id : null}
               blockedNote={
-                selected && user.demo_sandbox && !inDemoSandbox(user, selected.state_silo, selected.district)
-                  ? `Public demo: messages can be sent only as handsets of centres in ${user.demo_sandbox.label}. Choose one of those on the map.`
-                  : undefined
+                !selected
+                  ? undefined
+                  : user.demo_sandbox && !inDemoSandbox(user, selected.state_silo, selected.district)
+                    ? `Public demo: messages can be sent only as handsets of centres in ${user.demo_sandbox.label}. Choose one of those on the map.`
+                    : !can.report(user, selected)
+                      ? "Only a centre's own staff send as its registered handsets. Officers can chase the centre for a report from its panel."
+                      : undefined
               }
             />
           ) : selected && mode === "stock" ? (

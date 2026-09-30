@@ -37,7 +37,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from . import attendance, beds, events, movements, redistribution, services, vision
 from .config import settings
-from .models import Facility, FacilityContact, MedicineMovement, Sku, StockReading
+from .models import (
+    Facility,
+    FacilityContact,
+    FacilitySkuState,
+    MedicineMovement,
+    Sku,
+    StockReading,
+)
 
 CHANNELS = ("sms", "whatsapp", "ivr", "form", "voice")
 
@@ -116,6 +123,13 @@ class Reading:
     qty: float
     days_of_stock: float | None = None
     status: str | None = None
+    # The loop, closed (fix list #24): the row this message wrote, and what
+    # the district map held for this medicine before it landed — the stored
+    # `facility_sku_state` row the map reads, not a recomputation.
+    reading_id: int | None = None
+    qty_before: float | None = None
+    days_before: float | None = None
+    status_before: str | None = None
 
 
 @dataclass
@@ -130,6 +144,10 @@ class Outcome:
     readings: list[Reading] = field(default_factory=list)
     actions: list[str] = field(default_factory=list)
     duplicate: bool = False
+    # The `reading.committed` event the map and the live feed poll for.
+    event_id: int | None = None
+    # Rows written that are not stock readings, in words: "check-in #412".
+    written: list[str] = field(default_factory=list)
 
 
 # ----------------------------------------------------------- 1. dedupe ---
@@ -340,7 +358,7 @@ async def process(session: AsyncSession, submission: RawSubmission) -> Outcome:
         # A phone channel carries no location it can prove, so the check-in is
         # stored with loc_method set to the channel and no geofence result —
         # a check that could not run must never look like one that passed.
-        await attendance.record_checkin(
+        checkin = await attendance.record_checkin(
             session,
             facility,
             staff_ref=contact.phone_hash,
@@ -361,6 +379,7 @@ async def process(session: AsyncSession, submission: RawSubmission) -> Outcome:
             facility_id,
             masked,
             actions=[f"checkin:{action}"],
+            written=[f"check-in #{checkin.id}"],
         )
 
     if upper.startswith("BEDS"):
@@ -403,6 +422,7 @@ async def process(session: AsyncSession, submission: RawSubmission) -> Outcome:
             facility_id,
             masked,
             actions=[f"beds:{occupied}:{report.verification}"],
+            written=[f"bed report #{report.id}"],
         )
 
     if upper.startswith("GOT"):
@@ -455,6 +475,7 @@ async def process(session: AsyncSession, submission: RawSubmission) -> Outcome:
             facility_id,
             masked,
             actions=[f"receipt:{batch}:{row.status}"],
+            written=[f"delivery #{movement.id} settled"],
         )
 
     if upper.startswith("APPROVE"):
@@ -513,7 +534,23 @@ async def process(session: AsyncSession, submission: RawSubmission) -> Outcome:
         )
 
     lookup = await sku_lookup(session)
+    # What the district map held for this centre before the message: the
+    # stored rows it reads, one facility's worth (fix list #24).
+    before = {
+        code: (float(qty), days, status)
+        for code, qty, days, status in (
+            await session.execute(
+                select(
+                    FacilitySkuState.sku_code,
+                    FacilitySkuState.qty_on_hand,
+                    FacilitySkuState.days_of_stock,
+                    FacilitySkuState.status,
+                ).where(FacilitySkuState.facility_id == facility_id)
+            )
+        ).all()
+    }
     committed: list[Reading] = []
+    rows: list[StockReading] = []
     unknown: list[str] = []
     for name, qty in pairs:
         code, score = resolve_sku(name, lookup)
@@ -525,24 +562,34 @@ async def process(session: AsyncSession, submission: RawSubmission) -> Outcome:
             continue
         # 6 & 7: commit with its provenance, so the trust layer can see which
         # channel said what and how sure the match was.
-        session.add(
-            StockReading(
-                facility_id=facility_id,
+        row = StockReading(
+            facility_id=facility_id,
+            sku_code=code,
+            qty_on_hand=Decimal(str(qty)),
+            reported_at=now,
+            source=submission.channel,
+            reporter_ref=contact.phone_hash,
+            channel_msg_id=(
+                reading_key(submission.external_id, code)
+                if submission.external_id
+                else None
+            ),
+            confidence=Decimal(str(round(score / 100, 2))),
+            raw_payload={"text": text, "matched": name, "score": score},
+        )
+        session.add(row)
+        rows.append(row)
+        prior = before.get(code, (None, None, None))
+        committed.append(
+            Reading(
                 sku_code=code,
-                qty_on_hand=Decimal(str(qty)),
-                reported_at=now,
-                source=submission.channel,
-                reporter_ref=contact.phone_hash,
-                channel_msg_id=(
-                    reading_key(submission.external_id, code)
-                    if submission.external_id
-                    else None
-                ),
-                confidence=Decimal(str(round(score / 100, 2))),
-                raw_payload={"text": text, "matched": name, "score": score},
+                sku_name=name,
+                qty=qty,
+                qty_before=prior[0],
+                days_before=prior[1],
+                status_before=prior[2],
             )
         )
-        committed.append(Reading(sku_code=code, sku_name=name, qty=qty))
 
     if not committed:
         return Outcome(
@@ -554,6 +601,8 @@ async def process(session: AsyncSession, submission: RawSubmission) -> Outcome:
         )
 
     await session.flush()
+    for reading, row in zip(committed, rows):
+        reading.reading_id = row.id
 
     # 8. recompute — the map moves because this reading landed, not on a timer.
     await services.refresh_facility_state(session, facility_id)
@@ -570,7 +619,7 @@ async def process(session: AsyncSession, submission: RawSubmission) -> Outcome:
 
     # 9. emit — the dashboard repaints from the same event log everything else
     # polls, rather than this channel getting a private notification path.
-    await events.record(
+    event_id = await events.record(
         session,
         events.READING_COMMITTED,
         {
@@ -592,4 +641,6 @@ async def process(session: AsyncSession, submission: RawSubmission) -> Outcome:
     reply = "Recorded: " + ", ".join(parts) + "."
     if unknown:
         reply += " Not recognised: " + ", ".join(unknown[:2]) + "."
-    return Outcome(True, reply, "committed", facility_id, masked, readings=committed)
+    return Outcome(
+        True, reply, "committed", facility_id, masked, readings=committed, event_id=event_id
+    )

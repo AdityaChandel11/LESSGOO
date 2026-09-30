@@ -794,6 +794,13 @@ export interface SimulatedReading {
   qty: number;
   days_of_stock: number | null;
   status: string | null;
+  /** The stock_readings row this message wrote (fix #24). */
+  reading_id: number | null;
+  /** What the district map held for this medicine before the message; null
+   *  when the centre had never reported it. */
+  qty_before: number | null;
+  days_before: number | null;
+  status_before: string | null;
 }
 
 export interface SimulateResult {
@@ -805,6 +812,10 @@ export interface SimulateResult {
   duplicate: boolean;
   readings: SimulatedReading[];
   actions: string[];
+  /** The event the district map polls for; null when nothing was committed. */
+  event_id: number | null;
+  /** Rows written that are not stock readings, in words ("check-in #412"). */
+  written: string[];
 }
 
 export interface CallRecord {

@@ -237,10 +237,13 @@ export default function Medicines({
   facilityId,
   refreshKey,
   onChanged,
+  onOpenField,
 }: {
   facilityId: string;
   refreshKey: number;
   onChanged: () => void;
+  /** Opens the field simulator in place — no navigation, no reload. */
+  onOpenField: () => void;
 }) {
   const [view, setView] = useState<WorkspaceView | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -315,12 +318,16 @@ export default function Medicines({
           <span className="font-mono text-[11.5px] text-ink">ORS 60</span> updates
           this same shelf.
         </p>
-        <a
-          href="/?view=field"
-          className="mt-2 inline-block min-h-11 text-[12.5px] font-medium text-brand underline"
+        {/* Opens inside this workspace (fix list #24). It was a link to the
+            officer console's field view: a full page load that landed on the
+            front door, for a view a pharmacist's account never reaches. */}
+        <button
+          type="button"
+          onClick={onOpenField}
+          className="mt-2 min-h-11 text-left text-[12.5px] font-medium text-brand underline"
         >
-          See the field simulator
-        </a>
+          {both("openFieldSimulator")}
+        </button>
       </section>
 
       <Team facilityId={facilityId} refreshKey={refreshKey} />
