@@ -393,7 +393,7 @@ and that a PHC user can reach it. Label "via channel simulator" while
 Public simulator route; scheduled/cron top-up; query-time timestamp shifting;
 rule-generated fake attendance; national-map link for PHC staff.
 
-#### Fix #24 — Field simulator inside the workspace  · APPROVED · P0 · status: TODO
+#### Fix #24 — Field simulator inside the workspace  · APPROVED · P0 · status: DONE 24d5358
 Render as a phone screen (reuse field.tsx handset) inside the PHC workspace, opened by
 in-app navigation (no reload), authenticated, pre-bound to the user's centre.
 **Restrict to the user's own centre's registered numbers** — verify, enforce, test.
@@ -507,7 +507,7 @@ Derived "Unanswered requests in your district" in the officer queue (query, no w
 Metrics: response rate, median response time, decline reasons, non-responding centres
 (facility-level only).
 
-#### Fix #36 — Judge alone on the site  · Tier 1 · status: TODO
+#### Fix #36 — Judge alone on the site  · Tier 1 · status: PARTIAL b23fa19 (PHC 13 donor role + demo script in code; Render account and seeded requests pending)
 - **Seeded requests in every state** (accepted, declined with reason, partly accepted,
   expired, received), ~10 rows for Nashik, created **through the real code path**. Remote
   write → Aditya's OK + dashboard % before/after.
@@ -1018,7 +1018,7 @@ for an existing session arriving via a deep link) open exactly that view and zoo
 PHC card and officer panel show the same score from the same computation, on one scale (0–100), with
 the same band words. Find why they differ (materialized copy vs live?) and make one source.
 
-### Fix #90 — Landing copy tells the truth  · Tier 1 · small · status: TODO
+### Fix #90 — Landing copy tells the truth  · Tier 1 · small · status: DONE a2d0d48
 "Figures read from the live database; stock status as of each centre's last report" (until #29/#30);
 step 2 "Four states train a shared forecasting model today"; step 3 "The donor centre accepts; an
 officer handles exceptions" (#39); replace "Authorised health department staff only" and the
@@ -1077,7 +1077,7 @@ Never move a **core** item (outbreak → warning → redistribution, verified ca
 Storage for judging stays flat via #30 (roll-forward with equal deletion); dropping the redundant
 25 MB index is Aditya's call (CLAUDE.md option 2); a new instance resets the 30-day clock.
 
-### Fix #63 — "What runs live, what's recorded, what's next" table  · Tier 1 · small · status: TODO
+### Fix #63 — "What runs live, what's recorded, what's next" table  · Tier 1 · small · status: DONE a8c8f93
 The table above, in plain words, on the landing page and in the README. Answers the judge's
 first suspicious question before it's asked; scores on deployability.
 
@@ -1217,7 +1217,7 @@ Stale bed reports/codes: include in #30's roll-forward.
   Env names: `GOOGLE_MAPS_BROWSER_KEY` (referrer-restricted), `GOOGLE_MAPS_SERVER_KEY`.
   UNVERIFIED: whether `LandingMap.tsx` uses Google tiles when `MAPS_MODE=google`.
 
-### Fix #72 — Role cards say what you'll see  · Tier 1 · small · status: TODO
+### Fix #72 — Role cards say what you'll see  · Tier 1 · small · status: DONE b23fa19
 - Administrator — "Every state: federation, outbreaks, redistribution oversight, data trust"
 - State officer — "Maharashtra: recommendations, outbreak warnings, which centres to visit"
 - District officer — "Nashik: its centres, deliveries in transit, spot checks"
