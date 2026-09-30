@@ -133,7 +133,14 @@ async def client(demo_email: str | None = None) -> AsyncIterator[httpx.AsyncClie
 
 
 async def demo_emails(http: httpx.AsyncClient) -> dict[str, str]:
-    """Role -> demo account email, as the sign-in screen offers them."""
+    """Role -> demo account email, as the sign-in screen offers them.
+
+    The first account per role: the facility role has two (the pharmacist,
+    then the donor centre for the two-screen demo), and the checks mean the
+    pharmacist."""
     r = await http.get("/api/auth/demo-accounts")
     r.raise_for_status()
-    return {row["role"]: row["email"] for row in r.json()}
+    out: dict[str, str] = {}
+    for row in r.json():
+        out.setdefault(row["role"], row["email"])
+    return out

@@ -112,6 +112,41 @@ const RUNS = [
   },
 ] as const;
 
+/**
+ * The demo, for a judge alone on the site (fix list #36): five steps, two
+ * centres in two windows, every step through the real endpoints. The first
+ * step is the cold start — a free server that sleeps is the first thing a
+ * visitor meets, so it is said before it is suffered.
+ */
+const DEMO_SCRIPT = [
+  "Open this link a minute before you start: the free server sleeps when idle, and the first load can take up to a minute.",
+  "Continue as Pharmacist, Nashik PHC 1. On Medicines, open a medicine running short, press Find supply and request stock (pick Nashik PHC 13 if it is offered).",
+  "In a private window, continue as Pharmacist, Nashik PHC 13. Orders → Requests for your stock: accept and send, or decline. No request waiting? Simulate a request from a neighbour raises a real one.",
+  "Back as PHC 1: the medicine card shows the reply, and Orders confirms the delivery when it arrives, counting what came.",
+  "Continue as the Maharashtra state officer: Redistribution, Movements and Data trust show the same rows — who asked, who sent, what arrived.",
+] as const;
+
+function DemoScript() {
+  return (
+    <div className="mt-5 rounded-lg border border-line bg-canvas px-3.5 py-3">
+      <h3 className="text-[12.5px] font-semibold text-ink">
+        Try it in five steps <span lang="hi" className="font-normal text-ink-3">· पाँच चरणों में आज़माएँ</span>
+      </h3>
+      <ol className="mt-2 list-decimal space-y-1.5 pl-4 text-[12px] leading-snug text-ink-2">
+        {DEMO_SCRIPT.map((step) => (
+          <li key={step}>{step}</li>
+        ))}
+      </ol>
+      <a
+        href="#live-recorded-next"
+        className="mt-2.5 inline-block rounded-sm text-[12px] font-medium text-brand underline-offset-4 hover:underline focus:ring-2 focus:ring-brand/25 focus:outline-none"
+      >
+        What runs live, what's recorded, what's next ↓
+      </a>
+    </div>
+  );
+}
+
 const fmt = (n: number) => n.toLocaleString("en-IN");
 
 export default function Landing({
@@ -241,7 +276,7 @@ export default function Landing({
             </div>
           )}
 
-          <SignInPanel onSignedIn={onSignedIn} showNotice={false} />
+          <SignInPanel onSignedIn={onSignedIn} showNotice={false} demoGuide={<DemoScript />} />
 
           <a
             href="#how-it-works"
