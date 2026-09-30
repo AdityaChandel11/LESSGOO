@@ -23,6 +23,7 @@ import {
   type Supply,
   type WorkspaceSku,
   type WorkspaceView,
+  TRUST_BAND,
   api,
   formatDays,
 } from "../api";
@@ -285,6 +286,7 @@ export default function Medicines({
   }
 
   const trust = view.facility.trust_score;
+  const band = view.facility.trust_band ? TRUST_BAND[view.facility.trust_band] : null;
   // Newest first from the server, so the first match is the latest request.
   const requestFor = (code: string) => view.requests.find((r) => r.sku_code === code);
   // Errors stay on the chip that raised them (RequestChip); success reloads.
@@ -338,13 +340,24 @@ export default function Medicines({
       >
         <div className="flex items-baseline justify-between gap-3">
           <h2 className="text-[12px] font-medium text-ink-2">{both("dataConfidence")}</h2>
-          <span className="font-mono text-[14px] font-semibold text-ink">
-            {trust === null ? "—" : trust.toFixed(2)}
+          {/* Same score, scale and band words as the officer's drawer (fix #89). */}
+          <span className="flex items-baseline gap-1.5">
+            <span className="font-mono text-[14px] font-semibold text-ink">
+              {trust === null ? "—" : Math.round(trust * 100)}
+            </span>
+            {trust !== null && <span className="text-[11.5px] text-ink-2">out of 100</span>}
+            {band && (
+              <span
+                className={`ml-1 rounded-full border px-2 py-0.5 text-[11px] font-medium ${band.className}`}
+              >
+                {band.label}
+              </span>
+            )}
           </span>
         </div>
         <p className="mt-1 text-[11.5px] leading-snug text-ink-3">
-          {view.facility.trust_band
-            ? `Band: ${view.facility.trust_band}. Computed live from this centre's own reports — reporting regularly and consistently raises it.`
+          {band
+            ? "Computed live from this centre's own reports — reporting regularly and consistently raises it."
             : "Not enough history at this centre to compute a confidence score yet."}
         </p>
         <p className="mt-1.5 text-[11.5px] text-ink-3">

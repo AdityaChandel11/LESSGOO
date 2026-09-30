@@ -844,7 +844,7 @@ async def get_facility(
     facility_id: str,
     session: AsyncSession = Depends(get_session),
 ) -> FacilityDetailOut:
-    snaps = await services.get_snapshots(session, facility_ids=[facility_id])
+    snaps = await services.get_snapshots(session, facility_ids=[facility_id], live_trust=True)
     if not snaps:
         raise HTTPException(status_code=404, detail="Facility not found")
     snap = snaps[0]
@@ -1010,7 +1010,7 @@ async def facility_workspace(
     """Everything one centre's staff need on one screen: what they hold, when
     it runs out, and how each figure was last checked."""
     facility = await _facility_in_scope(session, facility_id, user)
-    snaps = await services.get_snapshots(session, facility_ids=[facility.id])
+    snaps = await services.get_snapshots(session, facility_ids=[facility.id], live_trust=True)
     if not snaps:
         raise HTTPException(status_code=404, detail="Facility not found")
     snap = snaps[0]
@@ -1115,7 +1115,7 @@ async def facility_briefing(
     something that is already on screen, not the thing that fills it.
     """
     facility = await _facility_in_scope(session, facility_id, user)
-    snaps = await services.get_snapshots(session, facility_ids=[facility.id])
+    snaps = await services.get_snapshots(session, facility_ids=[facility.id], live_trust=True)
     if not snaps:
         raise HTTPException(status_code=404, detail="Facility not found")
 

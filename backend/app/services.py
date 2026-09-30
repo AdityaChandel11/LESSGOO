@@ -140,11 +140,55 @@ def _burn_rate(series: list[tuple[datetime, float, str | None]]) -> float | None
     return drops / span_days
 
 
+@dataclass(frozen=True)
+class TrustFigure:
+    score: float
+    band: str
+
+
+async def trust_figures(
+    session: AsyncSession, ids: list[str], *, live: bool
+) -> dict[str, TrustFigure]:
+    """Each facility's data-confidence score, from one of two places only.
+
+    `live` scores the centres now, through `trust.compute()` — what a
+    single-centre view must show (spec 12.6). Otherwise the materialised copy
+    the national map reads, which `scripts.trust` refreshes from that same
+    function. Never a third calculation.
+    """
+    if live:
+        scores = await trust.compute(session, trust.Scope(facility_ids=tuple(ids)))
+        return {s.facility_id: TrustFigure(score=s.score, band=s.band) for s in scores}
+    rows = await session.execute(
+        select(FacilityTrust.facility_id, FacilityTrust.score, FacilityTrust.band).where(
+            FacilityTrust.facility_id.in_(ids)
+        )
+    )
+    return {fid: TrustFigure(score=float(score), band=band) for fid, score, band in rows.all()}
+
+
+def trust_reason(score: float | None, multiplier: float) -> str | None:
+    """The escalation line for a widened warning, on the 0-100 scale every
+    view uses (fix list #89)."""
+    if score is None or multiplier <= 1.01:
+        return None
+    return (
+        f"data confidence {round(score * 100)} out of 100, so this facility is warned "
+        f"{multiplier:.1f}x earlier"
+    )
+
+
 async def get_snapshots(
     session: AsyncSession,
     facility_ids: list[str] | None = None,
+    *,
+    live_trust: bool = False,
 ) -> list[FacilitySnapshot]:
-    """Compute status for every facility (or a subset) in a handful of queries."""
+    """Compute status for every facility (or a subset) in a handful of queries.
+
+    `live_trust` scores the facilities' data confidence now instead of reading
+    the national map's materialised copy; single-centre views pass it, so the
+    pharmacist's card and the officer's drawer show the same number."""
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(days=settings.burn_rate_window_days + 1)
 
@@ -178,15 +222,7 @@ async def get_snapshots(
             ).scalars()
         }
 
-    trust_rows = dict(
-        (
-            await session.execute(
-                select(FacilityTrust.facility_id, FacilityTrust).where(
-                    FacilityTrust.facility_id.in_(ids)
-                )
-            )
-        ).all()
-    )
+    figures = await trust_figures(session, ids, live=live_trust)
 
     readings_stmt = (
         select(
@@ -241,8 +277,8 @@ async def get_snapshots(
 
     snapshots: list[FacilitySnapshot] = []
     for fac in facilities:
-        trust_row = trust_rows.get(fac.id)
-        trust_score = float(trust_row.score) if trust_row is not None else None
+        figure = figures.get(fac.id)
+        trust_score = figure.score if figure is not None else None
         multiplier = trust.warning_multiplier(trust_score)
         sku_rows: list[SkuStock] = []
         for sku_code, sku in skus.items():
@@ -293,11 +329,9 @@ async def get_snapshots(
         )
 
         reasons: list[str] = []
-        if trust_row is not None and multiplier > 1.01:
-            reasons.append(
-                f"data confidence {trust_score:.0%}, so this facility is warned "
-                f"{multiplier:.1f}x earlier"
-            )
+        trust_line = trust_reason(trust_score, multiplier)
+        if trust_line:
+            reasons.append(trust_line)
         if (
             occupancy_pct is not None
             and occupancy_pct > settings.bed_occupancy_escalate_pct
@@ -323,7 +357,7 @@ async def get_snapshots(
                 bed_occupancy_pct=occupancy_pct,
                 staff_checkin_pct=checkin_pct,
                 trust_score=trust_score,
-                trust_band=trust_row.band if trust_row is not None else None,
+                trust_band=figure.band if figure is not None else None,
                 warning_multiplier=multiplier,
                 # The widened threshold has already moved stock_status; a low
                 # score must not also escalate the facility a second time.
