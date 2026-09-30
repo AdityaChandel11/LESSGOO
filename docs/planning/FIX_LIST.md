@@ -315,7 +315,7 @@ bounding boxes (#12b cut), refusing negative stock silently.
    unit mismatch held; negative result held; stale date held.
 6. Exclude photo-count semantics issue from trust/FL once fixed (readings carry the right delta).
 
-### Fix #11r — Repair Nashik PHC 1's bad reading on Render  · NEEDS ADITYA'S OK
+### Fix #11r — Repair Nashik PHC 1's bad reading on Render  · NEEDS ADITYA'S OK · status: DONE b0e2eb6 (script `scripts/repair_readings.py bill`; Aditya runs it — docs/RENDER_OPS.md step 3)
 Supersede the one bad reading (`superseded_by`). Single-row remote write via
 `python -m scripts.remote --confirm`; ask for the dashboard % before and after (CLAUDE.md).
 
@@ -401,7 +401,9 @@ Close the loop inside the simulator: reply SMS · row id written · days of cove
 before → after · status change · "sent to district map" (event id). Map change shown via
 split-screen with officer login. Test: clicking the entry does not reload the page.
 
-#### Fix #26 — As-of-now cover on facility + Today cards  · APPROVED · P0 · status: TODO
+#### Fix #26 — As-of-now cover on facility + Today cards  · APPROVED · P0 · status: DONE e3742bc
+(Scoped to the PHC workspace: medicine cards, Today card, Gemini briefing input. The officer drawer and map
+stay on stored cover until #29. Deploy only after #30 has run.)
 Days of cover = stored cover − days since last report (floor 0). Past run-out date →
 "Last counted 300 on 24 Sept. At your usual use it would have run out around 27 Sept.
 Count the shelf." Status "Count overdue". Today card uses the same logic.
@@ -411,7 +413,7 @@ Read-time recompute (stored cover − days since last report, reclassify); never
 stored rows; bounded SQL. New 4th legend state: "Not reporting / count overdue"
 ("silence is an alert"). Without #30 the whole map goes grey — never ship alone.
 
-#### Fix #30 — Manual roll-forward for the demo district  · NEEDS ADITYA'S OK + dashboard %
+#### Fix #30 — Manual roll-forward for the demo district  · NEEDS ADITYA'S OK + dashboard % · status: DONE b0e2eb6 (script `scripts/roll_forward.py`; Aditya runs it — docs/RENDER_OPS.md step 1)
 Script run by hand before judging: moves the last N days forward for the demo district
 (Nashik) and deletes the same amount of old rows **in the same commit** (flat size).
 Via `python -m scripts.remote --confirm`. Not scheduled. Fallback: smaller reseed
@@ -898,7 +900,7 @@ are simulated in this prototype; in deployment they come from the state's e-Aush
    trust score before → after in both views via events.
 4. Evidence thresholds from #60.
 
-### Fix #79 — "Send test report" must not paint real centres red  · Tier 0 · status: DONE cbc8011 (code; Render repair still needs Aditya's OK)
+### Fix #79 — "Send test report" must not paint real centres red  · Tier 0 · status: DONE cbc8011 (code) + b0e2eb6 (repair script `scripts/repair_readings.py test-reports`; Aditya runs it — docs/RENDER_OPS.md step 4)
 Remove it from the officer console, or confine it to the Nashik sandbox with a label ("Demo: sends
 a low ORS count from a Nashik centre"). Never pick a healthy centre elsewhere in India to make it
 critical. Check what's already been written on Render (e.g. Port Blair PHC 1 ORS 4) — repair only
@@ -974,7 +976,7 @@ emergency, Send test report, Confirm receipt, Approve, Request stock.
   partly done; remaining: PHC side + real photo primary.
 - Officer facility panel already shows "Staff on duty 0 of 5" → #20 partly exists at facility level.
 
-### Fix #81 — Fresh forecasts on Render  · Tier 0 · NEEDS ADITYA'S OK · status: TODO
+### Fix #81 — Fresh forecasts on Render  · Tier 0 · NEEDS ADITYA'S OK · status: DONE 1de1dec (forecast age on the card and badge; the republish is docs/RENDER_OPS.md step 2, run by Aditya in the PyTorch env. Freshness: manual before judging; re-run if judging is more than 8 days later)
 Re-run `publish_forecast.py` against Render (size-flat upsert) after #30's roll-forward, so every
 training-state centre shows "from the shared model's forecast". Show forecast age everywhere it's used
 ("forecast published 29 Sept"). Decide how it stays fresh without a scheduler: manual before judging,
@@ -1014,7 +1016,10 @@ second screen); no horizontal overflow. Test at 375×812.
 A URL with view/state/facility/`at` params survives the front door: after "Continue" (or straight away
 for an existing session arriving via a deep link) open exactly that view and zoom.
 
-### Fix #89 — One trust number, one scale  · Tier 0 · small · status: TODO
+### Fix #89 — One trust number, one scale  · Tier 0 · small · status: DONE d2fb665
+(Cause: the PHC card read the national map's materialised trust copy; the drawer scored live. Every
+single-centre view — drawer, workspace, briefing — now scores live; the card shows N out of 100 with the
+drawer's band words.)
 PHC card and officer panel show the same score from the same computation, on one scale (0–100), with
 the same band words. Find why they differ (materialized copy vs live?) and make one source.
 
@@ -1169,7 +1174,10 @@ code and sent to Gemini as an image." Remaining: the PHC side, and the real-phot
 The app-drawn whiteboard is labelled "Generated test photo" wherever it's used; the real-photo
 path (#64) is the primary one.
 
-### Fix #68 — One bed figure, with its source and age  · Tier 0 · small · status: TODO
+### Fix #68 — One bed figure, with its source and age  · Tier 0 · small · status: DONE 4532cc2
+("3 of 7" was the seeded `bed_status` series; the snapshot now reads the latest verified bed report. N = 24 h
+(`bed_stale_hours`, the code rotates daily). A capacity mismatch is stored as **rejected** with the reason,
+not a new "held" state. Seeded rows read "Seeded demonstration report (no photo)".)
 (Live audit adds a fourth figure: officer panel "2 of 7 beds counted in the photo · 7 registered ·
 Unverified · last verified 10 days ago". All views must show the same figure from the same rule.)
 Header shows exactly one figure: the latest verified count, "as of <time>, verified by photo",
