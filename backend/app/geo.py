@@ -4,8 +4,8 @@ Two consumers: the seeder places facilities against these anchors, and the
 aggregation layer uses the centroids to position state bubbles on the map.
 
 HONESTY NOTE for the pitch: every coordinate here is a real city or district
-headquarters. `facilities` is a proportional *sample* of each state's published
-PHC count (roughly 12%), not the real count — enough to make national zoom feel
+headquarters. `facilities` is a *sample* per state, not the real count — enough
+to make national zoom feel
 real without seeding 38,000 rows. Real network size, per Rural Health
 Statistics, is ~31,900 PHCs and ~6,400 CHCs; state the sample ratio out loud
 rather than implying full coverage.

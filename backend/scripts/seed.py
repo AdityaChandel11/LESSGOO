@@ -6,8 +6,9 @@ Run (after `alembic upgrade head`):
 
 HONESTY NOTE for the pitch: district/city coordinates in app/geo.py are real.
 Facility positions are synthetic scatter around them and every stock number is
-simulated. Facility counts are a ~12% proportional sample of each state's
-published PHC count, not the real network size. Say that ratio out loud.
+simulated. Facility counts are a fixed sample per state, not the real network
+size. Say so out loud; quote no share of the real network until a specific
+Rural Health Statistics edition is cited for it.
 
 History depth is deliberately uneven, because the two consumers need different
 things. Every facility gets enough history for a burn rate and the live map;

@@ -105,8 +105,8 @@ export default function DemoData({ onBack }: { onBack: () => void }) {
           </p>
           <p>
             There are {fmt(R.seededCentres)} centres across all {R.regions} states and union
-            territories — each state gets roughly 12% of its published count of primary health
-            centres, not its real network. Every {R.chcEvery}th centre is a community health centre
+            territories — a fixed number per state, set in the generator: a sample for the demo, not
+            the state's real network. Every {R.chcEvery}th centre is a community health centre
             (CHC); the rest are primary health centres (PHCs). A PHC has {R.phcBedsMin}–
             {R.phcBedsMin + R.bedsSpread} beds and a CHC {R.chcBedsMin}–{R.chcBedsMin + R.bedsSpread}.
           </p>

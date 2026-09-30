@@ -41,6 +41,7 @@ import { MovementsPanel } from "./movements";
 import { AuditQueuePanel } from "./trustpanel";
 import { OutbreakWarnings } from "./outbreaks";
 import { RedistributionPanel, TransfersPrompt, type Trip, groupTrips } from "./transfers";
+import { SEED_RULES } from "./seedRules";
 
 type Mode = "stock" | "transfers" | "movements" | "trust" | "federation" | "field";
 
@@ -630,7 +631,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
 
           <span
             className="rounded-md border border-line px-2 py-1 text-[11px] whitespace-nowrap text-ink-2"
-            title="District locations are real. Facility positions and stock levels are simulated, covering roughly 12% of the national PHC network."
+            title={`District locations are real. Facility positions and stock levels are simulated: ${SEED_RULES.seededCentres.toLocaleString("en-IN")} synthetic centres, a sample for the demo, not India's real network.`}
           >
             Simulated data
           </span>
