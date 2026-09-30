@@ -589,6 +589,8 @@ export function FacilityPanel({
                       title="Next week's rate from the federated model, trained across states. Without a fresh forecast this falls back to the last 28 days of readings."
                     >
                       forecast
+                      {s.forecast_published_at &&
+                        ` · ${new Date(s.forecast_published_at).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}`}
                     </span>
                   )}
                 </span>

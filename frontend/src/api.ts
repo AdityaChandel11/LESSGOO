@@ -82,6 +82,8 @@ export interface SkuStock {
   last_reported_at: string | null;
   last_source: string | null;
   last_confidence: number | null;
+  /** When the forecast behind a "federated" rate was published (fix #81). */
+  forecast_published_at: string | null;
 }
 
 export interface FacilityDetail {

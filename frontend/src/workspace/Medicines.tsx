@@ -159,7 +159,9 @@ function MedicineCard({
   // named rather than left implied. rate_source is already on the wire.
   const rule =
     s.rate_source === "federated"
-      ? "from the shared model's forecast"
+      ? `from the shared model's forecast${
+          s.forecast_published_at ? `, published ${longDate(s.forecast_published_at)}` : ""
+        }`
       : "from the last 28 days of readings";
 
   return (

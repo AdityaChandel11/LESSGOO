@@ -89,6 +89,20 @@ class SkuStock:
     last_reported_at: datetime | None
     last_source: str | None
     last_confidence: float | None
+    # When the forecast behind a "federated" rate was published (fix #81).
+    forecast_published_at: datetime | None = None
+
+
+def pick_rate(
+    burn: float | None, forecast: tuple[float, datetime] | None
+) -> tuple[float | None, str, datetime | None]:
+    """The forecast replaces the burn rate only when one has been published
+    recently for this exact facility and medicine. Every other case — switch
+    off, no row, stale row, failed training run — falls through to the rule
+    that needs nothing but the readings."""
+    if forecast is not None and forecast[0] > 0:
+        return forecast[0], "federated", forecast[1]
+    return burn, "burn_rate", None
 
 
 @dataclass
@@ -211,11 +225,11 @@ async def get_snapshots(
     # and this is a copy of that one calculation, never a second one.
     # Published forecasts, when the switch is on. Reading rows here keeps torch
     # out of the web service entirely: a training job writes, the API reads.
-    forecasts: dict[tuple[str, str], float] = {}
+    forecasts: dict[tuple[str, str], tuple[float, datetime]] = {}
     if settings.forecast_mode == "federated":
         fresh = now - timedelta(days=settings.forecast_max_age_days)
         forecasts = {
-            (f.facility_id, f.sku_code): f.predicted_daily_use
+            (f.facility_id, f.sku_code): (f.predicted_daily_use, f.computed_at)
             for f in (
                 await session.execute(
                     select(Forecast).where(
@@ -281,15 +295,9 @@ async def get_snapshots(
             if not pts:
                 continue
             qty = pts[-1][1]
-            burn = _burn_rate(pts)
-            rate_source = "burn_rate"
-            # The forecast replaces the burn rate only when one has been
-            # published recently for this exact facility and medicine. Every
-            # other case — switch off, no row, stale row, failed training run —
-            # falls through to the rule that needs nothing but the readings.
-            predicted = forecasts.get((fac.id, sku_code))
-            if predicted is not None and predicted > 0:
-                burn, rate_source = predicted, "federated"
+            burn, rate_source, published = pick_rate(
+                _burn_rate(pts), forecasts.get((fac.id, sku_code))
+            )
             dos = None if burn is None else qty / max(burn, EPSILON)
             at, source, conf = latest_meta[(fac.id, sku_code)]
             sku_rows.append(
@@ -306,6 +314,7 @@ async def get_snapshots(
                     last_reported_at=at,
                     last_source=source,
                     last_confidence=conf,
+                    forecast_published_at=published,
                 )
             )
 

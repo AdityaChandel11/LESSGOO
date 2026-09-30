@@ -186,6 +186,7 @@ class SkuStockOut(BaseModel):
     last_reported_at: datetime | None
     last_source: str | None
     last_confidence: float | None
+    forecast_published_at: datetime | None = None
 
 
 class FacilityOut(BaseModel):
