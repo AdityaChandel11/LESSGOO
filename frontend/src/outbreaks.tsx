@@ -131,7 +131,7 @@ export function OutbreakWarnings({
       {data && (
         <div className="mt-3 border-t border-line pt-2">
           <h3 className="text-[12px] font-semibold text-ink">
-            IDSP outbreak reports · आईडीएसपी रिपोर्ट{" "}
+            Latest published IDSP reports · आईडीएसपी रिपोर्ट{" "}
             <span className="font-mono text-[11px] font-normal text-ink-3">{data.rows.length}</span>
           </h3>
           <p className="mt-0.5 text-[10.5px] text-ink-3">
@@ -139,8 +139,12 @@ export function OutbreakWarnings({
             <a href={data.source_url} target="_blank" rel="noreferrer" className="underline hover:text-brand">
               {data.source}
             </a>{" "}
-            · {data.reports.map((r) => `week ${r.week}/${r.year}`).join(", ")}
+            ·{" "}
+            {data.reports
+              .map((r) => `week ${r.week}/${r.year}${r.uploaded_on ? ` (uploaded ${day(r.uploaded_on)})` : ""}`)
+              .join(", ")}
           </p>
+          <Freshness data={data} ttlDays={active?.ttl_days ?? 14} />
           <IdspTable data={data} state={state} stateLabel={stateLabel} open={open} />
           <div className="mt-1.5 flex gap-3">
             <button
@@ -539,6 +543,26 @@ function DeclareForm({
         </p>
       )}
     </div>
+  );
+}
+
+/**
+ * Fix #43: say how old the government's report is. NCDC publishes each week's
+ * report weeks later; an outbreak that began outside the active window is the
+ * latest published record, not an active outbreak, and the panel says so.
+ */
+function Freshness({ data, ttlDays }: { data: Outbreaks; ttlDays: number }) {
+  const starts = data.rows.map((r) => r.start_date).filter((d): d is string => !!d).sort();
+  if (starts.length === 0) return null;
+  const newest = starts[starts.length - 1];
+  const ageDays = Math.floor((Date.now() - new Date(newest).getTime()) / 86_400_000);
+  if (ageDays <= ttlDays) return null;
+  return (
+    <p className="mt-1 rounded border border-line bg-canvas px-2 py-1 text-[10.5px] leading-snug text-ink-2">
+      These outbreaks began {day(starts[0])} – {day(newest)}, more than {ttlDays} days ago: this is the latest
+      report NCDC has published, not a list of active outbreaks. A warning is only as fresh as the government's
+      report — declare an outbreak, or read a newer report, to pre-position stock now.
+    </p>
   );
 }
 

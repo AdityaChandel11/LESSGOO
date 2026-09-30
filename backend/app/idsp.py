@@ -46,6 +46,10 @@ DISEASES = sorted(
         "Scrub Typhus", "Diphtheria", "Rubella", "Japanese Encephalitis", "Viral Fever",
         "Kyasanur Forest Disease", "Mushroom Poisoning", "Pertussis", "Zika", "Rabies",
         "Human Rabies", "Suspected Human Rabies", "Suspected Measles", "Jaundice", "Fever",
+        # Names the 2026 reports use (#43).
+        "Acute Gastroenteritis", "Acute Diarrhoeal", "Acute Encephalitic Syndrome",
+        "Chandipura Virus", "Hepatitis A & E", "Hand Foot and Mouth Disease",
+        "Meningococcal Meningitis",
     ],
     key=len,
     reverse=True,
@@ -84,9 +88,27 @@ def _split_body(body: str, state_names: list[str]) -> tuple[str, str, str] | Non
     return None
 
 
+# pypdf breaks a date cell around its hyphens when the column wraps
+# ("07-08- 2026", "01- 08- 2026"); rejoin before matching (2026 reports, #43).
+BROKEN_DATE = re.compile(r"\b(\d{1,2})\s*-\s*(\d{1,2})\s*-\s*(\d{4}|\d{2})\b")
+
+# NCDC names each upload "week32_<unix time>.pdf": the time is the upload.
+UPLOAD_STAMP = re.compile(r"_(\d{10})\.pdf$", re.IGNORECASE)
+
+
+def uploaded_on(filename: str):
+    """The day NCDC uploaded a report, from its file name, or None."""
+    from datetime import timezone
+
+    found = UPLOAD_STAMP.search(filename)
+    if not found:
+        return None
+    return datetime.fromtimestamp(int(found.group(1)), timezone.utc).date()
+
+
 def parse_report(text: str, state_names: list[str]) -> list[dict]:
     """Structured rows from one report's text. Rows it cannot read are skipped."""
-    flat = re.sub(r"\s+", " ", text)
+    flat = BROKEN_DATE.sub(r"\1-\2-\3", re.sub(r"\s+", " ", text))
     starts = list(UNIQUE_ID.finditer(flat))
     rows = []
     for i, m in enumerate(starts):
@@ -254,6 +276,9 @@ def network_districts() -> set[tuple[str, str]]:
 DISEASE_MEDICINES: dict[str, list[str]] = {
     "Acute Diarrheal Disease": ["ORS", "ZINC", "IVFLUID"],
     "Acute Diarrhoeal Disease": ["ORS", "ZINC", "IVFLUID"],
+    # The 2026 reports' names for the same rehydration need (#43).
+    "Acute Diarrhoeal": ["ORS", "ZINC", "IVFLUID"],
+    "Acute Gastroenteritis": ["ORS", "ZINC", "IVFLUID"],
     "Cholera": ["ORS", "IVFLUID", "ZINC"],
     "Food Poisoning": ["ORS", "IVFLUID"],
     "Food Borne Illness": ["ORS", "IVFLUID"],

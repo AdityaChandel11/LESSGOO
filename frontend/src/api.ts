@@ -1266,7 +1266,8 @@ export interface Outbreaks {
   source: string;
   source_url: string;
   columns: string[];
-  reports: { year: number; week: number; rows: number }[];
+  /** uploaded_on: the day NCDC published the report (from its file name), fix #43. */
+  reports: { year: number; week: number; rows: number; found?: number; uploaded_on?: string | null }[];
   rows: Outbreak[];
 }
 
