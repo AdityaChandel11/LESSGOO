@@ -83,10 +83,26 @@ export default function Team({
         <span className="font-mono text-[19px] leading-none font-semibold tabular-nums text-ink">
           {data.present}
         </span>
-        <span className="text-[12.5px] text-ink-2">
-          of {data.roster} on the roster checked in today
-        </span>
+        <span className="text-[12.5px] text-ink-2">checked in today · आज उपस्थित</span>
       </div>
+
+      {/* "Roster" is who was seen checking in over 30 days, not an
+          establishment list, so it is said as exactly that (fix #27). */}
+      <p className="mt-1 text-[11.5px] leading-snug text-ink-3">
+        {data.roster === 1 ? "1 person" : `${data.roster} people`} checked in here in the last 30
+        days · पिछले 30 दिनों में {data.roster} लोगों ने यहाँ उपस्थिति दर्ज की
+      </p>
+      <p className="mt-0.5 text-[11.5px] leading-snug text-ink-3">
+        Last check-in at this centre · इस केंद्र पर अंतिम उपस्थिति:{" "}
+        {data.last_checkin_at
+          ? new Date(data.last_checkin_at).toLocaleString("en-IN", {
+              day: "numeric",
+              month: "short",
+              hour: "2-digit",
+              minute: "2-digit",
+            })
+          : "none in the last 30 days"}
+      </p>
 
       {data.footfall_today !== null && (
         <p className="mt-1 text-[11.5px] text-ink-3">

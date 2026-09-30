@@ -486,6 +486,8 @@ export interface Attendance {
   footfall_today: number | null;
   /** Set when staff are present and no patients were logged — worth a look, no more. */
   contradiction: string | null;
+  /** Latest check-in at this centre in the last 30 days, if any. */
+  last_checkin_at?: string | null;
 }
 
 /**

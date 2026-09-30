@@ -2414,6 +2414,7 @@ class AttendanceOut(BaseModel):
     geofence_checked: int
     footfall_today: int | None
     contradiction: str | None
+    last_checkin_at: datetime | None = None
 
 
 @router.get(
