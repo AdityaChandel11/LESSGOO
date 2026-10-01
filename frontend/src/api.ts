@@ -1553,6 +1553,30 @@ export interface Oversight {
   rows_withheld?: string | null;
   /** Fix #38: open trips whose donor and receiver are in different districts. */
   cross_district_open?: number;
+  /** Fix #49: what happened to the trips that were accepted, from the ledger. */
+  outcomes?: {
+    received: number;
+    in_full: number;
+    short: number;
+    over: number;
+    units_short: number;
+    /** Recommendation to receipt; null when nothing has been received. */
+    median_hours: number | null;
+    /** Centres critical when their trip was recommended, and how many of
+     *  those are above the critical line now. */
+    were_critical: number;
+    lifted: number;
+  };
+  /** Deliveries that arrived short: what was sent against what was counted. */
+  short_deliveries?: {
+    movement_id: number;
+    transfer_id: number;
+    batch: string | null;
+    sku_name: string;
+    to: OversightPlace;
+    sent: number;
+    received: number;
+  }[];
   window_days: number;
   recommended_open: number;
   requests_open: number;

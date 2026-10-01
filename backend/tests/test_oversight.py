@@ -101,3 +101,61 @@ def test_cross_district_trips_are_counted_among_the_open_recommendations():
 def test_a_centre_with_no_known_district_is_not_called_cross_district():
     transfers = [{"from": "X", "to": "B", "status": "proposed", "sku": "ORS"}]
     assert redistribution.cross_district_trips(transfers, {"B": "Nashik"}) == 0
+
+
+# ------------------------------------------------ outcomes (fix #49) ---
+# What actually happened to the trips that were accepted, from the ledger's
+# own rows: what was sent against what the receiver counted, how long a
+# recommendation took to arrive, and whether the centres that were critical
+# are above the line now. No "stock-outs averted": that would be an estimate.
+
+
+def _done(tid, to="B", sku="ORS", *, hours=30.0, before=1.0, sent=100.0, got=100.0):
+    created = NOW - timedelta(days=3)
+    transfer = {"id": tid, "status": "approved", "to": to, "sku": sku, "created_at": created,
+                "recipient_days_before": before}
+    movement = {"id": tid * 10, "transfer_id": tid, "to": to, "sku": sku, "batch": f"B{tid}",
+                "status": "received" if got == sent else ("short" if got < sent else "over"),
+                "qty": sent, "qty_received": got, "received_at": created + timedelta(hours=hours)}
+    return transfer, movement
+
+
+def _outcomes(pairs, critical_now=()):
+    return redistribution.outcomes(
+        [t for t, _ in pairs], [m for _, m in pairs], set(critical_now), critical_days=3.0
+    )
+
+
+def test_what_was_sent_is_set_against_what_the_receiver_counted():
+    out = _outcomes([_done(1), _done(2, got=80.0), _done(3, got=110.0)])
+    assert (out["received"], out["in_full"], out["short"], out["over"]) == (3, 1, 1, 1)
+    assert out["units_short"] == 20.0
+    (mismatch,) = out["short_deliveries"]
+    assert (mismatch["transfer_id"], mismatch["sent"], mismatch["received"]) == (2, 100.0, 80.0)
+
+
+def test_a_delivery_still_on_the_road_is_not_an_outcome_yet():
+    t, m = _done(1)
+    m = {**m, "status": "in_transit", "qty_received": None, "received_at": None}
+    out = _outcomes([(t, m)])
+    assert out["received"] == 0 and out["median_hours"] is None
+
+
+def test_the_time_from_recommendation_to_receipt_is_the_median():
+    out = _outcomes([_done(1, hours=10), _done(2, hours=30), _done(3, hours=200)])
+    assert out["median_hours"] == 30.0
+
+
+def test_centres_that_were_critical_are_checked_against_where_they_stand_now():
+    pairs = [
+        _done(1, to="A", before=1.0),   # was critical, is above the line now
+        _done(2, to="B", before=1.0),   # was critical, still critical
+        _done(3, to="C", before=5.0),   # was never critical
+    ]
+    out = _outcomes(pairs, critical_now=[("B", "ORS")])
+    assert (out["were_critical"], out["lifted"]) == (2, 1)
+
+
+def test_one_centre_helped_twice_is_counted_once():
+    out = _outcomes([_done(1, to="A", before=1.0), _done(2, to="A", before=0.5)])
+    assert (out["were_critical"], out["lifted"]) == (1, 1)

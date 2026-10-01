@@ -227,6 +227,59 @@ function OversightBlock({ o }: { o: Oversight }) {
           {p.declined} declined by the donor · {p.withdrawn} withdrawn by the centre that asked
         </p>
       )}
+      {o.outcomes && <Outcomes o={o.outcomes} days={o.critical_days} />}
+    </div>
+  );
+}
+
+function span(hours: number): string {
+  if (hours < 1) return "under 1 hour";
+  if (hours < 48) return `${Math.round(hours)} hours`;
+  return `${(hours / 24).toFixed(1)} days`;
+}
+
+/**
+ * Fix #49: outcomes, not promises. Everything here is counted from confirmed
+ * receipts in the ledger; nothing estimates what would have happened without
+ * the trips, so there is no "stock-outs averted" figure.
+ */
+function Outcomes({ o, days }: { o: NonNullable<Oversight["outcomes"]>; days: number }) {
+  if (o.received === 0) {
+    return (
+      <p className="mt-2 text-[11px] leading-snug text-ink-3">
+        Outcomes: no delivery from these trips has been confirmed by its receiver yet.
+      </p>
+    );
+  }
+  return (
+    <div className="mt-2 border-t border-line pt-2">
+      <Eyebrow>Outcomes · नतीजे</Eyebrow>
+      <ul className="mt-1 space-y-0.5 text-[11.5px] leading-snug text-ink-2">
+        <li>
+          <span className="font-mono font-semibold tabular-nums text-ink">{o.received.toLocaleString("en-IN")}</span>{" "}
+          {o.received === 1 ? "delivery" : "deliveries"} confirmed by the receiver:{" "}
+          {o.in_full.toLocaleString("en-IN")} in full
+          {o.short > 0 && (
+            <>
+              , <span className="font-medium text-crit">{o.short.toLocaleString("en-IN")} short</span> (
+              {o.units_short.toLocaleString("en-IN")} units sent and not counted)
+            </>
+          )}
+          {o.over > 0 && `, ${o.over.toLocaleString("en-IN")} over`}.
+        </li>
+        {o.median_hours != null && (
+          <li>Recommendation to confirmed receipt: {span(o.median_hours)} (median).</li>
+        )}
+        {o.were_critical > 0 && (
+          <li>
+            {o.lifted.toLocaleString("en-IN")} of {o.were_critical.toLocaleString("en-IN")} centres that were under{" "}
+            {days} days when their trip was recommended are above that line now.
+          </li>
+        )}
+      </ul>
+      <p className="mt-1 text-[10.5px] leading-snug text-ink-3">
+        Counted from confirmed receipts. No estimate of stock-outs averted is made.
+      </p>
     </div>
   );
 }
@@ -260,6 +313,17 @@ function Exceptions({ o }: { o: Oversight }) {
         <Eyebrow>Exceptions · officers act on these</Eyebrow>
         {none && <p className="mt-1 text-[12px] text-ink-2">Nothing stuck and nothing unreached.</p>}
       </div>
+      <ExceptionGroup
+        title="Arrived short — sent against what the receiver counted"
+        total={o.short_deliveries?.length ?? 0}
+      >
+        {(o.short_deliveries ?? []).map((d) => (
+          <li key={d.movement_id} className="text-[11.5px] text-ink-2">
+            <span className="font-medium text-ink">{d.to.name}</span> ({d.to.district}) · {d.sku_name} · sent{" "}
+            {d.sent.toLocaleString("en-IN")}, counted {d.received.toLocaleString("en-IN")}
+          </li>
+        ))}
+      </ExceptionGroup>
       <ExceptionGroup title={`No reply from the donor in over ${o.reply_window_hours} h`} total={o.no_reply_total}>
         {o.no_reply.slice(0, 8).map((t) => (
           <li key={t.transfer_id} className="text-[11.5px] text-ink-2">

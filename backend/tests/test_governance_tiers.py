@@ -216,7 +216,7 @@ def test_oversight_keeps_its_counts_and_withholds_its_named_lists(monkeypatch):
     named = {
         "no_reply": [{"transfer_id": 9}], "not_received": [{"movement_id": 3}],
         "declined": [{"transfer_id": 4}], "controlled": [{"facility_id": "a"}],
-        "unreached": [{"facility_id": "b"}],
+        "unreached": [{"facility_id": "b"}], "short_deliveries": [{"transfer_id": 6}],
     }
 
     async def overseen(session, state, now):
@@ -253,8 +253,10 @@ def test_the_named_lists_in_the_test_above_are_the_real_ones():
     import inspect
 
     src = inspect.getsource(redistribution.oversight)
-    for key in ("no_reply", "not_received", "declined", "controlled", "unreached"):
+    for key in ("no_reply", "not_received", "declined", "controlled", "unreached", "short_deliveries"):
         assert f'"{key}": ' in src
+    # The outcome counts sit in a dict of numbers, so no named row hides in it.
+    assert '"outcomes": {k: v for k, v in done.items() if k != "short_deliveries"}' in src
 
 
 # ----------------------------------------------- movements, trust, calls ---

@@ -566,6 +566,65 @@ def not_received(movements: list[dict], now: datetime) -> list[dict]:
     return [m for m in movements if m["status"] == MOVEMENT_OPEN and m["expected_by"] < now]
 
 
+SETTLED = ("received", "short", "over")
+
+
+def outcomes(
+    transfers: list[dict],
+    movements: list[dict],
+    critical_now: set[tuple[str, str]],
+    *,
+    critical_days: float,
+) -> dict:
+    """What happened to the trips that were accepted (fix #49), from the
+    ledger: what was sent against what the receiver counted, how long a
+    recommendation took to arrive, and whether the centres that were critical
+    when the trip was made are above the line now.
+
+    `critical_now` is the (centre, medicine) pairs that are critical today.
+    Nothing here estimates what would have happened otherwise: "stock-outs
+    averted" is a counterfactual, and no row records it.
+    """
+    by_id = {t["id"]: t for t in transfers}
+    settled = [m for m in movements if m["status"] in SETTLED and m.get("received_at") is not None]
+    short = [m for m in settled if m["status"] == "short"]
+    hours = sorted(
+        (m["received_at"] - by_id[m["transfer_id"]]["created_at"]).total_seconds() / 3600
+        for m in settled
+        if m["transfer_id"] in by_id
+    )
+    was_critical = {
+        (by_id[m["transfer_id"]]["to"], by_id[m["transfer_id"]]["sku"])
+        for m in settled
+        if m["transfer_id"] in by_id
+        and (by_id[m["transfer_id"]].get("recipient_days_before") is not None)
+        and by_id[m["transfer_id"]]["recipient_days_before"] < critical_days
+    }
+    median = None
+    if hours:
+        mid = len(hours) // 2
+        median = round(hours[mid] if len(hours) % 2 else (hours[mid - 1] + hours[mid]) / 2, 1)
+    return {
+        "received": len(settled),
+        "in_full": sum(1 for m in settled if m["status"] == "received"),
+        "short": len(short),
+        "over": sum(1 for m in settled if m["status"] == "over"),
+        "units_short": round(sum(m["qty"] - (m["qty_received"] or 0) for m in short), 1),
+        "median_hours": median,
+        "were_critical": len(was_critical),
+        "lifted": len(was_critical - critical_now),
+        # The mismatches themselves, worst first: sent against counted.
+        "short_deliveries": [
+            {
+                "movement_id": m["id"], "transfer_id": m["transfer_id"], "batch": m.get("batch"),
+                "sku": m.get("sku"), "to": m.get("to"),
+                "sent": m["qty"], "received": m["qty_received"],
+            }
+            for m in sorted(short, key=lambda m: (m["qty_received"] or 0) - m["qty"])
+        ][:20],
+    }
+
+
 def cross_district_trips(transfers: list[dict], district_of: dict[str, str]) -> int:
     """Open trips whose donor and receiver sit in different districts (fix
     #38). A trip is one donor-receiver pair, whatever it carries. A centre
@@ -621,6 +680,8 @@ async def oversight(session: AsyncSession, state: str, now: datetime) -> dict:
                 "id": m.id, "status": m.status, "transfer_id": m.transfer_id,
                 "to": m.to_facility, "sku": m.sku_code, "batch": m.batch_id,
                 "qty": float(m.qty_dispatched), "expected_by": m.expected_by,
+                "qty_received": float(m.qty_received) if m.qty_received is not None else None,
+                "received_at": m.received_at,
             }
             for m in (
                 await session.execute(
@@ -669,6 +730,16 @@ async def oversight(session: AsyncSession, state: str, now: datetime) -> dict:
     reached = {
         (t["to"], t["sku"]) for t in transfers if t["status"] in ("proposed", "approved")
     }
+    done = outcomes(
+        transfers,
+        movements,
+        {
+            (fid, sku)
+            for fid, sku, days, _controlled in short_rows
+            if days is not None and days < settings.critical_days
+        },
+        critical_days=settings.critical_days,
+    )
 
     def where(fid: str) -> dict:
         name, district = names.get(fid, (fid, ""))
@@ -736,6 +807,14 @@ async def oversight(session: AsyncSession, state: str, now: datetime) -> dict:
         "controlled_total": len(controlled),
         "unreached": unreached[:20],
         "unreached_total": len(unreached),
+        # Fix #49: what happened to the trips that were accepted. The counts
+        # are an aggregate; the mismatched deliveries name centres, so they
+        # are a list of their own (and withheld with the other lists, #77).
+        "outcomes": {k: v for k, v in done.items() if k != "short_deliveries"},
+        "short_deliveries": [
+            {**d, "sku_name": sku_names.get(d["sku"], d["sku"]), "to": where(d["to"])}
+            for d in done["short_deliveries"]
+        ],
     }
 
 
