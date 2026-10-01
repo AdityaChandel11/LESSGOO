@@ -1,5 +1,7 @@
 # SwasthSetu · स्वस्थसेतु
 
+**A federated AI platform for medicine, bed and staff visibility across India's primary health centres:** a live stock map, demand forecasting, early stock-out warnings, and redistribution that a person approves.
+
 Four states train one medicine-demand model without sharing a single facility record. The platform turns that model's forecasts, and the outbreaks NCDC reports, into stock-out warnings and transfer proposals, and a person decides each one.
 
 **Live demo:** https://swasthsetu-m4x5.onrender.com
@@ -7,6 +9,15 @@ Four states train one medicine-demand model without sharing a single facility re
 **Brief description:** [docs/submission/DESCRIPTION.md](docs/submission/DESCRIPTION.md)
 
 This is a working prototype on synthetic data. Every facility, stock figure, bed count, check-in and consignment is generated. District names and coordinates are real, so the map is honest about geography, but no real patient or facility record exists anywhere in the system, and the schema has nowhere to put patient data. The outbreak rows are the one real dataset: they are parsed from NCDC's published IDSP weekly outbreak reports.
+
+## Tech stack
+
+- **Backend:** Python, FastAPI, SQLAlchemy 2 (async), asyncpg, PostgreSQL 17, Alembic, pytest
+- **Frontend:** React 19, TypeScript, Vite, Tailwind CSS 4, Leaflet
+- **Machine learning:** PyTorch LSTM demand forecasting; federated learning with Flower (FedProx) across four state silos
+- **Optimisation:** Google OR-Tools min-cost flow, with a greedy fallback
+- **Google AI:** Gemini API for vision (ward boards, stock documents) and text (briefings, explanations); Google Maps Routes and Map Tiles, optional
+- **Infrastructure:** Docker, Render, REST API, role-based access control, JWT sessions
 
 ## Quick facts
 
@@ -70,7 +81,7 @@ Open https://swasthsetu-m4x5.onrender.com.
 
 The first load takes about a minute (43 seconds measured after an idle spell). The demo runs on a free instance that sleeps when idle and applies database migrations before answering. A "Waking the server" screen shows progress, and every page after that is immediate.
 
-The sign-in page has five demo roles, no password needed: Administrator, Maharashtra NHM state officer, Nashik district logistics officer, Pharmacist at Nashik PHC 1, and Pharmacist at Nashik PHC 13 (the neighbouring centre). Each card says what that role sees. A public demo account changes nothing outside the Nashik sandbox; the server enforces that, not the interface.
+The sign-in page has demo roles, no password needed: Platform Admin, State NHM Officer (Maharashtra), District Logistics Officer (Nashik), Pharmacist at Nashik PHC 1, and, where that account has been created, Pharmacist at Nashik PHC 13 (the neighbouring centre). Each card says what that role sees. A public demo account changes nothing outside the Nashik sandbox; the server enforces that, not the interface.
 
 **The emergency, in one click (state officer).** Continue as Maharashtra NHM Officer and press Simulate emergency. It declares an acute diarrhoeal outbreak in Nashik, labelled a scripted scenario, and carries it through the real endpoints: expected use raised for ORS, zinc and IV fluid → early warnings → the optimiser pre-positions stock → Gemini explains the transfer → the donor centre accepts → dispatch → the receiver confirms arrival.
 
