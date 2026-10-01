@@ -128,7 +128,7 @@ export default function LandingMap({ states }: { states: Bucket[] }) {
       ref={host}
       role="img"
       aria-label={describe(states)}
-      className="h-[330px] w-full rounded-lg border border-line bg-panel sm:h-[440px] lg:h-[460px]"
+      className="landing-map h-[330px] w-full rounded-lg border border-line bg-panel sm:h-[440px] lg:h-[460px]"
     />
   );
 }
