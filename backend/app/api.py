@@ -10,6 +10,7 @@ straight from settings in this file, breaks that guarantee — those belong in
 the adapter, where the fallback and the tests live.
 """
 
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -22,7 +23,7 @@ from typing import Literal
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import IntegrityError
@@ -37,6 +38,7 @@ from . import (
     federation_live,
     idsp,
     movements,
+    ncdc,
     outbreak,
     redistribution,
     services,
@@ -62,7 +64,7 @@ from .auth import (
     next_full_plan_at,
 )
 from .config import settings
-from .db import get_session, ping
+from .db import SessionLocal, get_session, ping
 from .models import (
     CALL_OUTCOMES,
     LOC_METHODS,
@@ -3377,7 +3379,12 @@ def _idsp_out(report: IdspReport, *, cached: bool, trips: int = 0) -> IdspReport
 
 
 async def ingest_idsp_pdf(
-    session: AsyncSession, pdf: bytes, *, source: str | None, user: Principal
+    session: AsyncSession,
+    pdf: bytes,
+    *,
+    source: str | None,
+    read_by: str,
+    allowed,
 ) -> IdspReportOut:
     """Read one report with the model, cross-check it, keep it, and turn the
     rows both readings agree on into active outbreaks (#41). A report already
@@ -3396,11 +3403,11 @@ async def ingest_idsp_pdf(
     rows = [{**r, "check": idsp.cross_check(r)} for r in read.rows]
     touched = await outbreak.activate_idsp(
         session, rows, now,
-        allowed=lambda st, d: can_plan_state(user, st) and demo_may_write(user, state=st, district=d),
+        allowed=allowed,
     )
     report = IdspReport(
         sha256=digest, year=read.year, week=read.week, source=source, model=read.model,
-        read_by=user.name, read_at=now, rows=rows, dropped=read.dropped,
+        read_by=read_by, read_at=now, rows=rows, dropped=read.dropped,
     )
     session.add(report)
     await session.flush()
@@ -3450,7 +3457,124 @@ async def read_idsp_report(
         raise HTTPException(status_code=422, detail="That file is not a PDF")
     if len(pdf) > vision.MAX_REPORT_BYTES:
         raise HTTPException(status_code=413, detail="The report is too large")
-    return await ingest_idsp_pdf(session, pdf, source=payload.filename, user=user)
+    return await ingest_idsp_pdf(
+        session, pdf, source=payload.filename, read_by=user.name,
+        allowed=lambda st, d: can_plan_state(user, st) and demo_may_write(user, state=st, district=d),
+    )
+
+
+# ======================================================== NCDC intake (#57) ===
+# Check-on-use plus a button (Aditya's decision), never a scheduler. Opening
+# the outbreak panel checks NCDC when the last check is over a day old, after
+# the response is sent; an officer may press "Check NCDC now" every few
+# minutes. Only a week newer than the last report read is fetched, and the
+# model reads it once (#42). Every check is an event, so the panel can say
+# when NCDC was last checked and what it found.
+
+_ncdc_lock = asyncio.Lock()
+
+
+async def _last_ncdc_check(session: AsyncSession) -> Event | None:
+    return await session.scalar(
+        select(Event).where(Event.kind == events.IDSP_CHECKED).order_by(Event.created_at.desc()).limit(1)
+    )
+
+
+async def run_ncdc_check(session: AsyncSession, requested_by: str) -> dict:
+    """One check of NCDC's listing, and a read of the newest report if it is
+    new. Rows from an official report activate wherever the network has
+    centres, whoever asked: the report, not the asker, is the authority."""
+    async with _ncdc_lock:
+        payload: dict = {"requested_by": requested_by}
+        try:
+            listed = await ncdc.fetch_latest()
+        except ncdc.NcdcError as exc:
+            listed = None
+            payload.update(status="unreachable", detail=str(exc))
+        if listed is not None:
+            payload.update(
+                year=listed.year, week=listed.week, url=listed.url,
+                uploaded_on=listed.uploaded_on.isoformat(),
+            )
+            last = await session.scalar(
+                select(IdspReport).order_by(IdspReport.year.desc(), IdspReport.week.desc()).limit(1)
+            )
+            last_week = (last.year, last.week) if last and last.year and last.week else None
+            if not ncdc.is_newer((listed.year, listed.week), last_week):
+                payload.update(status="up_to_date")
+            else:
+                try:
+                    pdf = await ncdc.fetch_pdf(listed.url)
+                    out = await ingest_idsp_pdf(
+                        session, pdf, source=listed.url,
+                        read_by=f"NCDC check ({requested_by})", allowed=lambda st, d: True,
+                    )
+                    payload.update(
+                        status="read", rows=len(out.rows), agrees=out.agrees,
+                        activated=out.activated, trips=out.trips_proposed,
+                    )
+                except ncdc.NcdcError as exc:
+                    payload.update(status="found_unread", detail=str(exc))
+                except HTTPException as exc:
+                    payload.update(status="found_unread", detail=str(exc.detail))
+        elif "status" not in payload:
+            payload.update(status="no_reports")
+        await events.record(session, events.IDSP_CHECKED, payload)
+        return payload
+
+
+async def _check_ncdc_in_background(requested_by: str) -> None:
+    async with SessionLocal() as session:
+        last = await _last_ncdc_check(session)
+        if ncdc.check_due(last.created_at if last else None, datetime.now(timezone.utc)):
+            await run_ncdc_check(session, requested_by)
+
+
+class NcdcStatusOut(BaseModel):
+    checked_at: datetime | None
+    result: dict | None
+    checking: bool
+
+
+@router.get("/outbreaks/ncdc-status", response_model=NcdcStatusOut, tags=["outbreaks"])
+async def ncdc_status(
+    background: BackgroundTasks,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> NcdcStatusOut:
+    """When NCDC was last checked and what it said. If that was more than a
+    day ago, a check runs after this response (check-on-use)."""
+    last = await _last_ncdc_check(session)
+    due = ncdc.check_due(last.created_at if last else None, datetime.now(timezone.utc))
+    if due and not _ncdc_lock.locked():
+        background.add_task(_check_ncdc_in_background, user.name)
+    return NcdcStatusOut(
+        checked_at=last.created_at if last else None,
+        result=last.payload if last else None,
+        checking=due or _ncdc_lock.locked(),
+    )
+
+
+@router.post("/outbreaks/ncdc-check", tags=["outbreaks"])
+async def ncdc_check(
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> dict:
+    """"Check NCDC now": an officer's button, at most every few minutes."""
+    if user.role == "facility_user":
+        raise HTTPException(status_code=403, detail="Officers check NCDC for new reports")
+    if _ncdc_lock.locked():
+        raise HTTPException(status_code=409, detail="A check is already running")
+    last = await _last_ncdc_check(session)
+    now = datetime.now(timezone.utc)
+    if not ncdc.may_check_now(last.created_at if last else None, now):
+        wait = math.ceil((ncdc.BUTTON_COOLDOWN - (now - last.created_at)).total_seconds() / 60)
+        raise HTTPException(
+            status_code=429,
+            detail=f"NCDC was checked moments ago; try again in {wait} minute{'' if wait == 1 else 's'}",
+        )
+    result = await run_ncdc_check(session, user.name)
+    return {"checked_at": datetime.now(timezone.utc), "result": result}
 
 
 @router.get("/outbreaks/idsp-reports/latest", response_model=IdspReportOut | None, tags=["outbreaks"])

@@ -5,6 +5,8 @@ import {
   ApiError,
   type IdspReport,
   type IdspRow,
+  type NcdcResult,
+  type NcdcStatus,
   type Outbreaks,
   type StockingAdvice,
   type User,
@@ -193,7 +195,18 @@ const VERDICT: Record<IdspRow["check"]["verdict"], { label: string; className: s
  * account uploads a report here; the model is never asked twice for the same
  * PDF.
  */
+function ncdcWords(r: NcdcResult): string {
+  const week = r.week ? `week ${r.week}/${r.year}${r.uploaded_on ? `, uploaded ${day(r.uploaded_on)}` : ""}` : "";
+  if (r.status === "read") return `read ${week}: ${r.rows} rows, ${r.activated} became active outbreaks`;
+  if (r.status === "up_to_date") return `NCDC's newest is ${week} — already read`;
+  if (r.status === "found_unread") return `${week} is published but was not read: ${r.detail}`;
+  if (r.status === "unreachable") return r.detail ?? "NCDC could not be reached";
+  return "no weekly report found in NCDC's listing";
+}
+
 function IdspReader({ user, onRead }: { user: User; onRead: () => void }) {
+  const [ncdc, setNcdc] = useState<NcdcStatus | null>(null);
+  const [checking, setChecking] = useState(false);
   const [report, setReport] = useState<IdspReport | null>(null);
   const [all, setAll] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -210,6 +223,25 @@ function IdspReader({ user, onRead }: { user: User; onRead: () => void }) {
       alive = false;
     };
   }, []);
+
+  useEffect(() => {
+    api.ncdcStatus().then(setNcdc).catch(() => setNcdc(null));
+  }, []);
+
+  const checkNow = async () => {
+    setChecking(true);
+    setError(null);
+    try {
+      const out = await api.ncdcCheck();
+      setNcdc({ checked_at: out.checked_at, result: out.result, checking: false });
+      setReport(await api.latestIdspReport());
+      onRead();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not check NCDC");
+    } finally {
+      setChecking(false);
+    }
+  };
 
   const upload = async (file: File) => {
     setBusy(true);
@@ -278,6 +310,19 @@ function IdspReader({ user, onRead }: { user: User; onRead: () => void }) {
           )}
         </>
       )}
+      {/* Fix #57: checked when the panel is opened if the last check is over
+          a day old, or on request. No scheduler. */}
+      <p className="mt-1.5 text-[10.5px] leading-snug text-ink-3">
+        {ncdc?.checked_at && ncdc.result
+          ? `NCDC checked ${day(ncdc.checked_at)}: ${ncdcWords(ncdc.result)}.`
+          : "NCDC has not been checked yet."}
+        {ncdc?.checking && " Checking again now."}{" "}
+        {user.role !== "facility_user" && (
+          <button onClick={checkNow} disabled={checking} className="font-medium text-brand hover:underline disabled:text-ink-3">
+            {checking ? "Checking NCDC…" : "Check NCDC now"}
+          </button>
+        )}
+      </p>
       {mayUpload && (
         <label className="mt-1.5 block text-[11px] text-ink-2">
           <span className="font-medium text-brand">{busy ? "Reading with Gemini…" : "Read a weekly report (PDF) →"}</span>

@@ -309,6 +309,7 @@ GUARDED = {
 }
 EXEMPT = {
     "/transfers/explain": "writes nothing but a cache of the model's wording",
+    "/outbreaks/ncdc-check": "reads NCDC's official report at most once per new week, behind a cooldown",
     "/facilities/{facility_id}/briefing": "one cached briefing row per centre, replaced in place",
     "/facilities/{facility_id}/trust/explain": "writes nothing but a cache of the model's wording",
     "/federation/live": "administrator only, and refuses to start in production",

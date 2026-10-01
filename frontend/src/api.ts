@@ -469,6 +469,8 @@ export const api = {
   oversight: (state: string) => get<Oversight>("/transfers/oversight", { state }),
   usage: (facilityId: string, sku: string) =>
     get<Usage>(`/facilities/${encodeURIComponent(facilityId)}/usage`, { sku }),
+  ncdcStatus: () => get<NcdcStatus>("/outbreaks/ncdc-status"),
+  ncdcCheck: () => post<{ checked_at: string; result: NcdcResult }>("/outbreaks/ncdc-check"),
   latestIdspReport: () => get<IdspReport | null>("/outbreaks/idsp-reports/latest"),
   readIdspReport: (body: { pdf_base64: string; filename: string }) =>
     post<IdspReport>("/outbreaks/idsp-report", body),
@@ -1452,6 +1454,23 @@ export interface Usage {
   forecast_fresh: boolean;
   in_model: boolean;
   note: string;
+}
+
+/** Fix #57: what the last check of NCDC's listing found. */
+export interface NcdcResult {
+  status: "up_to_date" | "read" | "found_unread" | "unreachable" | "no_reports";
+  year?: number;
+  week?: number;
+  uploaded_on?: string;
+  detail?: string;
+  rows?: number;
+  activated?: number;
+}
+
+export interface NcdcStatus {
+  checked_at: string | null;
+  result: NcdcResult | null;
+  checking: boolean;
 }
 
 export interface DeclaredOutbreak {
