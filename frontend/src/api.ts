@@ -542,6 +542,13 @@ export interface Explanation {
   latency_ms: number | null;
   cached: boolean;
   note: string | null;
+  /** Fix #46: the same explanation in Hindi, when the model wrote it. */
+  text_hi?: string | null;
+  /** What the card cannot show, worked out by the server from the solver's
+   *  own rows; shown as they are when no model answers. */
+  facts?: string[];
+  /** Who decided the trip: the solver that actually ran, or a centre's request. */
+  planned_by?: string | null;
 }
 
 /* --------------------------------------------------------- attendance --- */

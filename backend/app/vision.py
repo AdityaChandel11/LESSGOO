@@ -584,6 +584,34 @@ EXPLAIN_SCHEMA = {
     "required": ["text"],
 }
 
+# Fix #46: the answer a first-time reader needs. The card already shows the
+# quantities; the facts are what it cannot show, worked out by the server from
+# the solver's own rows (redistribution.trip_facts). The model's job is to say
+# them plainly, in English and in Hindi, and nothing else.
+TRANSFER_WHY_PROMPT = (
+    "You explain one proposed medicine transfer between two public health "
+    "centres in India to someone seeing it for the first time.\n"
+    "Rules:\n"
+    "- Use ONLY the facts and figures given below. Never invent a number, a "
+    "date, a place or a medicine. Do not calculate any new figure. Write every "
+    "number in Western digits (0-9).\n"
+    "- Three or four plain sentences, under 90 words: why the receiver needs "
+    "it, why this donor rather than a nearer centre, what happens if nobody "
+    "sends, and how far the figures can be relied on.\n"
+    "- Do not tell anyone what to decide. No clinical or dosing advice.\n"
+    "- Give the same explanation twice: in English as `text`, and in Hindi as "
+    "`hi`. Keep centre and medicine names as given.\n"
+    "The transfer, as its card shows it:\n{rows}\n"
+    "What the card does not show:\n{facts}\n"
+)
+
+TRANSFER_WHY_SCHEMA = {
+    "type": "object",
+    "properties": {"text": {"type": "string"}, "hi": {"type": "string"}},
+    "required": ["text", "hi"],
+}
+TRANSFER_WHY_MAX_TOKENS = 700
+
 # Spec 12.6: the trust layer is never described as fraud detection and never
 # points at a person. A sentence that reads as an accusation is not shown.
 ACCUSATORY = re.compile(
@@ -601,6 +629,8 @@ class Explanation:
     model: str
     latency_ms: int
     cached: bool = False
+    # The same explanation in Hindi, where it was asked for (fix #46).
+    hi: str | None = None
 
 
 def _figure(value: float) -> str:
@@ -630,16 +660,21 @@ def parse_explanation(
     sources: list[str],
     latency_ms: int,
     forbid_accusation: bool = False,
+    want_hi: bool = False,
 ) -> Explanation:
     """Validate what came back before any of it reaches a screen."""
     text = (payload.get("text") or "").strip()
     if not text:
         raise VisionError("the model returned an empty explanation")
-    if forbid_accusation and ACCUSATORY.search(text):
-        raise VisionError("the model's wording read as an accusation, so it was not shown")
-    if ungrounded_figures(text, sources):
-        raise VisionError("the model used a figure that is not in the data, so it was not shown")
-    return Explanation(text=text, model=model, latency_ms=latency_ms)
+    hi = (payload.get("hi") or "").strip() if want_hi else None
+    if want_hi and not hi:
+        raise VisionError("the model did not answer in both languages")
+    for words in (text, hi or ""):
+        if forbid_accusation and ACCUSATORY.search(words):
+            raise VisionError("the model's wording read as an accusation, so it was not shown")
+        if ungrounded_figures(words, sources):
+            raise VisionError("the model used a figure that is not in the data, so it was not shown")
+    return Explanation(text=text, model=model, latency_ms=latency_ms, hi=hi)
 
 
 _explain_cache: "OrderedDict[str, Explanation]" = OrderedDict()
@@ -660,6 +695,9 @@ async def _explain(
     what: str,
     forbid_accusation: bool,
     client: httpx.AsyncClient | None,
+    schema: dict = EXPLAIN_SCHEMA,
+    max_tokens: int = EXPLAIN_MAX_TOKENS,
+    want_hi: bool = False,
 ) -> Explanation:
     if not explanation_available():
         raise VisionError("the explanation model is not configured")
@@ -674,9 +712,9 @@ async def _explain(
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "responseMimeType": "application/json",
-            "responseSchema": EXPLAIN_SCHEMA,
+            "responseSchema": schema,
             "temperature": 0.2,
-            "maxOutputTokens": EXPLAIN_MAX_TOKENS,
+            "maxOutputTokens": max_tokens,
         },
     }
     started = time.perf_counter()
@@ -692,6 +730,7 @@ async def _explain(
         sources=sources,
         latency_ms=latency_ms,
         forbid_accusation=forbid_accusation,
+        want_hi=want_hi,
     )
     _explain_cache[key] = answer
     while len(_explain_cache) > EXPLAIN_CACHE_SIZE:
@@ -700,11 +739,33 @@ async def _explain(
 
 
 async def explain_transfer(
-    *, rows: list[str], client: httpx.AsyncClient | None = None
+    *,
+    rows: list[str],
+    facts: list[str] | None = None,
+    client: httpx.AsyncClient | None = None,
 ) -> Explanation:
-    """Why this trip, in one or two sentences, from the solver's own figures."""
+    """Why this trip, from the solver's own figures.
+
+    With `facts` (redistribution.trip_facts) the answer covers what the card
+    cannot show — the nearer centre that was not used, the run-out date, how
+    fresh the figures are — and comes back in English and Hindi. Without
+    them it is the one or two sentences the card's figures support.
+    """
     if not rows:
         raise VisionError("there is no transfer to explain")
+    if facts:
+        return await _explain(
+            TRANSFER_WHY_PROMPT.format(
+                rows="\n".join(rows), facts="\n".join("- " + f for f in facts)
+            ),
+            sources=[*rows, *facts],
+            what="transfer explanation",
+            forbid_accusation=False,
+            client=client,
+            schema=TRANSFER_WHY_SCHEMA,
+            max_tokens=TRANSFER_WHY_MAX_TOKENS,
+            want_hi=True,
+        )
     return await _explain(
         TRANSFER_PROMPT.format(rows="\n".join(rows)),
         sources=rows,

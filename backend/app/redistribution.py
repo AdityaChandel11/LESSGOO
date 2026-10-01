@@ -26,7 +26,7 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 
 import numpy as np
@@ -1043,6 +1043,153 @@ def why_rows(items: list[dict], critical_days: float) -> list[str]:
             parts.append(f"Donor keeps at least {_days(r['donor_days_after_plan'])} of stock.")
         rows.append(" ".join(parts))
     return rows
+
+
+# ------------------------------------------------- what the card cannot say ---
+# Fix #46. The trip card already shows the quantities and the days of cover;
+# an explanation that repeats them tells nobody anything. These are the facts
+# behind the choice, worked out after the plan from the same rows the solver
+# read: the nearer centre that was not used and why, when the receiver runs
+# out if nobody sends, how fresh the donor's figure is, and whether the
+# distance is a road route or an estimate.
+
+
+def _pair_km(a: StockNode, b: StockNode, road_factor: float) -> float:
+    lat1, lng1, lat2, lng2 = map(np.radians, (a.lat, a.lng, b.lat, b.lng))
+    h = np.sin((lat2 - lat1) / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin((lng2 - lng1) / 2) ** 2
+    return float(2 * EARTH_RADIUS_KM * np.arcsin(np.sqrt(h)) * road_factor)
+
+
+def alternative_donor(
+    receiver: StockNode,
+    donor: StockNode,
+    nodes: list[StockNode],
+    rules: PlanRules,
+    committed: dict[str, float],
+) -> dict | None:
+    """The nearest centre to the receiver that is closer than the chosen
+    donor, and the reason the plan did not use it. None when the donor is
+    already the nearest centre holding the medicine.
+
+    `nodes` are the state's centres for this medicine; `committed` is what
+    each already owes to other open trips. The reason is read from the same
+    figures the solver used — it is never guessed.
+    """
+    reach = _pair_km(receiver, donor, rules.road_factor)
+    closer = [
+        (km, n)
+        for n in nodes
+        if n.facility_id not in (receiver.facility_id, donor.facility_id)
+        and (km := _pair_km(receiver, n, rules.road_factor)) < reach
+    ]
+    if not closer:
+        return None
+    km, n = min(closer, key=lambda pair: pair[0])
+    lead = "{0} is closer (about {1} km)".format(n.name, round(km))
+    spare = max(0.0, n.qty - n.burn * rules.donor_floor_days)
+    if n.days is not None and n.days < rules.trigger_days:
+        reason = "short_itself"
+        sentence = "{0} but is itself short: {1} of stock.".format(lead, _days(n.days))
+    elif n.days is not None and n.days <= rules.donor_floor_days:
+        reason = "below_floor"
+        sentence = "{0} but holds {1} of stock, below the {2:g}-day floor a donor must keep.".format(
+            lead, _days(n.days), rules.donor_floor_days
+        )
+    elif spare - committed.get(n.facility_id, 0.0) < rules.min_units:
+        reason = "committed"
+        sentence = "{0}, but its spare stock is already promised to other trips in this plan.".format(lead)
+    else:
+        reason = "could_spare"
+        sentence = (
+            "{0} and could also spare stock; the plan is solved for the whole state at once, "
+            "and this trip is part of its cheapest overall answer."
+        ).format(lead)
+    return {
+        "facility_id": n.facility_id, "name": n.name, "district": n.district,
+        "km": round(km, 1), "days": n.days, "reason": reason, "sentence": sentence,
+    }
+
+
+SOURCE_WORDS = {
+    "form": "entered on the stock form",
+    "voice": "spoken into the app",
+    "sms": "reported by SMS",
+    "ivr": "reported by phone call",
+    "whatsapp": "reported by WhatsApp",
+    "photo": "read from a photographed document",
+    "transfer": "updated by a confirmed delivery",
+    "seed": "a seeded demonstration figure",
+}
+
+
+def trip_facts(
+    *,
+    sku_name: str,
+    receiver: StockNode,
+    donor: StockNode,
+    alternative: dict | None,
+    receiver_runs_out_on: date | None,
+    today: date,
+    donor_counted_on: date | None,
+    donor_source: str | None,
+    receiver_trust: tuple[int, str] | None,
+    route_source: str | None,
+    road_factor: float,
+    requested: bool = False,
+) -> list[str]:
+    """What a first-time reader needs and the card does not show, as plain
+    sentences. Each is omitted when its figure is not known. `requested` is a
+    centre's own request: the receiver picked the donor, the plan did not."""
+    from .workspace import day_words  # workspace imports this module
+
+    if requested:
+        why = "{0} chose this donor itself, from the nearest centres that could spare {1}.".format(
+            receiver.name, sku_name
+        )
+    elif alternative:
+        why = alternative["sentence"]
+    else:
+        why = "{0} is the nearest centre that holds {1} above its floor.".format(donor.name, sku_name)
+    out = [why]
+    if receiver_runs_out_on is not None:
+        when = day_words(receiver_runs_out_on)
+        out.append(
+            "Without this delivery {0} runs out of {1} around {2}.".format(receiver.name, sku_name, when)
+            if receiver_runs_out_on >= today
+            else "At its usual use {0} would already have run out around {1}; its count is "
+            "overdue.".format(receiver.name, when)
+        )
+    if donor_counted_on is not None:
+        out.append(
+            "{0}'s figure is its count of {1}, {2}.".format(
+                donor.name, day_words(donor_counted_on), SOURCE_WORDS.get(donor_source or "", "reported")
+            )
+        )
+    if receiver_trust is not None:
+        out.append(
+            "{0}'s data confidence is {1} out of 100 ({2}).".format(receiver.name, *receiver_trust)
+        )
+    if route_source != "google_routes":
+        out.append(
+            "The distance is a straight-line estimate multiplied by {0:g}, not a road route.".format(
+                road_factor
+            )
+        )
+    return out
+
+
+def planned_by(items: list[dict]) -> str:
+    """Who decided this trip, read from the trip itself: the solver that ran
+    (it falls back to a greedy one when OR-Tools is unavailable), or a centre
+    that asked another for stock."""
+    first = items[0]
+    if first.get("triggered_by") == FACILITY_REQUEST:
+        return "This is a request one centre raised to another, not a recommendation of the state plan."
+    solver = (first.get("rationale") or {}).get("solver")
+    name = {"ortools": "OR-Tools", "greedy": "the greedy fallback solver"}.get(
+        solver, "the redistribution solver"
+    )
+    return "The plan is computed by {0}.".format(name)
 
 
 def rules_why(items: list[dict]) -> str:

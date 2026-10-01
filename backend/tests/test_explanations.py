@@ -27,6 +27,16 @@ def _fresh_cache():
     vision.clear_explanation_cache()
 
 
+@pytest.fixture(autouse=True)
+def _no_trip_facts(monkeypatch):
+    # The facts behind a trip (fix #46) are read from the database and tested
+    # in tests/test_trip_why.py; here the trip explanation runs without them.
+    async def none(session, items):
+        return []
+
+    monkeypatch.setattr(api, "_trip_facts", none)
+
+
 def _live(monkeypatch) -> None:
     monkeypatch.setattr(vision.settings, "llm_mode", "live")
     monkeypatch.setattr(vision.settings, "gemini_api_key", "not-a-real-key")

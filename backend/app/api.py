@@ -77,6 +77,7 @@ from .models import (
     Event,
     Facility,
     FacilityContact,
+    FacilitySkuState,
     FederationRound,
     Forecast,
     IdspReport,
@@ -680,6 +681,12 @@ class ExplanationOut(BaseModel):
     latency_ms: int | None
     cached: bool
     note: str | None = None
+    # Fix #46: the same explanation in Hindi when the model wrote it, and the
+    # facts it was written from — shown as they are when no model answers.
+    text_hi: str | None = None
+    facts: list[str] = Field(default_factory=list)
+    # Who decided the trip: the solver that actually ran, or a centre's request.
+    planned_by: str | None = None
 
 
 def _rules_explanation(text: str, note: str | None = None) -> ExplanationOut:
@@ -700,7 +707,7 @@ async def _explain_or_rules(make, fallback: str) -> ExplanationOut:
         return _rules_explanation(fallback, "Showing the computed line — {0}.".format(exc))
     return ExplanationOut(
         text=answer.text, source="gemini", ai=True, model=answer.model,
-        latency_ms=answer.latency_ms, cached=answer.cached,
+        latency_ms=answer.latency_ms, cached=answer.cached, text_hi=answer.hi,
     )
 
 
@@ -734,8 +741,80 @@ async def explain_trip(
             status_code=422, detail="Transfers on one trip share a donor and a receiver"
         )
     rows = redistribution.why_rows(items, settings.critical_days)
-    return await _explain_or_rules(
-        lambda: vision.explain_transfer(rows=rows), redistribution.rules_why(items)
+    facts = await _trip_facts(session, items)
+    out = await _explain_or_rules(
+        lambda: vision.explain_transfer(rows=rows, facts=facts), redistribution.rules_why(items)
+    )
+    out.facts = facts
+    out.planned_by = redistribution.planned_by(items)
+    return out
+
+
+async def _trip_facts(session: AsyncSession, items: list[dict]) -> list[str]:
+    """What the trip card cannot show (fix #46), for the trip's most urgent
+    medicine: the nearer centre that was not used and why, the receiver's
+    run-out date without the trip, how fresh the donor's figure is, the
+    receiver's data confidence, and whether the distance is an estimate.
+    Every read is bounded by one state and one medicine, or by the trip's two
+    centres."""
+    worst = min(items, key=lambda t: t["rationale"].get("recipient_days_before", 1e9))
+    state, sku = worst["state"], worst["sku_code"]
+    donor_id, receiver_id = worst["from"]["id"], worst["to"]["id"]
+    rules = redistribution.PlanRules.from_settings()
+
+    nodes = (await redistribution.load_state_nodes(session, state, sku)).get(sku, [])
+    by_id = {n.facility_id: n for n in nodes}
+    donor, receiver = by_id.get(donor_id), by_id.get(receiver_id)
+    if donor is None or receiver is None:
+        return []
+
+    in_state = select(Facility.id).where(Facility.state_silo == state)
+    committed = {
+        fid: float(qty or 0)
+        for fid, qty in (
+            await session.execute(
+                select(Transfer.from_facility, func.sum(Transfer.qty))
+                .where(
+                    Transfer.status == "proposed",
+                    Transfer.sku_code == sku,
+                    Transfer.to_facility.in_(in_state),
+                    Transfer.id.notin_([t["id"] for t in items]),
+                )
+                .group_by(Transfer.from_facility)
+            )
+        ).all()
+    }
+    counted = {
+        fid: (at, source, days)
+        for fid, at, source, days in (
+            await session.execute(
+                select(
+                    FacilitySkuState.facility_id, FacilitySkuState.last_reported_at,
+                    FacilitySkuState.last_source, FacilitySkuState.days_of_stock,
+                ).where(
+                    FacilitySkuState.facility_id.in_([donor_id, receiver_id]),
+                    FacilitySkuState.sku_code == sku,
+                )
+            )
+        ).all()
+    }
+    donor_at, donor_source, _ = counted.get(donor_id, (None, None, None))
+    recv_at, _, recv_days = counted.get(receiver_id, (None, None, None))
+    score = await trust.for_facility(session, receiver_id)
+    now = datetime.now(timezone.utc)
+    return redistribution.trip_facts(
+        sku_name=worst["sku_name"],
+        receiver=receiver,
+        donor=donor,
+        alternative=redistribution.alternative_donor(receiver, donor, nodes, rules, committed),
+        receiver_runs_out_on=workspace.stockout_date(recv_days, recv_at),
+        today=workspace.in_india(now).date(),
+        donor_counted_on=workspace.in_india(donor_at).date() if donor_at else None,
+        donor_source=donor_source,
+        receiver_trust=(round(score.score * 100), score.band) if score else None,
+        route_source=worst.get("route_source"),
+        road_factor=rules.road_factor,
+        requested=worst.get("triggered_by") == workspace.FACILITY_REQUEST,
     )
 
 
