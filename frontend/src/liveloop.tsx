@@ -461,7 +461,12 @@ export function LiveLoopPanel({
             t.from.district === SANDBOX.district &&
             t.to.district === SANDBOX.district,
         )
-        .sort((a, b) => (a.rationale.recipient_days_before ?? 99) - (b.rationale.recipient_days_before ?? 99));
+        // Prefer a trip the outbreak itself created: a receiver with cover
+        // above the trigger without the surge. Then the most urgent.
+        .sort((a, b) => {
+          const pre = (t: Transfer) => ((t.rationale.outbreak?.recipient_days_without_outbreak ?? 0) >= 7 ? 0 : 1);
+          return pre(a) - pre(b) || (a.rationale.recipient_days_before ?? 99) - (b.rationale.recipient_days_before ?? 99);
+        });
       pick = ours[0];
       if (!pick) {
         mark("plan", {

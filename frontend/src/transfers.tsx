@@ -414,7 +414,7 @@ export function RedistributionPanel({
             <>
               The system recommends{" "}
               <span className="font-medium text-ink">{oversight.recommended_open.toLocaleString("en-IN")}</span> transfers
-              in {stateLabel}, computed {clock(oversight.computed_at)} from the stock reported by then. Each goes to the
+              in {stateLabel}, last updated {clock(oversight.computed_at)} from the stock reported by then. Each goes to the
               donor centre to accept — nothing moves without them.
               {oversight.requests_open > 0 &&
                 ` ${oversight.requests_open} requests between centres are waiting for their donors too.`}
@@ -444,7 +444,7 @@ export function RedistributionPanel({
           )}
           {oversight?.computed_at && !planning && (
             <span className="text-[11px] text-ink-3">
-              Last computed {clock(oversight.computed_at)} · {oversight.reports_since.toLocaleString("en-IN")} stock
+              Last updated {clock(oversight.computed_at)} · {oversight.reports_since.toLocaleString("en-IN")} stock
               reports since
               {plan && planMs !== null &&
                 ` · solved with ${plan.solver === "ortools" ? "OR-Tools" : plan.solver} in ${(planMs / 1000).toFixed(1)} s`}
