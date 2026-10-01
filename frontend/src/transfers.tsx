@@ -430,6 +430,8 @@ export function RedistributionPanel({
           )}
           {sku && <> Showing <span className="font-medium text-ink">{medicine}</span>.</>}
         </p>
+        {/* Fix #92: the main channel this prototype does not model, said where supply is shown. */}
+        <p className={`mt-1 text-[11px] leading-snug text-ink-3 ${compact ? "hidden" : ""}`}>Most replenishment in practice is by indent to the district drug warehouse; this prototype models centre-to-centre transfers and the warehouse dispatch ledger.</p>
 
         <div className="mt-3 flex items-center gap-2">
           {canPlan ? (

@@ -298,6 +298,8 @@ export function MovementsPanel({
     <div className="flex h-full min-h-0 flex-col">
       <div className="border-b border-line px-3 py-2.5">
         <h2 className="text-[13px] font-semibold text-ink">Medicine movements — {stateLabel}</h2>
+        {/* Fix #92: the main channel this prototype does not model. */}
+        <p className="mt-0.5 text-[11px] leading-snug text-ink-3">Most replenishment in practice is by indent to the district drug warehouse; this prototype models centre-to-centre transfers and the warehouse dispatch ledger.</p>
         <p className="mt-0.5 text-[12px] text-ink-2">
           Every batch has two records: what the warehouse dispatched, and what the facility
           confirms arrived. Gaps between them show up here without anyone auditing.
