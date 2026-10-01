@@ -321,11 +321,11 @@ def day_words(d: date) -> str:
 # Fix #84: the forecast made visible. A medicine's last 28 days of use, the
 # burn rate, and the shared model's next-7-day forecast where the model
 # covers that state and medicine. The web service carries no torch, so the
-# model's coverage is mirrored here; tests/test_forecast_visible.py keeps it
-# in step with federation/pytorchexample.
+# model's coverage is mirrored in services.py; tests/test_forecast_visible.py
+# keeps it in step with federation/pytorchexample.
 
-MODEL_STATES = ("MH", "KL", "BR", "UP")
-MODEL_SKUS = ("ORS", "PARA500", "AMOX", "IRONFA", "IVFLUID", "ZINC")
+MODEL_STATES = services.MODEL_STATES
+MODEL_SKUS = services.MODEL_SKUS
 
 
 @dataclass(frozen=True)

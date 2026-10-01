@@ -23,7 +23,7 @@ from datetime import date, datetime, timedelta
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import outbreak, workspace
+from . import outbreak, services, workspace
 from .config import settings
 from .geo import STATE_BY_CODE
 
@@ -147,6 +147,7 @@ WITH centre AS (
            ON :use_forecast
           AND fc.facility_id = s.facility_id AND fc.sku_code = s.sku_code
           AND fc.computed_at >= :fresh AND fc.predicted_daily_use > 0
+          AND f.state_silo = ANY(:model_states) AND s.sku_code = ANY(:model_skus)
     WHERE s.last_reported_at IS NOT NULL
       AND COALESCE(fc.predicted_daily_use, s.daily_burn_rate) > 0
       AND (CAST(:state AS text) IS NULL OR f.state_silo = :state)
@@ -203,6 +204,8 @@ async def strip(
     params = {
         "now": now, "until": now + timedelta(days=HORIZON_DAYS), "state": state,
         "use_forecast": use_forecast, "fresh": fresh, "only_forecast": only_forecast,
+        # A forecast row outside the model's coverage is not used (fix #55).
+        "model_states": list(services.MODEL_STATES), "model_skus": list(services.MODEL_SKUS),
     }
     rows = (await session.execute(text(PAIRS_SQL), {**params, "limit": READ_LIMIT})).all()
     pairs = [

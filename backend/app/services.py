@@ -93,14 +93,37 @@ class SkuStock:
     forecast_published_at: datetime | None = None
 
 
+# The shared model's coverage: the states that trained it and the medicines it
+# trained on. The web service carries no torch, so this mirrors the federation
+# code; tests/test_forecast_visible.py keeps the two in step.
+MODEL_STATES = ("MH", "KL", "BR", "UP")
+MODEL_SKUS = ("ORS", "PARA500", "AMOX", "IRONFA", "IVFLUID", "ZINC")
+
+
+def forecast_applies(state: str, sku: str) -> bool:
+    """Whether the shared model's forecast may be used here (fix #55).
+
+    Only where it trained. No held-out-state check exists, so a forecast for a
+    state the model never saw would be an unverified number wearing the
+    model's name; the burn rate is used there, and the screen says so.
+    """
+    return state in MODEL_STATES and sku in MODEL_SKUS
+
+
 def pick_rate(
-    burn: float | None, forecast: tuple[float, datetime] | None
+    burn: float | None,
+    forecast: tuple[float, datetime] | None,
+    *,
+    state: str | None = None,
+    sku: str | None = None,
 ) -> tuple[float | None, str, datetime | None]:
     """The forecast replaces the burn rate only when one has been published
-    recently for this exact facility and medicine. Every other case — switch
-    off, no row, stale row, failed training run — falls through to the rule
-    that needs nothing but the readings."""
-    if forecast is not None and forecast[0] > 0:
+    recently for this exact facility and medicine, inside the model's
+    coverage. Every other case — switch off, no row, stale row, failed
+    training run, a state or medicine the model never trained on — falls
+    through to the rule that needs nothing but the readings."""
+    covered = state is None or sku is None or forecast_applies(state, sku)
+    if covered and forecast is not None and forecast[0] > 0:
         return forecast[0], "federated", forecast[1]
     return burn, "burn_rate", None
 
@@ -296,7 +319,8 @@ async def get_snapshots(
                 continue
             qty = pts[-1][1]
             burn, rate_source, published = pick_rate(
-                _burn_rate(pts), forecasts.get((fac.id, sku_code))
+                _burn_rate(pts), forecasts.get((fac.id, sku_code)),
+                state=fac.state_silo, sku=sku_code,
             )
             dos = None if burn is None else qty / max(burn, EPSILON)
             at, source, conf = latest_meta[(fac.id, sku_code)]

@@ -75,6 +75,17 @@ def main() -> int:
     args = p.parse_args()
 
     states = [s.strip() for s in args.states.split(",") if s.strip()]
+    # Fix #55: only the states that trained the model. No held-out-state check
+    # exists, so a forecast for a state the model never saw would be an
+    # unverified number published under the model's name; the web service
+    # ignores such a row too (services.forecast_applies) and uses the burn rate.
+    outside = [s for s in states if s not in SILOS]
+    if outside:
+        print(
+            "Refusing to publish for {0}: the model trained on {1} only, and no "
+            "held-out-state check has been run.".format(", ".join(outside), ", ".join(SILOS))
+        )
+        return 2
     model = DemandLSTM()
     model.load_state_dict(torch.load(args.model, map_location="cpu"))
     model.eval()
