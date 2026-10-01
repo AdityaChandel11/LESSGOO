@@ -99,3 +99,64 @@ def test_a_channel_with_no_location_reports_that_it_ran_no_check():
         facility(), lat=None, lng=None, loc_method="none"
     )
     assert km is None and ok is None
+
+
+# ------------------------------------------- sample sizes (fix #60, Tier 1) ---
+# "Staff recorded present on 3 of 3 shifts" scored a centre on three
+# observations. Every signal now says how many observations it rests on, and a
+# signal with fewer than its minimum is listed as not scored instead of
+# moving the score.
+
+
+def test_every_signal_has_a_minimum_and_a_unit():
+    assert set(trust.MIN_OBSERVATIONS) == set(trust.WEIGHTS) == set(trust.SAMPLE_UNIT)
+    assert all(n >= 3 for n in trust.MIN_OBSERVATIONS.values())
+
+
+def test_three_shifts_are_not_enough_to_score_attendance():
+    assert not trust.enough("attendance_vs_footfall", 3)
+    assert trust.enough("attendance_vs_footfall", trust.MIN_OBSERVATIONS["attendance_vs_footfall"])
+
+
+def test_a_signal_says_what_it_is_based_on():
+    assert trust.basis("attendance_vs_footfall", 12) == "Based on 12 shifts in the last 14 days."
+    assert trust.basis("beds_vs_register", 1) == "Based on 1 ward report in the last 14 days."
+    # Deliveries are read over a longer window than the other signals.
+    assert trust.basis("receipt_discipline", 9) == "Based on 9 consignments in the last 60 days."
+
+
+def test_too_few_observations_are_listed_and_cost_nothing():
+    c = trust.not_scored("attendance_vs_footfall", 3)
+    assert c.scored is False and c.contribution == 0 and c.sample == 3
+    assert c.reason == "Not scored: 3 shifts in the last 14 days, and at least 5 are needed."
+
+
+def test_an_unscored_signal_does_not_move_the_score():
+    flagged = trust._component("receipt_discipline", 1.0, "9 unconfirmed", sample=9)
+    thin = trust.not_scored("attendance_vs_footfall", 3)
+    with_thin = trust.combine("F1", [flagged, thin])
+    alone = trust.combine("F1", [flagged])
+    assert with_thin.score == alone.score == 0.0
+    # Scored signals first, worst first; the unscored one is still listed.
+    assert [c.signal for c in with_thin.components] == ["receipt_discipline", "attendance_vs_footfall"]
+
+
+def test_a_centre_with_nothing_scored_has_no_score_at_all():
+    assert trust.combine("F1", [trust.not_scored("attendance_vs_footfall", 2)]) is None
+    assert trust.combine("F1", []) is None
+
+
+def test_each_row_carries_its_sample():
+    score = trust.combine("F1", [trust._component("receipt_discipline", 0.5, "x", sample=9)])
+    (row,) = score.as_rows()
+    assert (row["sample"], row["scored"]) == (9, True)
+    assert row["basis"] == "Based on 9 consignments in the last 60 days."
+
+
+def test_an_unscored_signal_is_never_given_as_a_reason():
+    score = trust.combine("F1", [
+        trust._component("receipt_discipline", 0.5, "4 unconfirmed of 9 recent consignments.", sample=9),
+        trust.not_scored("attendance_vs_footfall", 3),
+    ])
+    assert all("Not scored" not in line for line in trust.why_rows(score))
+    assert "Not scored" not in trust.rules_why(score)

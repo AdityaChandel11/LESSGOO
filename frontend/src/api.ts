@@ -616,6 +616,11 @@ export interface TrustComponent {
   /** The rows this sentence was computed from — the same filter the movement
    *  tab uses, so the link opens exactly what the score counted. */
   evidence: { tab: string; facility?: string; view?: MovementView } | null;
+  /** Fix #60: how many observations the sentence rests on, in words. */
+  sample?: number | null;
+  basis?: string | null;
+  /** False when there were too few observations to score the signal. */
+  scored?: boolean;
 }
 
 export interface Trust {

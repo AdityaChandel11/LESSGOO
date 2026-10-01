@@ -3037,6 +3037,11 @@ class TrustComponentOut(BaseModel):
     # Where to open the rows this sentence came from. The movement tab reads
     # the same filter, so the link and the score are one query.
     evidence: dict | None = None
+    # Fix #60: how many observations the sentence rests on, in words, and
+    # whether there were enough to score it at all.
+    sample: int | None = None
+    basis: str | None = None
+    scored: bool = True
 
 
 class TrustOut(BaseModel):
