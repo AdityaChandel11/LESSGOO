@@ -637,7 +637,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
             : `${view.pinsInView.toLocaleString("en-IN")} health centres in view. Click one for its medicine stock.`;
 
   return (
-    <div className="flex h-full flex-col bg-canvas font-sans text-ink">
+    <div className="flex min-h-full flex-col bg-canvas font-sans text-ink md:h-full">
       <a
         href="#console-panel"
         className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-[2000] focus:rounded focus:bg-panel focus:px-3 focus:py-2 focus:text-[13px] focus:text-ink"
@@ -820,7 +820,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
 
       <main className="flex min-h-0 flex-1 flex-col md:flex-row">
         {/* ---------------------------------------------------- panel --- */}
-        <aside id="console-panel" tabIndex={-1} className="z-[1000] order-2 flex min-h-0 w-full flex-1 flex-col border-r border-line bg-panel md:order-1 md:w-[400px] md:flex-none md:shrink-0">
+        <aside id="console-panel" tabIndex={-1} className="z-[1000] order-2 flex w-full flex-1 flex-col border-r md:min-h-0 md:overflow-y-auto border-line bg-panel md:order-1 md:w-[400px] md:flex-none md:shrink-0">
           {loopFor ? (
             <LiveLoopPanel
               key={`${loopFor.id}:${loopAuto}:${loopKind}`}

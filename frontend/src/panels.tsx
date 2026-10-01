@@ -171,8 +171,10 @@ export function NationalPanel({
   onPickState: (b: Bucket) => void;
 }) {
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="border-b border-line px-4 pt-4 pb-4">
+    // No min-h-0 here: the panel may not shrink below its header plus five
+    // list rows. On a short screen the whole side panel scrolls instead.
+    <div className="flex flex-1 flex-col">
+      <div className="shrink-0 border-b border-line px-4 pt-4 pb-4">
         <Eyebrow>National overview</Eyebrow>
         <h2 className="mt-1 text-[22px] font-semibold tracking-tight text-ink">India</h2>
         <p className="mt-0.5 text-[12.5px] text-ink-2">
@@ -197,7 +199,7 @@ export function NationalPanel({
         <Eyebrow>States by facilities critical</Eyebrow>
         <span className="text-[10.5px] text-ink-3">count · share</span>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto pb-2">
+      <div className="list-min overflow-y-auto pb-2">
         {states.map((b, i) => (
           <BucketRow key={b.key} b={b} rankNo={i + 1} onClick={() => onPickState(b)} />
         ))}
@@ -267,8 +269,8 @@ export function StatePanel({
   const med = medicineLabel(sku, skus);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="border-b border-line px-4 pt-4 pb-4">
+    <div className="flex flex-1 flex-col">
+      <div className="shrink-0 border-b border-line px-4 pt-4 pb-4">
         <Eyebrow>State view</Eyebrow>
         <h2 className="mt-1 text-[22px] font-semibold tracking-tight text-ink">
           {stateLabel || summary?.state_name || stateCode}
@@ -309,7 +311,7 @@ export function StatePanel({
       </div>
 
       {tab === "districts" ? (
-        <div className="min-h-0 flex-1 overflow-y-auto py-1">
+        <div className="list-min overflow-y-auto py-1">
           {districts.map((b, i) => (
             <BucketRow key={b.key} b={b} rankNo={i + 1} onClick={() => onPickDistrict(b)} />
           ))}
@@ -329,7 +331,7 @@ export function StatePanel({
               <span>{sku ? `Days of ${sku}` : "Lowest cover"}</span>
             </div>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto pb-2">
+          <div className="list-min overflow-y-auto pb-2">
             {filtered.map((p) => (
               <button
                 key={p.id}

@@ -29,6 +29,22 @@ body {
   font-feature-settings: "tnum" 0;
 }
 
+/* A ranked list in the side panel always shows five rows (5 x 51px). When the
+   screen is too short for that, the panel scrolls; the list never collapses. */
+.list-min {
+  flex: 1 1 0px;
+  min-height: 256px;
+}
+
+/* On a phone the panel is the only scroller, so the list runs at full length
+   rather than scrolling inside a scrolling panel. */
+@media (max-width: 767px) {
+  .list-min {
+    flex: none;
+    overflow-y: visible;
+  }
+}
+
 /* ------------------------------------------------------------ map chrome --- */
 
 .leaflet-container {
