@@ -214,9 +214,12 @@ function OrdersList({
     );
   }
 
-  return (
+  // Fix #7: a delivery already confirmed is not "on its way".
+  const arriving = rows.filter((m) => m.status === "in_transit" || m.status === "overdue");
+  const settled = rows.filter((m) => m.status !== "in_transit" && m.status !== "overdue");
+  const list = (items: typeof rows) => (
     <ul className="flex flex-col gap-3">
-      {rows.map((m) => (
+      {items.map((m) => (
         <li key={m.id}>
           <MovementCard
             m={m}
@@ -228,6 +231,26 @@ function OrdersList({
         </li>
       ))}
     </ul>
+  );
+
+  return (
+    <>
+      {arriving.length > 0 ? (
+        list(arriving)
+      ) : (
+        <p className="rounded-lg border border-line bg-panel px-3.5 py-3 text-[12.5px] text-ink-2">
+          Nothing is on its way to this centre right now.
+        </p>
+      )}
+      {settled.length > 0 && (
+        <>
+          <h2 className="mt-4 mb-1.5 text-[11px] font-semibold uppercase tracking-[0.09em] text-ink-3">
+            Received · प्राप्त
+          </h2>
+          {list(settled)}
+        </>
+      )}
+    </>
   );
 }
 

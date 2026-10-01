@@ -80,7 +80,7 @@ export default function Incoming({
         </h2>
         {demoMode && (
           <button onClick={simulate} disabled={busy !== null} className="text-[11.5px] font-medium text-brand hover:underline disabled:opacity-50">
-            {busy === "demo" ? "Asking…" : "Simulate a request from a neighbour"}
+            {busy === "demo" ? "Asking…" : "Demo: have a nearby centre ask you for stock"}
           </button>
         )}
       </div>

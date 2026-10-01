@@ -121,7 +121,7 @@ const RUNS = [
 const DEMO_SCRIPT = [
   "Open this link a minute before you start: the free server sleeps when idle, and the first load can take up to a minute.",
   "Continue as Pharmacist, Nashik PHC 1. On Medicines, open a medicine running short, press Find supply and request stock (pick Nashik PHC 13 if it is offered).",
-  "In a private window, continue as Pharmacist, Nashik PHC 13. Orders → Requests for your stock: accept and send, or decline. No request waiting? Simulate a request from a neighbour raises a real one.",
+  "In a private window, continue as Pharmacist, Nashik PHC 13. Orders → Requests for your stock: accept and send, or decline. No request waiting? Demo: have a nearby centre ask you for stock raises a real one.",
   "Back as PHC 1: the medicine card shows the reply, and Orders confirms the delivery when it arrives, counting what came.",
   "Continue as the Maharashtra state officer: Redistribution, Movements and Data trust show the same rows — who asked, who sent, what arrived.",
 ] as const;
