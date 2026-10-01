@@ -175,7 +175,8 @@ export default function AuthGate() {
       <Landing
         onSignedIn={signedIn}
         resume={{
-          label: `${session.user.name} · ${ROLE_LABEL[session.user.role]}`,
+          // The role, not the account name: the front door names no state or district.
+          label: ROLE_LABEL[session.user.role],
           onResume: () => setEntered(true),
         }}
       />

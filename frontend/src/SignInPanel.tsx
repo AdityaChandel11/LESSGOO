@@ -27,6 +27,25 @@ import {
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+/**
+ * What a role card says. Display text only: the account behind the card and
+ * how it signs in are unchanged. The cards name a job, not a place. The one
+ * exception is the pharmacist, whose centre is given as the demo's example.
+ */
+function cardTitle(a: DemoAccount): string {
+  if (a.role === "admin") return "Platform Admin";
+  if (a.role === "state_officer") return "State NHM Officer";
+  if (a.role === "block_mo") return "District Logistics Officer";
+  return `Pharmacist (demo example: ${a.name.replace(/^Pharmacist,\s*/, "")})`;
+}
+
+function cardSees(a: DemoAccount): string {
+  const sees = a.sees ?? "";
+  if (a.role === "state_officer") return sees.replace(/^[^:]+:/, "One state:");
+  if (a.role === "block_mo") return sees.replace(/^[^:]+:/, "One district:");
+  return sees;
+}
+
 export default function SignInPanel({
   onSignedIn,
   showNotice = true,
@@ -116,13 +135,10 @@ export default function SignInPanel({
                       </span>{" "}
                       <span className="text-[11.5px] font-normal text-ink-3">(demo role)</span>
                     </span>
-                    <span className="block truncate text-[12px] text-ink-3">
-                      {a.name}
-                      {a.role !== "admin" && a.role !== "facility_user" ? ` · ${a.scope}` : ""}
-                    </span>
+                    <span className="block truncate text-[12px] text-ink-3">{cardTitle(a)}</span>
                     {a.sees && (
                       <span className="mt-0.5 block text-[12px] leading-snug text-ink-2">
-                        {a.sees}
+                        {cardSees(a)}
                       </span>
                     )}
                   </span>

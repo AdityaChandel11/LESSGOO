@@ -52,7 +52,7 @@ const STEPS = [
     title: "Four states train a shared forecasting model today",
     hindi: "आज चार राज्य मिलकर एक पूर्वानुमान मॉडल प्रशिक्षित करते हैं",
     body:
-      "Maharashtra, Kerala, Bihar and Uttar Pradesh each train on their own rows and send back " +
+      "Each of the four states trains on its own rows and sends back " +
       "model weights only — never a facility record, never a row of stock. Where no fresh " +
       "forecast exists, days of stock come from the last 28 days of readings instead, and the " +
       "screen says which of the two it used.",
@@ -120,10 +120,10 @@ const RUNS = [
  */
 const DEMO_SCRIPT = [
   "Open this link a minute before you start: the free server sleeps when idle, and the first load can take up to a minute.",
-  "Continue as Pharmacist, Nashik PHC 1. On Medicines, open a medicine running short, press Find supply and request stock (pick Nashik PHC 13 if it is offered).",
-  "In a private window, continue as Pharmacist, Nashik PHC 13. Orders → Requests for your stock: accept and send, or decline. No request waiting? Demo: have a nearby centre ask you for stock raises a real one.",
-  "Back as PHC 1: the medicine card shows the reply, and Orders confirms the delivery when it arrives, counting what came.",
-  "Continue as the Maharashtra state officer: Redistribution, Movements and Data trust show the same rows — who asked, who sent, what arrived.",
+  "Continue as the Pharmacist. On Medicines, open a medicine running short, press Find supply and request stock (pick the neighbouring demo centre if it is offered).",
+  "In a private window, continue as the neighbouring centre's Pharmacist, if that card is offered. Orders → Requests for your stock: accept and send, or decline. No request waiting? Demo: have a nearby centre ask you for stock raises a real one.",
+  "Back as the first pharmacist: the medicine card shows the reply, and Orders confirms the delivery when it arrives, counting what came.",
+  "Continue as the State NHM Officer: Redistribution, Movements and Data trust show the same rows — who asked, who sent, what arrived.",
 ] as const;
 
 function DemoScript() {
