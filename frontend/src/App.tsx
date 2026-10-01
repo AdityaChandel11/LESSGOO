@@ -906,6 +906,11 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               onSilos={setSiloStates}
               stateName={stateName}
               canTrain={user.role === "admin"}
+              onOpenLedger={(code) => {
+                // The rows the weighting is computed from: that state's ledger.
+                goState(code);
+                setMode("movements");
+              }}
             />
             </>
           ) : mode === "trust" && user.role === "admin" && !readsRows(user, activeState) ? (

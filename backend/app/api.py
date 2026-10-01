@@ -3214,6 +3214,51 @@ class FederationOut(BaseModel):
     raw_rows_transmitted: int = 0
     tensor_shapes: dict[str, list[int]] = Field(default_factory=dict)
     note: str | None = None
+    # Fix #1: every figure the panel prints, computed here from the recorded
+    # rounds (federation_summary) so that nothing is typed into the screen.
+    untrained_mae: float | None = None
+    final_mae: float | None = None
+    final_round: int | None = None
+    final_improvement_pct: float | None = None
+    beats_baseline_from_round: int | None = None
+    training_rounds: int = 0
+    silos: int = 0
+    upload_bytes_total: int = 0
+    total_windows: int = 0
+
+
+def federation_summary(rounds: list[dict]) -> dict:
+    """The run in the figures a reader needs (fix #1).
+
+    `rounds` are the recorded rounds in order, each
+    {round_no, mae, baseline, silos, bytes, per_silo}. Round 0 is the untrained
+    model scored by the aggregator — nobody trained or uploaded anything for
+    it — so it is "before training", never "round one", and it is left out of
+    the upload total. That total is what the states sent: every training round,
+    every reporting state, one model each.
+    """
+    scored = [r for r in rounds if r["mae"] is not None]
+    training = [r for r in rounds if r["round_no"] >= 1]
+    baseline = next((r["baseline"] for r in reversed(rounds) if r["baseline"]), None)
+    final = scored[-1] if scored else None
+    untrained = next((r["mae"] for r in scored if r["round_no"] == 0), None)
+    last_silos = (rounds[-1]["per_silo"] or {}) if rounds else {}
+    return {
+        "untrained_mae": untrained,
+        "final_mae": final["mae"] if final else None,
+        "final_round": final["round_no"] if final else None,
+        "final_improvement_pct": (
+            round((baseline - final["mae"]) / baseline * 100, 1) if baseline and final else None
+        ),
+        "beats_baseline_from_round": next(
+            (r["round_no"] for r in scored if r["round_no"] >= 1 and baseline and r["mae"] < baseline),
+            None,
+        ),
+        "training_rounds": len(training),
+        "silos": len(last_silos),
+        "upload_bytes_total": sum((r["bytes"] or 0) * (r["silos"] or 0) for r in training),
+        "total_windows": sum(int(v.get("windows", 0)) for v in last_silos.values()),
+    }
 
 
 @router.get("/federation/inspector", response_model=FederationOut, tags=["federation"])
@@ -3283,6 +3328,13 @@ async def federation_inspector(
         # in here: see federation/pytorchexample/inspector.py.
         raw_rows_transmitted=sum(r.raw_rows_transmitted for r in rows),
         tensor_shapes=next((r.tensor_shapes for r in reversed(rows) if r.tensor_shapes), {}),
+        **federation_summary(
+            [
+                {"round_no": r.round_no, "mae": r.global_val_mae, "baseline": r.baseline_mae,
+                 "silos": r.silos_reporting, "bytes": r.bytes_transmitted, "per_silo": r.per_silo}
+                for r in rows
+            ]
+        ),
     )
 
 

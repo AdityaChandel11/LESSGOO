@@ -1,5 +1,5 @@
 /**
- * The silo inspector — spec 12.2 and 27.
+ * The silo inspector — spec 12.2 and 27, rewritten for fix #1.
  *
  * Two claims sit side by side here. The first is ordinary: a shared model
  * beats the burn-rate rule the dashboard uses today. The second is the one
@@ -7,10 +7,14 @@
  * that nothing but model weights ever left a state.
  *
  * So the evidence is shown, not summarised: the measured bytes, every tensor's
- * shape, the hash of the weights, and a facility-row count the aggregator
+ * shape, the hash of the weights, and a facility-record count the aggregator
  * asserts before each round is written. The zero below is a result. If a silo
  * ever returned anything but weights and scalar numbers, the round would have
  * stopped instead of arriving here.
+ *
+ * Every figure on this panel is read from the recorded rounds or computed
+ * from them on the server (api.federation_summary). Nothing is typed in, and
+ * the two label sets — plain and technical — name the same fields.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -24,8 +28,49 @@ import {
 
 const LIVE_POLL_MS = 1000;
 
+type Voice = "official" | "technical";
+
+/** The same fields, said two ways. No label here names anything the
+ *  recorded rounds do not hold. */
+const LABELS: Record<Voice, Record<string, string>> = {
+  official: {
+    error: "Average forecast error",
+    baseline: "Today's rule (the last 28 days' use), same test weeks",
+    untrained: "Before training",
+    best: "Best round",
+    windows: "Training examples",
+    trust: "Delivery-confirmation score",
+    countsAs: "Weight in the shared model",
+    weights: "Model data sent, per state per round",
+    total: "Sent by all states across the run",
+    hash: "Fingerprint of the model, last round",
+    records: "Facility records sent",
+    mae: "Error",
+  },
+  technical: {
+    error: "Model error (MAE on the ratio)",
+    baseline: "Burn-rate rule, same held-out weeks",
+    untrained: "Before training (round 0)",
+    best: "Best round",
+    windows: "Windows",
+    trust: "Trust (receipt discipline)",
+    countsAs: "Counts as",
+    weights: "Weights uploaded, per silo per round",
+    total: "Uploaded by all silos across the run",
+    hash: "Weights hash (SHA-256), last round",
+    records: "Facility records sent",
+    mae: "MAE",
+  },
+};
+
 function mae(value: number | null | undefined): string {
   return typeof value === "number" ? value.toFixed(4) : "—";
+}
+
+/** The model predicts next week's daily use as a ratio of the last four
+ *  weeks', so its error is a share of a centre's usual daily use. */
+function shareOfUse(value: number | null | undefined): string {
+  return typeof value === "number" ? `${(value * 100).toFixed(1)}% of a centre's usual daily use` : "—";
 }
 
 function bytes(value: number | null | undefined): string {
@@ -58,48 +103,76 @@ function day(iso: string): string {
 /**
  * The accuracy curve, drawn against the rule it has to beat.
  *
+ * The scale covers the training rounds and the burn-rate line. The untrained
+ * model (round 0) is about ten times worse than either, and a scale that
+ * includes it flattens every round that matters into one line along the
+ * bottom — so it is named beside the chart instead of drawn on it.
+ *
  * `upTo` stops the line at a round so a replay can draw it one round at a
- * time. The axes never move while it does: the scale comes from the whole run,
- * so the curve falls through a fixed frame instead of the frame rescaling
- * under it and making every round look like the same improvement.
+ * time. The axes never move while it does.
  */
 function Curve({
   rounds,
   baseline,
   upTo,
+  beatsFrom,
 }: {
   rounds: FederationRound[];
   baseline: number | null;
   upTo?: number | null;
+  beatsFrom: number | null;
 }) {
-  const scored = rounds.filter((r) => r.global_val_mae != null);
-  if (scored.length < 2) return null;
-  const values = scored.map((r) => r.global_val_mae as number);
-  const top = Math.max(...values, baseline ?? 0) * 1.05;
+  const trained = rounds.filter((r) => r.round_no >= 1 && r.global_val_mae != null);
+  if (trained.length < 2) return null;
+  const values = trained.map((r) => r.global_val_mae as number);
+  const top = Math.max(...values, baseline ?? 0) * 1.12;
+  const floor = Math.min(...values, baseline ?? Infinity) * 0.85;
   const w = 100;
   const h = 44;
-  const x = (i: number) => (i / (scored.length - 1)) * w;
-  const y = (v: number) => h - (v / top) * h;
-  const shown = upTo == null ? values : values.slice(0, Math.max(1, upTo + 1));
+  const x = (i: number) => (i / (trained.length - 1)) * w;
+  const y = (v: number) => h - ((v - floor) / (top - floor)) * h;
+  const reached = upTo == null ? trained.length : trained.filter((r) => rounds.indexOf(r) <= upTo).length;
+  const shown = values.slice(0, reached);
   const path = shown
     .map((v, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(2)},${y(v).toFixed(2)}`)
     .join(" ");
   const head = shown.length - 1;
+  const beatsAt = beatsFrom == null ? -1 : trained.findIndex((r) => r.round_no === beatsFrom);
 
   return (
-    <svg viewBox={`0 0 ${w} ${h}`} className="mt-2 h-24 w-full" preserveAspectRatio="none" role="img"
-      aria-label={`Model error across ${shown.length} of ${scored.length} rounds, at ${mae(shown[head])}`}>
-      {baseline != null && (
-        <line x1="0" x2={w} y1={y(baseline)} y2={y(baseline)} stroke="currentColor"
-          className="text-warn" strokeWidth="0.6" strokeDasharray="2 2" />
-      )}
-      <path d={path} fill="none" stroke="currentColor" className="text-ok" strokeWidth="1.2"
-        vectorEffect="non-scaling-stroke" />
-      {upTo != null && shown.length > 0 && (
-        <circle cx={x(head)} cy={y(shown[head])} r="1.6" className="fill-ok"
-          vectorEffect="non-scaling-stroke" />
-      )}
-    </svg>
+    <figure className="mt-2">
+      <svg viewBox={`0 0 ${w} ${h}`} className="h-24 w-full" preserveAspectRatio="none" role="img"
+        aria-label={`Model error across ${shown.length} of ${trained.length} training rounds${
+          head >= 0 ? `, at ${mae(shown[head])}` : ""
+        }; the burn-rate rule is ${mae(baseline)}`}>
+        {baseline != null && (
+          <line x1="0" x2={w} y1={y(baseline)} y2={y(baseline)} stroke="currentColor"
+            className="text-ink-2" strokeWidth="0.8" strokeDasharray="3 2" vectorEffect="non-scaling-stroke" />
+        )}
+        {beatsAt >= 0 && beatsAt < shown.length && (
+          <line x1={x(beatsAt)} x2={x(beatsAt)} y1="0" y2={h} stroke="currentColor"
+            className="text-line" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+        )}
+        {shown.length > 1 && (
+          <path d={path} fill="none" stroke="currentColor" className="text-brand" strokeWidth="1.6"
+            vectorEffect="non-scaling-stroke" />
+        )}
+        {head >= 0 && (
+          <circle cx={x(head)} cy={y(shown[head])} r="1.6" className="fill-brand" />
+        )}
+      </svg>
+      <figcaption className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[10.5px] text-ink-3">
+        <span className="flex items-center gap-1">
+          <svg aria-hidden="true" width="14" height="4"><line x1="1" x2="13" y1="2" y2="2" stroke="currentColor" className="text-brand" strokeWidth="2" /></svg>
+          shared model, rounds {trained[0].round_no}–{trained[trained.length - 1].round_no}
+        </span>
+        <span className="flex items-center gap-1">
+          <svg aria-hidden="true" width="14" height="4"><line x1="1" x2="13" y1="2" y2="2" stroke="currentColor" className="text-ink-2" strokeWidth="2" strokeDasharray="4 3" /></svg>
+          burn-rate rule {mae(baseline)}
+        </span>
+        {beatsFrom != null && <span>beats the burn-rate rule from round {beatsFrom}</span>}
+      </figcaption>
+    </figure>
   );
 }
 
@@ -107,10 +180,40 @@ function Row({ label, value, strong }: { label: string; value: string; strong?: 
   return (
     <div className="flex items-baseline justify-between gap-3 py-0.5">
       <span className="text-[11.5px] text-ink-2">{label}</span>
-      <span className={`shrink-0 font-mono tabular-nums ${strong ? "text-[13px] font-semibold text-ink" : "text-[11.5px] text-ink-2"}`}>
+      <span className={`shrink-0 text-right font-mono tabular-nums ${strong ? "text-[13px] font-semibold text-ink" : "text-[11.5px] text-ink-2"}`}>
         {value}
       </span>
     </div>
+  );
+}
+
+/**
+ * Four state boxes and one aggregator, drawn flat. The label on the arrows is
+ * the measured size of what each state sent; nothing moves on screen, because
+ * nothing is moving — the run below is a recorded one.
+ */
+function Topology({ states, perRound }: { states: string[]; perRound: string }) {
+  if (states.length === 0) return null;
+  const rowH = 22;
+  const h = Math.max(states.length * rowH, 60);
+  return (
+    <svg viewBox={`0 0 300 ${h}`} className="mt-2 w-full" role="img"
+      aria-label={`${states.length} states each send ${perRound} of model weights per round to one aggregator; no facility records are sent`}>
+      {states.map((s, i) => {
+        const cy = i * rowH + rowH / 2;
+        return (
+          <g key={s}>
+            <rect x="1" y={cy - 8} width="104" height="16" rx="2" className="fill-canvas stroke-line" strokeWidth="1" />
+            <text x="53" y={cy + 3.5} textAnchor="middle" className="fill-ink" fontSize="9">{s}</text>
+            <line x1="106" y1={cy} x2="206" y2={h / 2} className="stroke-ink-3" strokeWidth="0.8" />
+          </g>
+        );
+      })}
+      <rect x="208" y={h / 2 - 14} width="91" height="28" rx="2" className="fill-brand" />
+      <text x="253.5" y={h / 2 + 3.5} textAnchor="middle" fill="#ffffff" fontSize="10" fontWeight="600">Aggregator</text>
+      <text x="156" y="9" textAnchor="middle" className="fill-ink-2" fontSize="8">{perRound} of weights per round, each</text>
+      <text x="156" y={h - 3} textAnchor="middle" className="fill-ink-2" fontSize="8">0 facility records</text>
+    </svg>
   );
 }
 
@@ -124,9 +227,9 @@ const REPLAY_STEP_MS = 850;
 const NO_ROUNDS: FederationRound[] = [];
 
 /**
- * Which silo the trust weighting cost the most, stated from the row rather
- * than written in. A silo contributes its window count scaled by its own data
- * confidence, so the gap between the two is the weighting made visible.
+ * Which silo the weighting cost the most, stated from the row rather than
+ * written in. A silo contributes its window count scaled by its receipt
+ * discipline, so the gap between the two is the weighting made visible.
  */
 function mostDownWeighted(silos: FederationRound["per_silo"]) {
   const scored = silos.filter((s) => s.windows > 0);
@@ -142,6 +245,7 @@ export function FederationPanel({
   onSilos,
   stateName,
   canTrain = false,
+  onOpenLedger,
 }: {
   refreshKey: number;
   /** Reports the silo states upward so the map can ring them. */
@@ -150,11 +254,15 @@ export function FederationPanel({
   stateName?: (code: string) => string;
   /** Whether this account may start a real round (administrators). */
   canTrain?: boolean;
+  /** Open one state's movement ledger: the rows the weighting is computed from. */
+  onOpenLedger?: (state: string) => void;
 }) {
   const named = (code: string) => stateName?.(code) ?? code;
   const [data, setData] = useState<FederationInspector | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [voice, setVoice] = useState<Voice>("official");
+  const L = LABELS[voice];
   // null: the finished run, as recorded. A number: the round a replay has
   // reached. The replay re-trains nothing — the rows are already written.
   const [replayAt, setReplayAt] = useState<number | null>(null);
@@ -301,31 +409,47 @@ export function FederationPanel({
     params > 0 && typeof data?.bytes_per_round === "number" ? data.bytes_per_round / params : null;
   const oneDay =
     rounds.length > 0 && rounds.every((r) => day(r.completed_at) === day(rounds[0].completed_at));
+  const err = (v: number | null | undefined) => (voice === "official" ? shareOfUse(v) : mae(v));
+  const silos = data?.silos ?? 0;
+  const beats = data?.final_improvement_pct != null && data.final_improvement_pct > 0;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="border-b border-line px-3 py-2.5">
-        <h2 className="text-[13px] font-semibold text-ink">Federated training · संघीय प्रशिक्षण</h2>
-        <p className="mt-0.5 text-[12px] text-ink-2">
-          Four states train one forecasting model. Each keeps its own facility rows; only weights
-          move, and what moved is measured below rather than asserted.
-        </p>
-        {data?.available && (
+        <div className="flex items-start justify-between gap-2">
+          <h2 className="text-[13px] font-semibold text-ink">Federated training · संघीय प्रशिक्षण</h2>
+          <div role="group" aria-label="Wording" className="flex shrink-0 gap-1">
+            {(["official", "technical"] as Voice[]).map((v) => (
+              <button
+                key={v}
+                onClick={() => setVoice(v)}
+                aria-pressed={voice === v}
+                className={`min-h-7 rounded px-2 text-[11px] font-medium ${
+                  voice === v ? "bg-brand text-white" : "border border-line text-ink-2"
+                }`}
+              >
+                {v === "official" ? "Plain" : "Technical"}
+              </button>
+            ))}
+          </div>
+        </div>
+        {data?.available ? (
           <>
-            <p className="mt-1 font-mono text-[11px] text-ink-3">
-              {data.strategy} · run {data.run_id?.slice(0, 12)} · {data.rounds.length} rounds
+            <p className="mt-1 text-[12.5px] leading-snug text-ink">
+              <span className="font-semibold">{data.total_windows.toLocaleString("en-IN")}</span> training
+              examples stayed in their states. Each state sent{" "}
+              <span className="font-semibold">{bytes(data.bytes_per_round)}</span> of model weights per round.
             </p>
+            <Topology states={(last?.per_silo ?? []).map((s) => named(s.state))} perRound={bytes(data.bytes_per_round)} />
             <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
               <button
                 onClick={replay}
                 disabled={replaying || rounds.length < 2}
-                className="h-8 rounded-md border border-brand bg-brand/[0.04] px-3 text-[12.5px] font-medium text-brand hover:bg-brand/10 focus:ring-2 focus:ring-brand/30 focus:outline-none disabled:opacity-55"
+                className="min-h-8 rounded-md border border-brand bg-brand/[0.04] px-3 py-1 text-left text-[12.5px] font-medium text-brand hover:bg-brand/10 focus:ring-2 focus:ring-brand/30 focus:outline-none disabled:opacity-55"
               >
                 {replaying
                   ? `Round ${shown?.round_no ?? 0} of ${rounds[rounds.length - 1]?.round_no ?? 0}`
-                  : replayAt != null
-                    ? "Replay again"
-                    : "Replay the run"}
+                  : `Replay a recorded run (${rounds.length ? day(rounds[0].completed_at) : "—"}, ${silos} states on Flower)`}
               </button>
               {replayAt != null && !replaying && (
                 <button
@@ -337,32 +461,23 @@ export function FederationPanel({
               )}
             </div>
             <p className="mt-1.5 text-[11px] leading-snug text-ink-3">
-              Replay of the recorded run, not a new training. The rounds below were written by the
-              aggregator when the run happened; pressing this re-reads them in order.
+              A replay, not a new training: the rounds below were written by the aggregator when the
+              run happened, and pressing this re-reads them in order.
             </p>
 
-            {canTrain && live && (
+            {canTrain && live && (live.available || training) && (
               <div className="mt-2 border-t border-line pt-2">
-                {live.available || training ? (
-                  <>
-                    <button
-                      onClick={runNextRound}
-                      disabled={training}
-                      className="h-8 rounded-md bg-brand px-3 text-[12.5px] font-medium text-white hover:bg-brand/90 focus:ring-2 focus:ring-brand/30 focus:outline-none disabled:opacity-60"
-                    >
-                      {training ? `Training round ${job?.round_no}…` : "Run next round"}
-                    </button>
-                    <p className="mt-1 text-[11px] leading-snug text-ink-3">
-                      A real round: the four state silos train on their own rows and send back
-                      weights, which are checked, averaged and scored. It takes about two minutes.
-                    </p>
-                  </>
-                ) : (
-                  <p className="text-[11px] leading-snug text-ink-3">
-                    <span className="font-medium text-ink-2">Run next round is off here.</span>{" "}
-                    {live.reason}
-                  </p>
-                )}
+                <button
+                  onClick={runNextRound}
+                  disabled={training}
+                  className="h-8 rounded-md bg-brand px-3 text-[12.5px] font-medium text-white hover:bg-brand/90 focus:ring-2 focus:ring-brand/30 focus:outline-none disabled:opacity-60"
+                >
+                  {training ? `Training round ${job?.round_no}…` : "Run next round"}
+                </button>
+                <p className="mt-1 text-[11px] leading-snug text-ink-3">
+                  A real round: the state silos train on their own rows and send back weights, which
+                  are checked, averaged and scored. It takes about two minutes.
+                </p>
                 {liveError && <p className="mt-1 text-[11.5px] text-crit">{liveError}</p>}
                 {job && (training || job.status !== "running") && (
                   <ol className="mt-1.5 space-y-0.5" aria-live="polite">
@@ -374,12 +489,7 @@ export function FederationPanel({
                         <span className="shrink-0 font-mono text-[10.5px] text-ink-3">+{p.at_s.toFixed(1)}s</span>
                       </li>
                     ))}
-                    {training && (
-                      <li className="text-[11.5px] text-ink-3">
-                        <span className="live-dot mr-1.5 inline-block h-1.5 w-1.5 rounded-full bg-brand" />
-                        Working…
-                      </li>
-                    )}
+                    {training && <li className="text-[11.5px] text-ink-3">Working…</li>}
                     {job.status === "done" && (
                       <li className="text-[11.5px] font-medium text-ok">
                         Round {job.round_no} recorded — see the highlighted row below.
@@ -393,6 +503,10 @@ export function FederationPanel({
               </div>
             )}
           </>
+        ) : (
+          <p className="mt-0.5 text-[12px] text-ink-2">
+            States train one forecasting model. Each keeps its own facility rows; only model weights move.
+          </p>
         )}
       </div>
 
@@ -411,113 +525,165 @@ export function FederationPanel({
               <div className="text-[10.5px] font-semibold tracking-[0.09em] text-ink-3 uppercase">
                 Accuracy, against the rule it replaces
               </div>
-              <Curve rounds={data.rounds} baseline={data.baseline_mae} upTo={replayAt} />
+              {replayAt == null && data.final_mae != null && data.baseline_mae != null && (
+                <p className="mt-1 text-[12.5px] leading-snug text-ink">
+                  <span className="font-mono font-semibold">{mae(data.final_mae)}</span> vs{" "}
+                  <span className="font-mono font-semibold">{mae(data.baseline_mae)}</span> —{" "}
+                  {beats
+                    ? `${data.final_improvement_pct}% lower error than the burn-rate rule, on held-out weeks.`
+                    : "the shared model does not beat the burn-rate rule in this run."}
+                </p>
+              )}
+              <Curve
+                rounds={data.rounds}
+                baseline={data.baseline_mae}
+                upTo={replayAt}
+                beatsFrom={data.beats_baseline_from_round}
+              />
+              <p className="mt-1 text-[10.5px] leading-snug text-ink-3">
+                Untrained start (round 0): {mae(data.untrained_mae)} — about ten times worse, so it is
+                named here rather than drawn, and the chart shows the rounds that were trained.
+              </p>
               <Row
-                label={replayAt == null ? "Model error now (MAE)" : `Model error at round ${shown?.round_no}`}
-                value={mae(shown?.global_val_mae)}
+                label={replayAt == null ? `${L.error}, final model` : `${L.error} at round ${shown?.round_no}`}
+                value={err(shown?.global_val_mae)}
                 strong
               />
-              <Row label="Burn rate, same held-out weeks" value={mae(data.baseline_mae)} />
-              <Row label="Error at round one" value={mae(data.first_mae)} />
-              <Row label="Best round" value={mae(data.best_mae)} />
-              <Row
-                label="Best round beats the burn rate by"
-                value={data.improvement_pct == null ? "—" : `${data.improvement_pct}%`}
-                strong
-              />
+              <Row label={L.baseline} value={err(data.baseline_mae)} />
+              <Row label={L.untrained} value={err(data.untrained_mae)} />
+              <Row label={L.best} value={err(data.best_mae)} />
+              <p className="mt-1 text-[10.5px] leading-snug text-ink-3">
+                The model predicts next week's daily use as a multiple of the last four weeks', so
+                an error of {mae(data.final_mae)} means it is off by about{" "}
+                {data.final_mae != null ? (data.final_mae * 100).toFixed(0) : "—"}% of a centre's usual daily
+                use. Scored on weeks the model never trained on. Synthetic data.
+              </p>
             </div>
 
             <div className="border-b border-line px-3 py-2.5">
               <div className="text-[10.5px] font-semibold tracking-[0.09em] text-ink-3 uppercase">
-                What crossed the wire
+                What left each state
               </div>
               <div className="mt-1.5 rounded-md border border-ok/30 bg-ok/5 px-2 py-1.5">
                 <div className="flex items-baseline justify-between">
-                  <span className="text-[11.5px] font-medium text-ink">Facility rows transmitted</span>
+                  <span className="text-[11.5px] font-medium text-ink">{L.records}</span>
                   <span className="font-mono text-[15px] font-semibold tabular-nums text-ok">
                     {rowsSoFar}
                   </span>
                 </div>
                 <p className="mt-0.5 text-[11px] leading-snug text-ink-2">
-                  0 rows per round. What each silo sent instead:{" "}
+                  0 records per round. What each state sent instead:{" "}
                   <span className="font-mono">{exactBytes(data.bytes_per_round)}</span> of model
                   weights
                   {params > 0 && bytesPerNumber != null && (
                     <>
                       {" "}
-                      — {params.toLocaleString("en-IN")} numbers × {bytesPerNumber} bytes
+                      — {params.toLocaleString("en-IN")} numbers × {Number.isInteger(bytesPerNumber) ? bytesPerNumber : bytesPerNumber.toFixed(2)} bytes
                     </>
                   )}
                   .
                 </p>
-                <p className="mt-0.5 text-[11px] leading-snug text-ink-3">
-                  Asserted by the aggregator before each round was recorded — a reply carrying
-                  anything but weights and scalar numbers stops the round.
-                </p>
               </div>
               <div className="mt-1.5">
                 <Row
-                  label="Weights per round"
+                  label={L.weights}
                   value={`${exactBytes(data.bytes_per_round)} (${bytes(data.bytes_per_round)})`}
                   strong
                 />
-                <p className="text-[11px] leading-snug text-ink-3">
-                  The same every round because the model&rsquo;s shape never changes. The hash
-                  changes every round because the numbers inside it do.
+                <Row
+                  label={L.total}
+                  value={`${exactBytes(data.upload_bytes_total)} (${bytes(data.upload_bytes_total)})`}
+                />
+                <p className="text-[10.5px] leading-snug text-ink-3">
+                  {data.training_rounds} training rounds × {silos} states ×{" "}
+                  {exactBytes(data.bytes_per_round)}. Round 0 is the untrained model scored by the
+                  aggregator; no state uploads anything for it.
                 </p>
-                <Row label="Across the whole run" value={bytes(data.total_bytes)} />
-                <Row label="Tensors in the payload" value={String(shapes.length)} />
-                <Row label="Silos reporting" value={String(last?.silos_reporting ?? "—")} />
+                <Row label="States reporting" value={String(last?.silos_reporting ?? "—")} />
               </div>
-              <div className="mt-1.5 rounded-md border border-line bg-canvas px-2 py-1.5">
-                <div className="text-[11px] font-medium text-ink-2">Weights hash, last round</div>
+              <details className="mt-1.5 rounded-md border border-line bg-canvas px-2 py-1.5">
+                <summary className="cursor-pointer text-[11.5px] font-medium text-ink-2">Audit details</summary>
+                <p className="mt-1 font-mono text-[10.5px] text-ink-3">
+                  {data.strategy} · run {data.run_id?.slice(0, 12)} · {data.rounds.length} recorded rounds
+                </p>
+                <p className="mt-1 text-[11px] leading-snug text-ink-2">
+                  FedProx: keeps each state's training close to the shared model, because states'
+                  seasons differ.
+                </p>
+                <p className="mt-1 text-[11px] leading-snug text-ink-2">
+                  The record count is asserted by the aggregator before each round is recorded — a
+                  reply carrying anything but weights and scalar numbers stops the round.
+                </p>
+                <div className="mt-1.5 text-[11px] font-medium text-ink-2">{L.hash}</div>
                 <code className="mt-0.5 block break-all font-mono text-[10.5px] text-ink-3">
                   {last?.weights_sha256 ?? "—"}
                 </code>
-              </div>
-              {shapes.length > 0 && (
-                <details className="mt-1.5">
-                  <summary className="cursor-pointer text-[11.5px] text-ink-2">
-                    Tensor shapes ({shapes.length})
-                  </summary>
-                  <div className="mt-1 space-y-0.5">
-                    {shapes.map(([name, shape]) => (
-                      <div key={name} className="flex justify-between gap-2 font-mono text-[10.5px] text-ink-3">
-                        <span className="truncate">{name}</span>
-                        <span className="shrink-0">[{shape.join(" × ")}]</span>
-                      </div>
-                    ))}
-                  </div>
-                </details>
-              )}
+                <p className="mt-0.5 text-[10.5px] leading-snug text-ink-3">
+                  The size is the same every round because the model's shape never changes; the
+                  hash changes every round because the numbers inside it do.
+                </p>
+                {shapes.length > 0 && (
+                  <>
+                    <div className="mt-1.5 text-[11px] font-medium text-ink-2">
+                      Layers in the model ({shapes.length} tensors)
+                    </div>
+                    <div className="mt-0.5 space-y-0.5">
+                      {shapes.map(([name, shape]) => (
+                        <div key={name} className="flex justify-between gap-2 font-mono text-[10.5px] text-ink-3">
+                          <span className="truncate">{name}</span>
+                          <span className="shrink-0">[{shape.join(" × ")}]</span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </details>
             </div>
 
             <div className="border-b border-line px-3 py-2.5">
               <div className="text-[10.5px] font-semibold tracking-[0.09em] text-ink-3 uppercase">
-                Per silo, {replayAt == null ? "last round" : `round ${shown?.round_no}`}
+                Per state, {replayAt == null ? "last round" : `round ${shown?.round_no}`}
               </div>
               <p className="mt-1 text-[11px] leading-snug text-ink-3">
-                A silo is weighted by its window count scaled by its own data confidence, so
-                facilities whose numbers disagree with each other carry less of the national model.
+                A state's examples are scaled by its receipt discipline and nothing else: a score
+                that falls as more of its warehouse consignments in the last 60 days go unconfirmed
+                past their window (counted in full) or arrive short (counted half). A state that
+                confirms fewer of its deliveries carries less of the shared model.
               </p>
               {weighting && (
                 <p className="mt-1 text-[11px] leading-snug text-ink-2">
-                  {named(weighting.worst.state)} is the clearest case: confidence{" "}
-                  {weighting.worst.trust.toFixed(3)} against {named(weighting.best.state)}&rsquo;s{" "}
-                  {weighting.best.trust.toFixed(3)}, with{" "}
-                  {weighting.worst.flagged_pct.toFixed(1)}% of its facilities flagged — so its{" "}
-                  {weighting.worst.windows.toLocaleString("en-IN")} windows count as{" "}
+                  {named(weighting.worst.state)} is the clearest case:{" "}
+                  {weighting.worst.flagged_pct.toFixed(1)}% of its warehouse consignments in the last
+                  60 days went unconfirmed or arrived short, against{" "}
+                  {weighting.best.flagged_pct.toFixed(1)}% in {named(weighting.best.state)} — so its{" "}
+                  {weighting.worst.windows.toLocaleString("en-IN")} examples count as{" "}
                   {weighting.worst.counts_as.toLocaleString("en-IN")}, {weighting.lostPct}% less
-                  weight in the shared model.
+                  weight in the shared model.{" "}
+                  <span className="text-ink-3">
+                    Synthetic data: the weak state was chosen at random by the seed, so this says
+                    nothing about {named(weighting.worst.state)}.
+                  </span>
+                  {onOpenLedger && (
+                    <>
+                      {" "}
+                      <button
+                        type="button"
+                        onClick={() => onOpenLedger(weighting.worst.state)}
+                        className="font-medium text-brand underline-offset-2 hover:underline"
+                      >
+                        Open {named(weighting.worst.state)}'s movement ledger →
+                      </button>
+                    </>
+                  )}
                 </p>
               )}
               <table className="mt-1.5 w-full text-[11.5px]">
                 <thead>
                   <tr className="text-ink-3">
                     <th className="py-1 text-left font-medium">State</th>
-                    <th className="py-1 text-right font-medium">Windows</th>
-                    <th className="py-1 text-right font-medium">Trust</th>
-                    <th className="py-1 text-right font-medium">Counts as</th>
+                    <th className="py-1 text-right font-medium">{L.windows}</th>
+                    <th className="py-1 text-right font-medium">{L.trust}</th>
+                    <th className="py-1 text-right font-medium">{L.countsAs}</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -527,8 +693,9 @@ export function FederationPanel({
                       <td className="py-1 text-right font-mono tabular-nums text-ink-2">
                         {s.windows.toLocaleString("en-IN")}
                       </td>
-                      <td className={`py-1 text-right font-mono tabular-nums ${s.trust < 0.5 ? "text-crit" : "text-ink-2"}`}>
+                      <td className="py-1 text-right font-mono tabular-nums text-ink-2">
                         {s.trust.toFixed(3)}
+                        {s.trust < 0.5 && <span className="ml-1 font-sans text-[10px] text-crit">low</span>}
                       </td>
                       <td className="py-1 text-right font-mono tabular-nums text-ink">
                         {s.counts_as.toLocaleString("en-IN")}
@@ -539,7 +706,7 @@ export function FederationPanel({
               </table>
             </div>
 
-            <div className="px-3 py-2.5">
+            <div className="border-b border-line px-3 py-2.5">
               <div className="text-[10.5px] font-semibold tracking-[0.09em] text-ink-3 uppercase">
                 Round by round
               </div>
@@ -553,10 +720,10 @@ export function FederationPanel({
                   <tr className="text-left font-sans text-ink-3">
                     <th className="py-1 font-medium">Round</th>
                     <th className="py-1 font-medium">Finished</th>
-                    <th className="py-1 text-right font-medium">MAE</th>
+                    <th className="py-1 text-right font-medium">{L.mae}</th>
                     <th className="py-1 text-right font-medium">Weights</th>
                     <th className="py-1 pl-2 font-medium">Hash</th>
-                    <th className="py-1 text-right font-medium">Rows</th>
+                    <th className="py-1 text-right font-medium">Records sent</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -568,7 +735,10 @@ export function FederationPanel({
                         replayAt != null && i > replayAt ? "opacity-35" : ""
                       } ${r.round_no === freshRound ? "bg-ok/10 font-semibold text-ink" : ""}`}
                     >
-                      <td className="py-1">{r.round_no}</td>
+                      <td className="py-1">
+                        {r.round_no}
+                        {r.round_no === 0 && <span className="ml-1 font-sans text-[10px] text-ink-3">untrained</span>}
+                      </td>
                       <td className="py-1" title={new Date(r.completed_at).toString()}>
                         {oneDay ? clock(r.completed_at) : `${day(r.completed_at)} ${clock(r.completed_at)}`}
                       </td>
@@ -586,8 +756,8 @@ export function FederationPanel({
                         }`}
                         title={
                           r.raw_rows_transmitted === 0
-                            ? "No facility row left its state this round"
-                            : "Facility rows left the state this round"
+                            ? "No facility record left its state this round"
+                            : "Facility records left the state this round"
                         }
                       >
                         {r.raw_rows_transmitted.toLocaleString("en-IN")}
@@ -596,6 +766,32 @@ export function FederationPanel({
                   ))}
                 </tbody>
               </table>
+            </div>
+
+            <div className="px-3 py-2.5">
+              <div className="text-[10.5px] font-semibold tracking-[0.09em] text-ink-3 uppercase">
+                What this does not show
+              </div>
+              <ul className="mt-1 list-disc space-y-1 pl-4 text-[11px] leading-snug text-ink-2">
+                <li>
+                  No differential privacy and no secure aggregation: the aggregator sees each state's
+                  weights. Both are future work.
+                </li>
+                <li>
+                  This prototype uses one synthetic database standing in for four state stores. The
+                  federated boundary is the query each state's process runs, which reads only its
+                  own state's rows.
+                </li>
+                <li>
+                  No model trained by one state alone has been compared with the shared one, so
+                  nothing here says the shared model is better than a state's own.
+                </li>
+              </ul>
+              {canTrain && live && !(live.available || training) && (
+                <p className="mt-2 text-[10.5px] leading-snug text-ink-3">
+                  Run next round is off here. {live.reason}
+                </p>
+              )}
             </div>
           </>
         )}

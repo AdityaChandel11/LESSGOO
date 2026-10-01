@@ -368,6 +368,19 @@ export interface FederationInspector {
   raw_rows_transmitted: number;
   tensor_shapes: Record<string, number[]>;
   note: string | null;
+  /** Fix #1: computed on the server from the recorded rounds. Round 0 is the
+   *  untrained model, so it is "before training" and nobody uploads for it. */
+  untrained_mae: number | null;
+  final_mae: number | null;
+  final_round: number | null;
+  final_improvement_pct: number | null;
+  beats_baseline_from_round: number | null;
+  training_rounds: number;
+  silos: number;
+  /** Every training round, every reporting state, one model each. */
+  upload_bytes_total: number;
+  /** The states' own training examples: the rows that never moved. */
+  total_windows: number;
 }
 
 /** One real round started from the page; phases are lines Flower printed. */
