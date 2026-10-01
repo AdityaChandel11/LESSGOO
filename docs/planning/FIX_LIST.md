@@ -664,7 +664,7 @@ list carries the escalation story.
 5. Remove routine "Approve trip" for officer/admin. "182 facilities helped" → "182 would be
    lifted above 3 days if accepted".
 
-### Fix #40 — Recommendations reach the donor PHC  · Tier 1 · status: TODO
+### Fix #40 — Recommendations reach the donor PHC  · Tier 1 · status: DONE 13c7f41 (they already reached the donor; now labelled)
 Verify the donor's Orders → "Requests for your stock" shows solver recommendations (not only
 peer requests), labelled "Recommended by the state plan", with Accept / Decline (reason #33).
 Recipient sees it arriving (exists).
@@ -677,7 +677,7 @@ receiver trust band); route is a straight-line estimate. Gemini writes it in pla
 Hindi, grounded (existing ungrounded-figure check). Label: "Explanation written by Gemini from
 the solver's figures. The plan is computed by OR-Tools." Needs a post-hoc next-best-donor calc.
 
-### Fix #47 — Navigation  · Tier 1 · status: TODO
+### Fix #47 — Navigation  · Tier 1 · status: DONE 7dfe488 (no district level in the breadcrumb)
 Corrected by the live audit: a header breadcrumb exists but truncates ("India › An…"); the facility
 panel has "← Maharashtra"; the map has "Back to all of India". Missing: browser Back (no history
 entries). Fix: pushState on view/state/district/facility changes; breadcrumb never truncates the
@@ -700,7 +700,7 @@ no cross-state transfers). Centres that receive help repeatedly → "raise its i
 Trust band on donor and receiver. Low trust → flagged to the officer's exceptions queue.
 **Never withhold medicine from a low-trust centre** — patients shouldn't pay for paperwork.
 
-### Fix #52 — Panel layout  · Tier 1 · status: TODO
+### Fix #52 — Panel layout  · Tier 1 · status: DONE e9556a1 (virtualisation not done: new dependency)
 One scroll container per panel (parent flex column, list `flex:1; min-height:0;
 overflow-y:auto`); remove nested scrollbars in Redistribution and Federation; collapse the
 header block on scroll; Field reports → top-bar badge opening a drawer; list keeps ≥ ~60% of
@@ -761,7 +761,7 @@ Fetch the latest available IDSP reports (ask before downloading). Until then lab
   show 8 per year behind a "+" — latest week UNVERIFIED). Upload timestamps ≈ 8 Sept 2026 →
   publication lag is likely large. Site "last updated 28-09-2026".
 
-### Fix #57 — Live IDSP intake ("auto-refresh when a new weekly report is released")  · Tier 1 · DECISION NEEDED · status: TODO
+### Fix #57 — Live IDSP intake ("auto-refresh when a new weekly report is released")  · Tier 1 · status: DONE b25ef46 (check-on-use + button; the model read it triggers is #42's, still BLOCKED on the live spike)
 - Fetch the NCDC listing → detect a new week → fetch that PDF → **Gemini extracts rows**
   (#42) → regex parser cross-checks, disagreements flagged → rows into `outbreak_events`
   (extend columns as needed: state, cases, deaths, dates, status, source week, source URL) →
@@ -777,7 +777,7 @@ Fetch the latest available IDSP reports (ask before downloading). Until then lab
   Between reports, #41's observed consumption trend is the nowcast.
 - Downloading NCDC PDFs during development needs Aditya's OK (#43).
 
-### Fix #58 — Outbreak alert on the PHC staff page  · Tier 1 · after #41 · status: TODO
+### Fix #58 — Outbreak alert on the PHC staff page  · Tier 1 · after #41 · status: DONE f4bdb60
 When an active outbreak is in the centre's district: "Cholera reported in Nashik district
 (IDSP week 30, 2026)" → medicines it drives (from the disease map) → this centre's days of
 cover at the surge rate → one-tap "Find supply" / request (#31). Nothing shown when there is no
@@ -831,7 +831,7 @@ score a signal below a minimum number of observations. Ages with the seed → pa
 Leakage leaderboard by source warehouse (% short, units lost, trend), state filter, newest
 first. Complements the per-sender record in #8.
 
-### Fix #62 — Honest "Live" badge + scale statement  · Tier 1 · small · status: TODO
+### Fix #62 — Honest "Live" badge + scale statement  · Tier 1 · small · status: DONE 1470106
 "Live · last change <time ago>" instead of an unconditional "Live". Scale line where the
 facility count appears: "3,510 synthetic facilities in 157 districts — a sample; India has far more
 PHCs/CHCs and districts" (e.g. Maharashtra shows 8 districts; cite real numbers only from a public
@@ -1011,11 +1011,11 @@ Per transfer / delivery / facility: suggested by solver or Gemini → decided by
 confirmed, each with time and masked actor, from existing approvals/events/movements rows. Backs the
 landing line "Activity is recorded".
 
-### Fix #87 — Officer console on a phone  · Tier 1 · status: TODO  (pulls #52's mobile item forward)
+### Fix #87 — Officer console on a phone  · Tier 1 · status: DONE 87229ec  (pulls #52's mobile item forward)
 Below 768 px: tabs collapse into a menu; panel and map stack (map full width, panel as bottom sheet or
 second screen); no horizontal overflow. Test at 375×812.
 
-### Fix #88 — Deep links open where they point  · Tier 1 · small · status: TODO
+### Fix #88 — Deep links open where they point  · Tier 1 · small · status: DONE 114ddcb
 A URL with view/state/facility/`at` params survives the front door: after "Continue" (or straight away
 for an existing session arriving via a deep link) open exactly that view and zoom.
 
@@ -1033,13 +1033,13 @@ officer handles exceptions" (#39); replace "Authorised health department staff o
 `@health.gov.in` placeholder with "Prototype — not an official government system" and a neutral
 placeholder.
 
-### Fix #91 — Government-website basics (without impersonating government)  · Tier 1 small / Tier 2 rest · status: TODO
+### Fix #91 — Government-website basics (without impersonating government)  · Tier 1 small / Tier 2 rest · status: DONE 220a6a7 (Tier 1 part)
 Tier 1: footer with Privacy notice (DPDP Act 2023: what data, why, retention; no patient data),
 Accessibility statement, Data sources & citations, Help/contact, "Last updated", skip-to-content link.
 Tier 2: text-size control, high-contrast mode, sitemap, feedback form. No national emblem, no
 "Government of India" branding.
 
-### Fix #92 — The warehouse channel  · Tier 1 honesty line / Tier 2 build · status: TODO
+### Fix #92 — The warehouse channel  · Tier 1 honesty line / Tier 2 build · status: DONE 840492a (honesty line)
 Tier 1: one line where supply is shown — "Most replenishment in practice is by indent to the district
 drug warehouse; this prototype models centre-to-centre transfers and the warehouse dispatch ledger."
 Tier 2: district warehouses as nodes with stock; PHC indent → warehouse dispatch → receipt (ledger
