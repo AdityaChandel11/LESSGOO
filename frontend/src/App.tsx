@@ -581,10 +581,10 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
   return (
     <div className="flex h-full flex-col bg-canvas font-sans text-ink">
       {/* ------------------------------------------------------ top bar --- */}
-      <header className="z-[1100] flex h-14 shrink-0 items-center gap-3 border-b-2 border-brand bg-panel pr-4 min-[1360px]:gap-5">
+      <header className="z-[1100] flex shrink-0 flex-wrap items-center gap-x-3 border-b-2 border-brand bg-panel md:h-14 md:flex-nowrap md:pr-4 min-[1360px]:gap-5">
         {/* The mark sits on a solid brand block — flat, no gradient — so the
             product reads as one identity before any data does. */}
-        <div className="flex h-full shrink-0 items-center gap-2.5 bg-brand pr-4 pl-4 whitespace-nowrap text-white">
+        <div className="flex h-12 shrink-0 items-center gap-2.5 bg-brand pr-4 pl-4 whitespace-nowrap text-white md:h-full">
           <svg width="28" height="28" viewBox="0 0 26 26" aria-hidden="true">
             <rect width="26" height="26" rx="6" fill="#fff" />
             <path d="M13 6v14M6 13h14" stroke="#0b3d5c" strokeWidth="3" strokeLinecap="round" />
@@ -599,7 +599,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
           </div>
         </div>
 
-        <nav aria-label="Location" className="flex min-w-0 shrink-0 items-center gap-1.5 text-[13px] whitespace-nowrap">
+        <nav aria-label="Location" className="hidden min-w-0 shrink-0 items-center gap-1.5 text-[13px] whitespace-nowrap md:flex">
           <button
             onClick={goNational}
             className={`rounded px-1.5 py-0.5 hover:bg-canvas ${activeState ? "text-brand" : "font-medium text-ink"}`}
@@ -627,8 +627,23 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
           )}
         </nav>
 
-        <div className="ml-auto flex items-center gap-2 min-[1500px]:gap-3">
-          <div role="tablist" aria-label="View" className="flex rounded-md border border-line bg-canvas p-0.5">
+        <div className="order-last flex w-full flex-wrap items-center gap-2 px-3 py-2 md:order-none md:ml-auto md:w-auto md:flex-nowrap md:p-0 min-[1500px]:gap-3">
+          <label className="md:hidden">
+            <span className="sr-only">View</span>
+            <select
+              value={mode}
+              onChange={(e) => setMode(e.target.value as Mode)}
+              className="h-8 rounded-md border border-line bg-panel px-2 text-[12.5px] font-medium text-ink"
+            >
+              <option value="stock">Stock levels</option>
+              <option value="transfers">Redistribution</option>
+              <option value="movements">Movements</option>
+              <option value="trust">Data trust</option>
+              <option value="federation">Federation</option>
+              <option value="field">Field reports</option>
+            </select>
+          </label>
+          <div role="tablist" aria-label="View" className="hidden rounded-md border border-line bg-canvas p-0.5 md:flex">
             {(
               [
                 ["stock", "Stock levels"],
@@ -670,7 +685,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
           </label>
 
           <span
-            className="rounded-md border border-line px-2 py-1 text-[11px] whitespace-nowrap text-ink-2"
+            className="hidden rounded-md border border-line px-2 py-1 text-[11px] whitespace-nowrap text-ink-2 md:inline"
             title={`District locations are real. Facility positions and stock levels are simulated: ${SEED_RULES.seededCentres.toLocaleString("en-IN")} synthetic centres, a sample for the demo, not India's real network.`}
           >
             Simulated data
@@ -732,9 +747,9 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
         </p>
       )}
 
-      <main className="flex min-h-0 flex-1">
+      <main className="flex min-h-0 flex-1 flex-col md:flex-row">
         {/* ---------------------------------------------------- panel --- */}
-        <aside className="z-[1000] flex w-[400px] shrink-0 flex-col border-r border-line bg-panel">
+        <aside className="z-[1000] order-2 flex min-h-0 w-full flex-1 flex-col border-r border-line bg-panel md:order-1 md:w-[400px] md:flex-none md:shrink-0">
           {loopFor ? (
             <LiveLoopPanel
               key={`${loopFor.id}:${loopAuto}:${loopKind}`}
@@ -948,7 +963,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
         </aside>
 
         {/* ------------------------------------------------------ map --- */}
-        <section className="relative min-w-0 flex-1">
+        <section className="relative order-1 h-[40vh] min-w-0 shrink-0 md:order-2 md:h-auto md:flex-1 md:shrink">
           <NationalMap
             sku={sku}
             refreshKey={refreshKey}
