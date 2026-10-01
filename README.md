@@ -6,8 +6,6 @@ Four states train one medicine-demand model without sharing a single facility re
 
 **Brief description:** [docs/submission/DESCRIPTION.md](docs/submission/DESCRIPTION.md)
 
-<!-- Before submitting: add the demo video link, the pitch deck link, and 3-4 screenshots in docs/img/. -->
-
 This is a working prototype on synthetic data. Every facility, stock figure, bed count, check-in and consignment is generated. District names and coordinates are real, so the map is honest about geography, but no real patient or facility record exists anywhere in the system, and the schema has nowhere to put patient data. The outbreak rows are the one real dataset: they are parsed from NCDC's published IDSP weekly outbreak reports.
 
 ## Quick facts
@@ -20,7 +18,7 @@ This is a working prototype on synthetic data. Every facility, stock figure, bed
 | Sent per round | 22,788 bytes (5,697 weights × 4 bytes). 0 facility rows |
 | Google AI | Gemini vision (`gemini-3.1-flash-lite`), Gemini text (`gemini-3.5-flash-lite`), Google Maps Routes and Map Tiles (optional, off on the demo) |
 | Optimiser | OR-Tools SimpleMinCostFlow, greedy fallback |
-| Tests | 867 unit tests, 13 integration check suites |
+| Tests | 891 unit tests, 13 integration check suites |
 | Hosting | One Docker service on Render |
 | Languages | English, with Hindi labels on the main screens and Hindi briefings |
 
@@ -48,6 +46,23 @@ SwasthSetu runs one loop through all of it:
 4. A facility that drops under the critical line raises a warning.
 5. A min-cost-flow solver proposes a donor facility.
 6. The donor facility accepts or declines. The receiver confirms arrival and counts what came.
+
+## Who it is for
+
+- **Pharmacists and staff at a PHC or CHC**: today's to-do list, stock by photo, SMS or call, requests to and from neighbouring centres, deliveries to confirm.
+- **District and state health officers**: where stock runs out next, which transfers the system recommends, which deliveries did not reconcile, which centres to visit first.
+- **A national administrator**: district-level summaries for every state, outbreak warnings and the federated training record. A national account reads no individual centre outside the public demo's sandbox.
+
+## Data sources
+
+| Data | Source | Real or synthetic |
+|---|---|---|
+| Facilities, stock, beds, attendance, consignments | `backend/scripts/seed.py`, fixed random seed; the rules are on the site's "How this data is generated" page | Synthetic |
+| District names and coordinates | Real places; each centre is scattered around one | Real places, synthetic positions |
+| Outbreak rows | NCDC's published IDSP weekly outbreak reports, parsed by `backend/app/idsp.py` | Real, public |
+| Road distances | Google Maps Routes when `MAPS_MODE=google`; straight-line estimate otherwise (the demo) | Estimate on the demo |
+
+No figure in this README describes a real facility, and no impact number is claimed.
 
 ## Try it
 
@@ -90,7 +105,7 @@ The deployed database is a small free instance, so the rule is: live where an ac
 | Federated rounds on the deployed site | Recorded | The site replays stored rounds. Run next round works only locally, because it needs the Flower processes and PyTorch |
 | Outbreak data | Real, and old | 95 rows from NCDC's IDSP reports for weeks 31 and 32 of 2026. NCDC publishes weeks late, so every row is past the 14-day window and the panel says so; an officer can declare an outbreak, and the site checks NCDC for a newer report when the panel is opened (at most once a day) or on request, never on a schedule |
 | Outbreak pre-positioning | Live | A multiplier into the same solver. The size of the rise is the district's own 14-day rise in use where its readings show one of at least 10%, otherwise the declaring officer's expected surge, labelled an assumption |
-| Gemini reading a new IDSP report | Built, not verified live | The reader and its row-by-row check against the parser are tested with a stand-in transport. It has not been run against a real NCDC PDF with a live key (see `BLOCKERS.md`) |
+| Gemini reading a new IDSP report | Built, not verified live | The reader and its row-by-row check against the parser are tested with a stand-in transport. It has not been run against a real NCDC PDF with a live key |
 | Road distances | Estimated | Straight line × 1.3 on the demo, labelled on screen. Google Maps Routes is behind `MAPS_MODE=google` |
 | SMS, WhatsApp, IVR | Simulated | A handset simulator: inside the pharmacist's workspace it sends only as that centre's own registered numbers. The Twilio adapters are implemented and signature-checked, but live sending needs an account |
 | Warehouse supply | Not modelled | Most replenishment in practice is by indent to the district drug warehouse. The prototype models centre-to-centre transfers and a seeded warehouse dispatch ledger, and says so where supply is shown |
@@ -194,8 +209,8 @@ The web form, SMS in a forgiving keypad grammar (`ORS 60 ZINC 20`), WhatsApp and
 | Service | What it does | Used in |
 |---|---|---|
 | Gemini vision (`gemini-3.1-flash-lite`) | Reads a ward photo into total beds, occupied beds and the rotating code in one pass; reads a photographed bill, slip or register page into stock lines and the document's type | Bed capture and the Medicines tab's photo path. Both depend on it |
-| Gemini text (`gemini-3.5-flash-lite`) | Rewrites a facility's computed to-do list in English, Hindi and the state's language (Marathi in Maharashtra) — an answer with an extra line or a figure the list does not hold is discarded — and writes the reason behind a proposed trip or a trust flag. The new list prompt has not yet been run with a live key (`BLOCKERS.md`) | Emergency drill, trip cards, Data trust, the pharmacist's Today card |
-| Gemini reading the IDSP weekly report | Extracts outbreak rows from NCDC's PDF; a regex parser checks every row and only agreed rows become outbreaks | Built and tested with a stand-in transport; not yet run live (`BLOCKERS.md`) |
+| Gemini text (`gemini-3.5-flash-lite`) | Rewrites a facility's computed to-do list in English, Hindi and the state's language (Marathi in Maharashtra) — an answer with an extra line or a figure the list does not hold is discarded — and writes the reason behind a proposed trip or a trust flag. The new list prompt has not yet been run with a live key | Emergency drill, trip cards, Data trust, the pharmacist's Today card |
+| Gemini reading the IDSP weekly report | Extracts outbreak rows from NCDC's PDF; a regex parser checks every row and only agreed rows become outbreaks | Built and tested with a stand-in transport; not yet run live |
 | Google Maps Routes API, Map Tiles | Road distances for the solver, and the basemap | `MAPS_MODE=google`. The public demo uses the tested OSM fallback |
 
 Gemini is called server-side with a key from the environment. The prompts and the only Gemini client live in `backend/app/vision.py`, and `tests/test_api_boundary.py` enforces that no other module reaches Gemini. The service runs on Render; nothing is deployed on Google Cloud.
@@ -330,7 +345,7 @@ These steps match how the live demo was deployed. They have not been re-run from
 | `GOOGLE_MAPS_SERVER_KEY`, `GOOGLE_MAPS_BROWSER_KEY` | optional | With `MAPS_MODE=google` |
 | `TWILIO_*` | optional | With `COMMS_MODE=live` |
 
-The full list is in `.env.example`. The hand-run operations that keep the deployed demo current (rolling the demo district forward, republishing forecasts) are in `docs/RENDER_OPS.md`.
+The full list is in `.env.example`. Rolling the demo district forward (`scripts/roll_forward.py`) and republishing forecasts (`federation/publish_forecast.py`) are run by hand through the same guarded runner; nothing writes to the deployed database on a schedule.
 
 ### Piloting it in a state
 
@@ -386,6 +401,4 @@ Planned:
 | `backend/alembic/` | Database migrations |
 | `frontend/src/` | Map, dashboard panels, emergency drill, federation inspector, the pharmacist's workspace |
 | `docs/submission/` | The 2–3 line description |
-| `docs/specs/` | Build specifications, the spec digest and the hackathon rules |
-| `docs/STORAGE_NOTES.md`, `docs/RENDER_OPS.md` | The deployed database's size rules and the operations run by hand |
 | `render.yaml`, `Dockerfile` | The deployed service |
