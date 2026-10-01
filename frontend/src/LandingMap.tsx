@@ -20,6 +20,10 @@ import { type Bucket, STATUS_COLOR, bucketSeverity } from "./api";
  * uses. This page is public and gets crawled; a tile session per visit would
  * spend a metered quota on robots, and Section 1.3 requires every page to
  * render with the credentials blank anyway.
+ *
+ * The tiles are faded (basemap-quiet) so the dots carry the picture. Their
+ * place names are part of the image and cannot be removed; the repository
+ * holds no boundary data for India to draw an outline from instead.
  */
 
 const INDIA = L.latLngBounds([6.4, 67.8], [36.2, 97.6]);
@@ -65,7 +69,7 @@ export default function LandingMap({ states }: { states: Bucket[] }) {
     map.attributionControl.setPrefix(false);
     L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 7,
-      className: "basemap",
+      className: "basemap basemap-quiet",
       attribution: OSM_ATTRIBUTION,
     }).addTo(map);
     map.fitBounds(INDIA, { padding: [6, 6] });
@@ -94,6 +98,18 @@ export default function LandingMap({ states }: { states: Bucket[] }) {
     layer.clearLayers();
     for (const s of states) {
       const status = bucketSeverity(s);
+      // A critical state gets a ring that widens and fades (index.css); the
+      // dot itself never moves, and reduced-motion drops the ring.
+      if (status === "critical") {
+        L.circleMarker([s.lat, s.lng], {
+          radius: radiusFor(s.total),
+          stroke: false,
+          fillColor: STATUS_COLOR.critical,
+          fillOpacity: 0.5,
+          interactive: false,
+          className: "pulse-ring",
+        }).addTo(layer);
+      }
       L.circleMarker([s.lat, s.lng], {
         radius: radiusFor(s.total),
         color: "#ffffff",

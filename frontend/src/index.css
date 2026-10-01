@@ -78,6 +78,12 @@ body {
   filter: grayscale(0.9) brightness(1.04) contrast(0.92);
 }
 
+/* The landing map: land and coast stay, place names recede to near nothing. */
+.basemap-quiet {
+  filter: grayscale(1) brightness(1.12) contrast(0.5);
+  opacity: 0.55;
+}
+
 /* Google requires its own logo beside the copyright line, at its own
    proportions and with clear space around it. */
 .google-logo {
@@ -200,6 +206,26 @@ body {
   animation: livepulse 2s ease-in-out infinite;
 }
 
+/* Landing map: a critical state's ring widens and fades once every 2 seconds,
+   well under one flash per second. */
+@keyframes pulsering {
+  0% {
+    transform: scale(1);
+    opacity: 0.5;
+  }
+  70%,
+  100% {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+}
+
+.pulse-ring {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pulsering 2s ease-out infinite;
+}
+
 @keyframes toastin {
   from {
     opacity: 0;
@@ -221,6 +247,10 @@ body {
   .donut {
     animation: none;
     transition: none;
+  }
+  .pulse-ring {
+    animation: none;
+    display: none;
   }
 }
 
