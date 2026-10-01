@@ -177,9 +177,11 @@ export function NationalPanel({
         <h2 className="mt-1 text-[22px] font-semibold tracking-tight text-ink">India</h2>
         <p className="mt-0.5 text-[12.5px] text-ink-2">
           {summary
-            ? `${summary.facilities.toLocaleString("en-IN")} facilities · ${summary.states} states & UTs · ${summary.districts} districts`
+            ? `${summary.facilities.toLocaleString("en-IN")} synthetic facilities · ${summary.states} states & UTs · ${summary.districts} districts`
             : "Loading network…"}
         </p>
+        {/* Fix #62: the scale, said plainly; no real-world count without a source. */}
+        <p className="mt-0.5 text-[11px] text-ink-3">A sample for the demo — India has far more health centres and districts than this.</p>
         <p className="mt-3 text-[12px] text-ink-2">
           Condition of <span className="font-medium text-ink">{medicineLabel(sku, skus)}</span>
           {!sku && <span className="text-ink-3"> — each facility's lowest-stocked item</span>}
@@ -269,9 +271,10 @@ export function StatePanel({
         </h2>
         <p className="mt-0.5 text-[12.5px] text-ink-2">
           {summary
-            ? `${summary.facilities} facilities · ${summary.phcs} PHCs · ${summary.chcs} CHCs · ${summary.districts} districts`
+            ? `${summary.facilities} synthetic facilities · ${summary.phcs} PHCs · ${summary.chcs} CHCs · ${summary.districts} districts`
             : "Loading state data…"}
         </p>
+        <p className="mt-0.5 text-[11px] text-ink-3">A sample for the demo, not the state's full network.</p>
         <p className="mt-3 text-[12px] text-ink-2">
           Condition of <span className="font-medium text-ink">{med}</span>
         </p>

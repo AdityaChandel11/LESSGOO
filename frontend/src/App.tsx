@@ -88,6 +88,15 @@ function readUrl(): UrlState {
   };
 }
 
+function sinceWords(at: number, now: number): string {
+  const s = Math.max(0, Math.round((now - at) / 1000));
+  if (s < 60) return "just now";
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  return h < 24 ? `${h} h ago` : `${Math.round(h / 24)} d ago`;
+}
+
 function pinFromDetail(d: FacilityDetail): Pin {
   return {
     id: d.id,
@@ -222,6 +231,14 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
   const [highlightTrip, setHighlightTrip] = useState<string | null>(null);
 
   const { connected, events, resyncs, pollNow } = useLiveUpdates();
+  // When the newest change this browser has seen happened, and a clock that
+  // ticks every 30 s so "2 min ago" stays true without a re-poll.
+  const lastChange = events.length ? Math.max(...events.map((e) => e.receivedAt - e.latencyMs)) : null;
+  const [clockNow, setClockNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setClockNow(Date.now()), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   // The server said this browser missed too much to replay; reload everything.
   useEffect(() => {
@@ -728,13 +745,20 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
             style={{ color: connected ? STATUS_COLOR.healthy : "#7d858f" }}
             title={
               connected
-                ? `Checking for updates every ${POLL_VISIBLE_MS / 1000} seconds`
+                ? `Checking for updates every ${POLL_VISIBLE_MS / 1000} seconds · ${lastChange === null ? "no change since you opened this page" : `last change ${sinceWords(lastChange, clockNow)}`}`
                 : "Cannot reach the server; retrying"
             }
           >
             <span className={`h-2 w-2 rounded-full ${connected ? "live-dot" : ""}`}
               style={{ background: connected ? STATUS_COLOR.healthy : "#b3b9c0" }} />
             {connected ? "Live" : "Reconnecting"}
+            {/* Fix #62: "Live" says how recent, not just that polling works. */}
+            {connected && (
+              <span className="hidden font-normal text-ink-3 min-[1500px]:inline">
+                {" · "}
+                {lastChange === null ? "no change since you opened this" : `last change ${sinceWords(lastChange, clockNow)}`}
+              </span>
+            )}
           </span>
 
           <span className="h-6 w-px bg-line" aria-hidden="true" />
