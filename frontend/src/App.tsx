@@ -514,7 +514,11 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
     }
   };
 
-  // Keep the address bar in step with the settled view.
+  // Keep the address bar in step with the settled view. Moving to another
+  // place — tab, state, facility or medicine — adds a history entry, so the
+  // browser's Back returns to it (fix #47); panning only replaces the entry.
+  const lastPlace = useRef<string | null>(null);
+  const restoringUntil = useRef(0);
   useEffect(() => {
     const q = new URLSearchParams();
     if (mode !== "stock") q.set("view", mode);
@@ -522,10 +526,38 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
     if (selected) q.set("facility", selected.id);
     q.set("at", `${view.lat.toFixed(4)},${view.lng.toFixed(4)},${Number(view.zoom.toFixed(1))}`);
     const next = `${window.location.pathname}?${q.toString().replace(/%2C/g, ",")}`;
-    if (next !== `${window.location.pathname}${window.location.search}`) {
+    const place = [mode, activeState ?? "", selected?.id ?? "", sku ?? ""].join("|");
+    const moved = lastPlace.current !== null && place !== lastPlace.current;
+    lastPlace.current = place;
+    if (next === `${window.location.pathname}${window.location.search}`) return;
+    if (moved && Date.now() > restoringUntil.current) {
+      window.history.pushState(null, "", next);
+    } else {
       window.history.replaceState(null, "", next);
     }
-  }, [mode, sku, selected, view.lat, view.lng, view.zoom]);
+  }, [mode, sku, selected, activeState, view.lat, view.lng, view.zoom]);
+
+  // Back and Forward: put the screen where that entry says. While the map
+  // flies there, its intermediate views replace the entry rather than add.
+  useEffect(() => {
+    const onPop = () => {
+      const u = readUrl();
+      restoringUntil.current = Date.now() + 2500;
+      setMode(u.mode);
+      setSku(u.sku);
+      if (u.facility) {
+        api
+          .facility(u.facility)
+          .then((d) => setSelected(pinFromDetail(d)))
+          .catch(() => setSelected(null));
+      } else {
+        setSelected(null);
+      }
+      if (u.at) fly(u.at.lat, u.at.lng, u.at.zoom);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [fly]);
 
   const medicineName = useMemo(
     () => (sku ? (skus.find((s) => s.code === sku)?.name ?? sku) : "All medicines"),
@@ -578,7 +610,9 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               <span className="text-ink-3">›</span>
               <button
                 onClick={() => goState(activeState)}
-                className={`truncate rounded px-1.5 py-0.5 hover:bg-canvas ${selected ? "text-brand" : "font-medium text-ink"}`}
+                // The current level is never cut short (fix #47); a long
+                // facility name after it truncates instead.
+                className={`rounded px-1.5 py-0.5 whitespace-nowrap hover:bg-canvas ${selected ? "text-brand" : "font-medium text-ink"}`}
               >
                 {stateName(activeState)}
               </button>
