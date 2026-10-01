@@ -78,16 +78,6 @@ body {
   filter: grayscale(0.9) brightness(1.04) contrast(0.92);
 }
 
-/* The landing map: land and coast stay, place names recede to near nothing. */
-.basemap-quiet {
-  filter: grayscale(1) brightness(1.06);
-}
-
-/* On the pane, not the tiles: Leaflet writes each tile's own opacity inline. */
-.landing-map .leaflet-tile-pane {
-  opacity: 0.38;
-}
-
 /* Google requires its own logo beside the copyright line, at its own
    proportions and with clear space around it. */
 .google-logo {
