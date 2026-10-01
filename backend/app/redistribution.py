@@ -566,6 +566,22 @@ def not_received(movements: list[dict], now: datetime) -> list[dict]:
     return [m for m in movements if m["status"] == MOVEMENT_OPEN and m["expected_by"] < now]
 
 
+def cross_district_trips(transfers: list[dict], district_of: dict[str, str]) -> int:
+    """Open trips whose donor and receiver sit in different districts (fix
+    #38). A trip is one donor-receiver pair, whatever it carries. A centre
+    whose district is not known is not called cross-district."""
+    pairs = {
+        (t["from"], t["to"])
+        for t in transfers
+        if t["status"] == "proposed"
+    }
+    return sum(
+        1
+        for src, dst in pairs
+        if src in district_of and dst in district_of and district_of[src] != district_of[dst]
+    )
+
+
 async def oversight(session: AsyncSession, state: str, now: datetime) -> dict:
     """The officer's view of one state's redistribution, from the rows."""
     since = now - timedelta(days=OVERSIGHT_DAYS)
@@ -699,6 +715,11 @@ async def oversight(session: AsyncSession, state: str, now: datetime) -> dict:
             [t for t in transfers if t["status"] == "proposed"], settings.critical_days
         ),
         "critical_days": settings.critical_days,
+        # Fix #38: how many open trips cross a district line — so
+        # "cross-district" on screen is a count, not a claim.
+        "cross_district_open": cross_district_trips(
+            transfers, {fid: district for fid, (_name, district) in names.items()}
+        ),
         "pipeline": pipeline(transfers, movements),
         "no_reply": [trip(t) for t in no_reply(transfers, now, reply_window)][:20],
         "no_reply_total": len(no_reply(transfers, now, reply_window)),

@@ -1544,6 +1544,8 @@ export interface Oversight {
   state: string;
   /** Set when the named lists are withheld and only the counts are shown (fix #77). */
   rows_withheld?: string | null;
+  /** Fix #38: open trips whose donor and receiver are in different districts. */
+  cross_district_open?: number;
   window_days: number;
   recommended_open: number;
   requests_open: number;

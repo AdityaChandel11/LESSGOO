@@ -419,6 +419,10 @@ export function RedistributionPanel({
               <span className="font-medium text-ink">{oversight.recommended_open.toLocaleString("en-IN")}</span> transfers
               in {stateLabel}, last updated {clock(oversight.computed_at)} from the stock reported by then. Each goes to the
               donor centre to accept — nothing moves without them.
+              {oversight.cross_district_open != null &&
+                (oversight.cross_district_open > 0
+                  ? ` ${oversight.cross_district_open.toLocaleString("en-IN")} of the open trips cross a district line.`
+                  : " None of the open trips crosses a district line.")}
               {oversight.requests_open > 0 &&
                 ` ${oversight.requests_open} requests between centres are waiting for their donors too.`}
             </>
@@ -467,7 +471,7 @@ export function RedistributionPanel({
             />
             <Stat
               value={oversight.unreached_total.toLocaleString("en-IN")}
-              label="short with no trip — state warehouse"
+              label="short with no open trip — escalate to the state warehouse"
               tone={oversight.unreached_total ? STATUS_COLOR.critical : undefined}
             />
           </div>
@@ -616,6 +620,12 @@ function TripCard({
             <span className="font-medium text-ink">{trip.from.name}</span>
             <span className="mx-1.5 text-ink-3">→</span>
             <span className="font-medium text-ink">{trip.to.name}</span>
+            {/* Fix #38: said in words, so it does not rest on colour. */}
+            {trip.from.district !== trip.to.district && (
+              <span className="mt-0.5 block text-[11px] font-medium text-brand">
+                {trip.from.district} → {trip.to.district} · cross-district · अंतर-ज़िला
+              </span>
+            )}
           </div>
           <span
             className="shrink-0 font-mono text-[11px] text-ink-3 tabular-nums"

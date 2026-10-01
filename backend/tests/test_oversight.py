@@ -75,3 +75,29 @@ def test_not_received_lists_deliveries_past_their_expected_day():
             _m(2, "in_transit", transfer_id=2, expected_in_days=1),
             _m(3, "received", transfer_id=3, expected_in_days=-3)]
     assert [r["id"] for r in redistribution.not_received(rows, NOW)] == [1]
+
+
+# ------------------------------------------------- cross-district (fix #38) ---
+# Checked by dry-running the solver on the seeded data: an ordinary plan stays
+# inside a district wherever its own donors are enough (Maharashtra: 0 of 506
+# trips), crosses districts where they are not (Bihar: 144 of 823), and an
+# outbreak that doubles a district's demand pulls stock in from its neighbours
+# (Pune -> Nashik). The count below is of trips, read from the open
+# recommendations; nothing is staged to make it non-zero.
+
+
+def test_cross_district_trips_are_counted_among_the_open_recommendations():
+    district = {"A": "Nashik", "B": "Nashik", "C": "Pune", "D": "Pune"}
+    transfers = [
+        {"from": "A", "to": "B", "status": "proposed", "sku": "ORS"},       # inside Nashik
+        {"from": "C", "to": "B", "status": "proposed", "sku": "ORS"},       # Pune -> Nashik
+        {"from": "C", "to": "B", "status": "proposed", "sku": "ZINC"},      # the same trip, a second medicine
+        {"from": "D", "to": "A", "status": "approved", "sku": "ORS"},       # already decided: not open
+        {"from": "D", "to": "A", "status": "rejected", "sku": "ZINC"},
+    ]
+    assert redistribution.cross_district_trips(transfers, district) == 1
+
+
+def test_a_centre_with_no_known_district_is_not_called_cross_district():
+    transfers = [{"from": "X", "to": "B", "status": "proposed", "sku": "ORS"}]
+    assert redistribution.cross_district_trips(transfers, {"B": "Nashik"}) == 0
