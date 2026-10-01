@@ -3,7 +3,7 @@
 `scripts/remote.py` refuses a local host because it is a remote tool. This is
 the mirror image: it refuses a *remote* host, because it writes rows in order
 to weigh them, and the deployed database is a 1 GB volume under a standing
-instruction that bulk writes need Aditya to ask for that specific run.
+rule that a bulk write is a deliberate, one-off run and never routine.
 
     python -m scripts.storage_receipt
     python -m scripts.storage_receipt --runs 40

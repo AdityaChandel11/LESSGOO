@@ -28,7 +28,7 @@ superseded match.
                 clears those. Bounded by date: nothing before the reseed.
 
 Afterwards the map's stored rows are rebuilt for the affected centres only.
-Ask Aditya for Render's dashboard % before and after (a handful of rows).
+Read Render's dashboard % before and after (a handful of rows).
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ from sqlalchemy import text
 
 SANDBOX_STATE = "MH"
 SANDBOX_DISTRICT = "Nashik"
-# The last reseed of the deployed database (CLAUDE.md); it truncated
+# The last reseed of the deployed database; it truncated
 # everything written before it.
 RESEEDED_ON = date(2026, 9, 21)
 

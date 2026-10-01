@@ -3172,7 +3172,7 @@ async def audit_queue(
             )
         state, district = narrowed
     if not state and not district:
-        # Scoring the whole country live measured 46s (docs/STORAGE_NOTES.md),
+        # Scoring the whole country live measured 46s against the deployed database,
         # and the panel's live refresh piled those requests on each other.
         raise HTTPException(
             status_code=400,

@@ -332,7 +332,7 @@ async def own_record(
     """This person's own attendance and re-verification history.
 
     Both queries are bounded by facility, staff reference and a date floor —
-    never an open scan (see the size guard in CLAUDE.md).
+    never an open scan: the deployed database is a 1 GB volume.
     """
     at = now or datetime.now(timezone.utc)
     today = at.date()

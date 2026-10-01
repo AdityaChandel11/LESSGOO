@@ -16,7 +16,7 @@ its check-ins leave "today's team". This moves the district's clock to today:
                     oldest G seeded days are deleted, in the same transaction.
                     Row count is flat, and only G days of rows are written —
                     shifting every reading would rewrite the whole history on
-                    a disk with little room (CLAUDE.md, size guard).
+                    a disk with little room (a 1 GB volume).
   ward reports, check-ins, re-verification pings, warehouse dispatches and
   verification codes
                     small tables: their seed-era rows are shifted G days later.
@@ -28,7 +28,7 @@ where they happened. Every statement is bounded by the district's facility
 ids. Afterwards the map's stored rows and the trust copy are rebuilt for the
 district only, from the same functions the app uses.
 
-Ask Aditya for Render's dashboard % before and after, and record both.
+Read Render's dashboard % before and after, and record both.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ SEED_SOURCE = "seed"
 # the same (facility, day) key half-way through the shift.
 PARK_DAYS = 100_000
 GAUGE_MB = 1024.0
-# CLAUDE.md: dashboard ≈ measured × 1.29.
+# Measured on the deployed database: dashboard ≈ measured × 1.29.
 GAUGE_FACTOR = 1.29
 
 
@@ -86,7 +86,7 @@ def make_plan(*, cutoff: datetime, oldest: datetime, now: datetime) -> Plan:
     if days and days >= span:
         raise RollForwardError(
             f"{days} days to fill but only {span:.0f} days of seeded history to copy from. "
-            "Use the smaller reseed instead (CLAUDE.md), and only if Aditya asks for it."
+            "Use the smaller reseed instead, and only as a deliberate, one-off run."
         )
     return Plan(cutoff=cutoff, oldest=oldest, days=days)
 

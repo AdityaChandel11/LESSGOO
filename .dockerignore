@@ -1,6 +1,5 @@
 # Keep the build context small and free of secrets.
-.git
-.claude
+.*
 **/.env
 **/.env.*
 !.env.example

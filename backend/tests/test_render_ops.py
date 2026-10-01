@@ -1,7 +1,7 @@
 """The hand-run Render operations: roll-forward (#30) and reading repairs
 (#11r, #79).
 
-Aditya runs these, never an agent, through `scripts.remote`. What is asserted
+These are run by hand, never automatically, through `scripts.remote`. What is asserted
 here is what makes them safe to hand over: a dry run unless --confirm, a second
 run that finds nothing to do, and every statement bounded by the district's
 facility ids or by date — never a read or write of the whole country.

@@ -1009,7 +1009,7 @@ async def last_receipts(session: AsyncSession, facility_id: str) -> dict[str, La
     DISTINCT ON keeps this to a single index scan over
     ix_movements_facility_time rather than a query per medicine. Bounded by one
     facility on purpose: the national equivalent of this read is the one
-    measured at over 300 seconds and ~70 MB of temp in docs/STORAGE_NOTES.md.
+    measured at over 300 seconds and ~70 MB of temp files on the deployed database.
     """
     rows = await session.execute(
         text(
