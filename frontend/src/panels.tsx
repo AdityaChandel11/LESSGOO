@@ -215,6 +215,7 @@ export function StatePanel({
   skus,
   refreshKey,
   selectedFacilityId,
+  heldRows = null,
   onPickDistrict,
   onPickFacility,
 }: {
@@ -224,6 +225,9 @@ export function StatePanel({
   skus: Sku[];
   refreshKey: number;
   selectedFacilityId: string | null;
+  /** Set when this reader may not read this state's centres (fix #77): the
+   *  facility list says where they are held instead of "none match". */
+  heldRows?: string | null;
   onPickDistrict: (b: Bucket) => void;
   onPickFacility: (p: Pin) => void;
 }) {
@@ -359,7 +363,9 @@ export function StatePanel({
               </button>
             ))}
             {filtered.length === 0 && (
-              <p className="px-4 py-6 text-center text-[12px] text-ink-3">No facilities match.</p>
+              <p className="px-4 py-6 text-center text-[12px] text-ink-3">
+                {heldRows ?? "No facilities match."}
+              </p>
             )}
           </div>
         </>
@@ -637,7 +643,7 @@ export function ActivityFeed({
   /** Where the demo report lands — never a centre outside it (fix #79). */
   sandboxDistrict: string;
 }) {
-  const readings = events.filter((e) => e.kind === "reading.committed").slice(0, 3);
+  const readings = events.filter((e) => e.kind === "reading.committed" && !e.withheld).slice(0, 3);
   return (
     // shrink-0: the footer keeps its own height whatever the panel above it
     // does, instead of being compressed while that panel overflows through it.

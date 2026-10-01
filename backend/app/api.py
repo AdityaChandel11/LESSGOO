@@ -54,10 +54,12 @@ from .auth import (
     Principal,
     can_decide_transfer,
     can_plan_state,
+    can_read_facility_rows,
     can_submit_reading,
     can_report_facts,
     can_view_facility,
     current_user,
+    held_message,
     demo_may_plan,
     demo_may_write,
     demo_sandbox_refusal,
@@ -362,6 +364,49 @@ async def map_states(
     return [_bucket_out(b) for b in await aggregates.state_rollup(session, sku)]
 
 
+def _narrow_to_rows_scope(
+    user: Principal, state: str | None, district: str | None
+) -> tuple[str, str | None] | None:
+    """The (state, district) filter a facility-level list is read with, or
+    None when the caller may read no rows there (fix #77).
+
+    A state officer is narrowed to their state, a district officer to their
+    district; asking for somewhere else yields nothing rather than an error,
+    because a map viewport crosses borders all the time. The national role
+    and a centre's own account have no list of centres to read here.
+    """
+    if user.role == "state_officer" and user.state_silo:
+        if state and state != user.state_silo:
+            return None
+        return user.state_silo, district
+    if user.role == "block_mo" and user.state_silo and user.district:
+        if (state and state != user.state_silo) or (district and district != user.district):
+            return None
+        return user.state_silo, user.district
+    if user.role == "admin" and is_public_demo(user):
+        # The labelled exception (auth.can_read_facility_rows): the sandbox
+        # district, and nothing else.
+        box = (settings.demo_sandbox_state, settings.demo_sandbox_district)
+        if (state and state != box[0]) or (district and district != box[1]):
+            return None
+        return box
+    return None
+
+
+async def _readable_facility(session: AsyncSession, facility_id: str, user: Principal) -> Facility:
+    """One centre, for a reader who may read its rows (fix #77). Anyone else
+    is told where the rows are held; the centre's own name is not in the
+    refusal."""
+    facility = await session.get(Facility, facility_id)
+    if facility is None:
+        raise HTTPException(status_code=404, detail="Facility not found")
+    if not can_read_facility_rows(
+        user, state=facility.state_silo, district=facility.district, facility_id=facility.id
+    ):
+        raise HTTPException(status_code=403, detail=held_message(user, facility.state_silo))
+    return facility
+
+
 @router.get("/map/districts", response_model=list[BucketOut], tags=["map"])
 async def map_districts(
     state: str | None = Query(default=None),
@@ -383,13 +428,21 @@ async def map_facilities(
     status: str | None = Query(default=None),
     limit: int = Query(default=1500, ge=1, le=4000),
     session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
 ) -> list[PinOut]:
+    """Pins inside the caller's scope and nowhere else (fix #77): a viewport
+    is narrowed to the state or district whose rows the caller may read, and
+    the national role gets none — it reads /map/districts instead."""
     corners = (south, west, north, east)
     if any(c is not None for c in corners) and not all(c is not None for c in corners):
         raise HTTPException(status_code=422, detail="bbox needs south, west, north and east")
     bbox = corners if all(c is not None for c in corners) else None
     if bbox is None and state is None:
         raise HTTPException(status_code=422, detail="Provide a bbox or a state")
+    narrowed = _narrow_to_rows_scope(user, state, district)
+    if narrowed is None:
+        return []
+    state, district = narrowed
     pins = await aggregates.find_facilities(
         session,
         bbox=bbox,  # type: ignore[arg-type]
@@ -572,7 +625,17 @@ async def transfers_oversight(
     Bounded by the state's facilities and the last 30 days."""
     if await session.scalar(select(Facility.id).where(Facility.state_silo == state).limit(1)) is None:
         raise HTTPException(status_code=404, detail="Unknown state")
-    return await redistribution.oversight(session, state, datetime.now(timezone.utc))
+    out = await redistribution.oversight(session, state, datetime.now(timezone.utc))
+    # Fix #77: the pipeline's counts are an aggregate anyone signed in may see;
+    # the lists beneath it name centres, and are the state's officer's.
+    if user.role == "state_officer" and user.state_silo == state:
+        return {**out, "rows_withheld": None}
+    # Every list in the reply names centres (stuck trips, unconfirmed
+    # deliveries, declined, controlled, unreached); every count beside it stays.
+    return {
+        **{k: ([] if isinstance(v, list) else v) for k, v in out.items()},
+        "rows_withheld": held_message(user, state),
+    }
 
 
 @router.get("/transfers", response_model=list[TransferOut], tags=["transfers"])
@@ -581,11 +644,24 @@ async def get_transfers(
     status: str | None = Query(default=None, description="comma-separated"),
     limit: int = Query(default=300, ge=1, le=1000),
     session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
 ) -> list[TransferOut]:
+    """Trips inside the caller's scope (fix #77): a state officer's own state,
+    the trips that touch a district officer's district or a centre's own
+    shelf. A trip names two centres, so the national role gets none here and
+    reads the pipeline's counts from /transfers/oversight."""
+    narrowed = _narrow_to_rows_scope(user, state, None)
+    if narrowed is None and user.role != "facility_user":
+        return []
     statuses = [s.strip() for s in status.split(",")] if status else None
     rows = await redistribution.list_transfers(
-        session, state=state, statuses=statuses, limit=limit
+        session, state=narrowed[0] if narrowed else user.state_silo,
+        statuses=statuses, limit=limit,
     )
+    if user.role == "facility_user":
+        rows = [r for r in rows if user.facility_id in (r["from"]["id"], r["to"]["id"])]
+    elif narrowed[1]:
+        rows = [r for r in rows if narrowed[1] in (r["from"]["district"], r["to"]["district"])]
     return [TransferOut.model_validate(r) for r in rows]
 
 
@@ -636,6 +712,7 @@ class TripExplainIn(BaseModel):
 async def explain_trip(
     body: TripExplainIn,
     session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
 ) -> ExplanationOut:
     """Why this trip, worded from the solver's own figures. The solver decided;
     this only says it in a sentence (spec 1.7)."""
@@ -643,6 +720,15 @@ async def explain_trip(
     items = await redistribution.list_transfers(session, ids=list(wanted))
     if len(items) != len(wanted):
         raise HTTPException(status_code=404, detail="Transfer not found")
+    # A trip's figures are two centres' rows (fix #77).
+    for t in items:
+        state = t["state"]
+        ends = (t["from"], t["to"])
+        if not any(
+            can_read_facility_rows(user, state=state, district=e["district"], facility_id=e["id"])
+            for e in ends
+        ):
+            raise HTTPException(status_code=403, detail=held_message(user, state))
     if len({(t["from"]["id"], t["to"]["id"]) for t in items}) != 1:
         raise HTTPException(
             status_code=422, detail="Transfers on one trip share a donor and a receiver"
@@ -839,8 +925,11 @@ async def list_facilities(
     state_silo: str | None = Query(default=None),
     status: str | None = Query(default=None),
     limit: int = Query(default=FACILITY_PAGE_DEFAULT, ge=1, le=FACILITY_PAGE_MAX),
+    user: Principal = Depends(current_user),
 ) -> list[FacilityOut]:
-    """Facilities matching the filter, worst first.
+    """Facilities matching the filter, worst first, inside the caller's scope
+    (fix #77): outside it the list is empty, and the districts roll-up is what
+    the caller reads instead.
 
     The filter is resolved to a bounded set of facility ids in SQL *before*
     anything reads a stock reading. It used to be the other way round: every
@@ -856,6 +945,10 @@ async def list_facilities(
     ordering and the same status rule the map uses. Reusing it keeps the two
     from drifting apart.
     """
+    narrowed = _narrow_to_rows_scope(user, state_silo, district)
+    if narrowed is None:
+        return []
+    state_silo, district = narrowed
     pins = await aggregates.find_facilities(
         session, state=state_silo, district=district, status=status, limit=limit
     )
@@ -877,7 +970,9 @@ async def list_facilities(
 async def get_facility(
     facility_id: str,
     session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
 ) -> FacilityDetailOut:
+    await _readable_facility(session, facility_id, user)
     snaps = await services.get_snapshots(session, facility_ids=[facility_id], live_trust=True)
     if not snaps:
         raise HTTPException(status_code=404, detail="Facility not found")
@@ -1049,10 +1144,13 @@ async def _facility_in_scope(
         facility_state=facility.state_silo,
         facility_district=facility.district,
     ):
-        raise HTTPException(
-            status_code=403,
-            detail="You can only open the workspace for your own facility",
-        )
+        if is_public_demo(user) and not in_demo_sandbox(facility.state_silo, facility.district):
+            detail = demo_sandbox_refusal()
+        elif user.role == "facility_user":
+            detail = "You can only open the workspace for your own facility"
+        else:
+            detail = held_message(user, facility.state_silo)
+        raise HTTPException(status_code=403, detail=detail)
     return facility
 
 
@@ -1166,9 +1264,7 @@ async def facility_usage(
     user: Principal = Depends(current_user),
 ) -> UsageOut:
     """Bounded by one facility, one medicine and the burn window."""
-    facility = await session.get(Facility, facility_id)
-    if facility is None:
-        raise HTTPException(status_code=404, detail="Facility not found")
+    facility = await _readable_facility(session, facility_id, user)
     meta = await session.get(Sku, sku)
     if meta is None:
         raise HTTPException(status_code=404, detail="Unknown SKU")
@@ -2283,12 +2379,44 @@ class EventsOut(BaseModel):
     events: list[EventOut]
 
 
+def scope_events(
+    feed: list[dict], where: dict[str, tuple[str, str]], user: Principal
+) -> list[dict]:
+    """The event feed as this reader may see it (fix #77). Every event still
+    arrives — the screen needs to know something changed — but a payload about
+    a centre whose rows the reader may not read is withheld. `where` maps each
+    facility id in the batch to its (state, district)."""
+    out = []
+    for e in feed:
+        fid = (e.get("data") or {}).get("facility_id")
+        place = where.get(fid) if fid else None
+        if fid and not (
+            place
+            and can_read_facility_rows(user, state=place[0], district=place[1], facility_id=fid)
+        ):
+            e = {**e, "data": {"withheld": True}}
+        out.append(e)
+    return out
+
+
 @router.get("/events", response_model=EventsOut, tags=["realtime"])
 async def poll_events(
     after: int | None = Query(default=None, ge=0),
     session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
 ) -> EventsOut:
-    return EventsOut.model_validate(await events.since(session, after))
+    out = await events.since(session, after)
+    ids = sorted({
+        (e.get("data") or {}).get("facility_id") for e in out["events"]
+    } - {None})
+    where: dict[str, tuple[str, str]] = {}
+    if ids:
+        # Bounded by the batch (events.MAX_BATCH).
+        rows = await session.execute(
+            select(Facility.id, Facility.state_silo, Facility.district).where(Facility.id.in_(ids))
+        )
+        where = {fid: (state, district) for fid, state, district in rows.all()}
+    return EventsOut.model_validate({**out, "events": scope_events(out["events"], where, user)})
 
 
 # ======================================================= medicine movements ===
@@ -2326,6 +2454,8 @@ class MovementsOut(BaseModel):
     counts: dict
     short_units: float
     movements: list[MovementOut]
+    # Set when the totals are shown without their rows (fix #77).
+    rows_withheld: str | None = None
 
 
 @router.get("/movements", response_model=MovementsOut, tags=["movements"])
@@ -2349,18 +2479,34 @@ async def list_movements(
     elif user.role == "state_officer":
         state = user.state_silo
 
-    rows = await movements.list_movements(
-        session, state=state, district=district, facility_id=facility,
-        sku=sku, view=view, limit=limit, offset=offset,
-    )
-    totals = await movements.summary(
-        session, state=state, district=district, facility_id=facility, sku=sku
-    )
+    # Fix #77: a consignment is a row about one centre. The national role
+    # reads the ledger's totals — an aggregate — and none of its rows.
+    withheld = None
+    rows: list = []
+    totals_scope = dict(state=state, district=district, facility_id=facility, sku=sku)
+    if user.role == "admin":
+        narrowed = _narrow_to_rows_scope(user, state, district)
+        if narrowed is None:
+            withheld = held_message(user, state) if state else (
+                "Held in each state's store — the national view sees totals only."
+            )
+        else:
+            rows = await movements.list_movements(
+                session, state=narrowed[0], district=narrowed[1], facility_id=facility,
+                sku=sku, view=view, limit=limit, offset=offset,
+            )
+    else:
+        rows = await movements.list_movements(
+            session, state=state, district=district, facility_id=facility,
+            sku=sku, view=view, limit=limit, offset=offset,
+        )
+    totals = await movements.summary(session, **totals_scope)
     return MovementsOut(
         view=view,
         counts=totals["counts"],
         short_units=totals["short_units"],
         movements=[MovementOut(**asdict(r)) for r in rows],
+        rows_withheld=withheld,
     )
 
 
@@ -2696,8 +2842,7 @@ async def list_bed_reports(
     session: AsyncSession = Depends(get_session),
     user: Principal = Depends(current_user),
 ) -> list[BedReportOut]:
-    if await session.get(Facility, facility_id) is None:
-        raise HTTPException(status_code=404, detail="Unknown facility")
+    await _readable_facility(session, facility_id, user)
     return [_bed_report_out(r) for r in await beds.recent_reports(session, facility_id, limit)]
 
 
@@ -2750,8 +2895,7 @@ async def facility_attendance(
     session: AsyncSession = Depends(get_session),
     user: Principal = Depends(current_user),
 ) -> AttendanceOut:
-    if await session.get(Facility, facility_id) is None:
-        raise HTTPException(status_code=404, detail="Unknown facility")
+    await _readable_facility(session, facility_id, user)
     return AttendanceOut(**asdict(await attendance.summarise(session, facility_id)))
 
 
@@ -2932,6 +3076,17 @@ async def audit_queue(
         state, district = user.state_silo, user.district
     elif user.role == "state_officer":
         state = user.state_silo
+    else:
+        # Fix #77: the queue is a list of named centres with their evidence.
+        narrowed = _narrow_to_rows_scope(user, state, district)
+        if narrowed is None:
+            raise HTTPException(
+                status_code=403,
+                detail=held_message(user, state) if state else (
+                    "Held in each state's store — the national view sees district summaries only."
+                ),
+            )
+        state, district = narrowed
     if not state and not district:
         # Scoring the whole country live measured 46s (docs/STORAGE_NOTES.md),
         # and the panel's live refresh piled those requests on each other.
@@ -2967,6 +3122,7 @@ async def facility_trust(
     # Computed here and now from the ledger, the ward photos and the
     # check-ins — never read back from a stored column, so the panel cannot
     # show a number that the rows beneath it have already moved past.
+    await _readable_facility(session, facility_id, user)
     score = await trust.for_facility(session, facility_id)
     if score is None:
         return None
@@ -3246,7 +3402,8 @@ class NextPairOut(BaseModel):
     sku_name: str
     centres: int
     first_on: date
-    first_centre: str
+    # None where the reader may not read that centre's rows (fix #77).
+    first_centre: str | None
     by_forecast: int
     # Which rule the dates rest on: forecast | mixed | burn_rate | outbreak.
     source: str
@@ -3269,6 +3426,7 @@ async def next_warnings(
     source: Literal["all", "forecast"] = "all",
     limit: int = Query(default=earlywarning.DEFAULT_LIMIT, ge=1, le=20),
     session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
 ) -> NextWarningsOut:
     """The "Next 14 days" strip: district × medicine pairs whose centres are
     projected to run out inside the horizon, earliest first. `source=forecast`
@@ -3279,6 +3437,11 @@ async def next_warnings(
         session, datetime.now(timezone.utc),
         state=state, only_forecast=source == "forecast", limit=limit,
     )
+    # The district figures are an aggregate; the first centre's name is a row.
+    named = {
+        p.key: can_read_facility_rows(user, state=p.state, district=p.district)
+        for p in out.pairs
+    }
     return NextWarningsOut(
         horizon_days=out.horizon_days,
         as_of=out.as_of,
@@ -3289,10 +3452,11 @@ async def next_warnings(
             NextPairOut(
                 state=p.state, state_name=earlywarning.state_name(p.state),
                 district=p.district, sku_code=p.sku_code, sku_name=p.sku_name,
-                centres=p.centres, first_on=p.first_on, first_centre=p.first_centre,
+                centres=p.centres, first_on=p.first_on,
+                first_centre=p.first_centre if named[p.key] else None,
                 by_forecast=p.by_forecast, source=p.source,
                 outbreak=NextOutbreakOut(**vars(p.outbreak)) if p.outbreak else None,
-                line=earlywarning.line(p),
+                line=earlywarning.line(p, named=named[p.key]),
             )
             for p in out.pairs
         ],
@@ -3404,6 +3568,9 @@ class ActiveOutbreakOut(BaseModel):
     # Where the district sits, so the map can ring it (fix #59).
     lat: float | None = None
     lng: float | None = None
+    # How many centres run out inside the horizon; the list below names them
+    # only for a reader who may read that district's rows (fix #77).
+    warnings_count: int = 0
     medicines: list[OutbreakMedicineOut]
     warnings: list[OutbreakWarningOut]
 
@@ -3432,10 +3599,14 @@ class DeclaredOutbreakOut(BaseModel):
     pre_positioning_trips: int
 
 
-def _active_out(view, warnings: list[dict]) -> ActiveOutbreakOut:
+def _active_out(view, warnings: list[dict], named: bool = True) -> ActiveOutbreakOut:
     row = view.row
     at = geo.district_anchor(row.state_silo or "", row.district or "")
+    count = len(warnings)
+    if not named:
+        warnings = []
     return ActiveOutbreakOut(
+        warnings_count=count,
         lat=at[0] if at else None,
         lng=at[1] if at else None,
         id=row.id,
@@ -3468,7 +3639,15 @@ async def active_outbreaks(
     out: list[ActiveOutbreakOut] = []
     for row in await outbreak.active(session, now, state):
         view = await outbreak.evaluate(session, row, now)
-        out.append(_active_out(view, await outbreak.warnings(session, view, now)))
+        out.append(
+            _active_out(
+                view,
+                await outbreak.warnings(session, view, now),
+                named=can_read_facility_rows(
+                    user, state=row.state_silo or "", district=row.district or ""
+                ),
+            )
+        )
     return ActiveOutbreaksOut(
         ttl_days=settings.outbreak_ttl_days,
         window_days=settings.outbreak_window_days,
@@ -4182,11 +4361,20 @@ async def list_calls(
     session: AsyncSession = Depends(get_session),
     user: Principal = Depends(current_user),
 ) -> list[dict]:
-    """The call log, for the demo panel. Capped by the table itself."""
+    """The call log, for the demo panel, inside the caller's scope (fix #77):
+    a call is a row about the centre it was placed to. Capped by the table."""
+    narrowed = _narrow_to_rows_scope(user, None, None)
+    if narrowed is None and user.role != "facility_user":
+        return []
+    stmt = select(CallLog).join(Facility, Facility.id == CallLog.facility_id)
+    if user.role == "facility_user":
+        stmt = stmt.where(CallLog.facility_id == user.facility_id)
+    else:
+        stmt = stmt.where(Facility.state_silo == narrowed[0])
+        if narrowed[1]:
+            stmt = stmt.where(Facility.district == narrowed[1])
     rows = (
-        await session.execute(
-            select(CallLog).order_by(CallLog.created_at.desc()).limit(limit)
-        )
+        await session.execute(stmt.order_by(CallLog.created_at.desc()).limit(limit))
     ).scalars().all()
     return [
         {

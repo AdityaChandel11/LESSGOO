@@ -106,14 +106,19 @@ def merge_outbreak(pairs: list[Pair], surged: dict[Key, Pair]) -> list[Pair]:
     return list(merged.values())
 
 
-def line(p: Pair) -> str:
-    """One pair in words, the way the strip and a screen reader say it."""
+def line(p: Pair, named: bool = True) -> str:
+    """One pair in words, the way the strip and a screen reader say it. The
+    first centre is named only for a reader who may read its rows (fix #77)."""
     when = workspace.day_words(p.first_on)
     if p.centres == 1:
-        body = "{0} runs out on {1}".format(p.first_centre, when)
-    else:
+        body = "{0} runs out on {1}".format(p.first_centre if named else "1 centre", when)
+    elif named:
         body = "{0} centres run out within {1} days, the first ({2}) on {3}".format(
             p.centres, HORIZON_DAYS, p.first_centre, when
+        )
+    else:
+        body = "{0} centres run out within {1} days, the first on {2}".format(
+            p.centres, HORIZON_DAYS, when
         )
     tail = (
         " ({0} without the {1} outbreak)".format(

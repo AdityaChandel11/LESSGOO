@@ -114,8 +114,10 @@ export function NextWarnings({
               </div>
               <p className="text-[11.5px] text-ink-2">
                 {p.centres === 1
-                  ? `${p.first_centre} runs out`
-                  : `${p.centres} centres run out within ${data.horizon_days} days; first, ${p.first_centre}`}
+                  ? `${p.first_centre ?? "1 centre"} runs out`
+                  : `${p.centres} centres run out within ${data.horizon_days} days${
+                      p.first_centre ? `; first, ${p.first_centre}` : ""
+                    }`}
                 {p.outbreak &&
                   ` (${day(p.outbreak.without_on)} without the ${p.outbreak.disease} outbreak)`}
               </p>

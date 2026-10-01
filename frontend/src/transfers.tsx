@@ -553,6 +553,12 @@ export function RedistributionPanel({
           </p>
         )}
 
+        {oversight?.rows_withheld && (
+          // Fix #77: the counts are an aggregate; trips and exceptions name centres.
+          <p role="note" className="mx-4 mt-3 rounded border border-line bg-canvas px-3 py-2 text-[12px] leading-snug text-ink-2">
+            {oversight.rows_withheld} The counts below are shown; the trips and the lists of centres are not.
+          </p>
+        )}
         {oversight && <OversightBlock o={oversight} />}
         {oversight && <Exceptions o={oversight} />}
         {!oversight && scopedUnmet.length > 0 && (

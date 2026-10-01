@@ -24,7 +24,11 @@ import {
   type Transfer,
   type User,
   can,
+  heldNote,
+  HELD_HINDI,
   inDemoSandbox,
+  readsRows,
+  rowsScope,
   STATUS_COLOR,
   STATUS_LABEL,
   STATUS_RULE,
@@ -346,9 +350,12 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
     lastSeq.current = fresh[0].seq;
     // An approved transfer produces its own readings; describe it as a
     // transfer, not as two unrelated field reports.
-    const decided = fresh.find((e) => e.kind === "transfer.decided");
-    const received = fresh.find((e) => e.kind === "movement.received");
-    const reading = fresh.find((e) => e.kind === "reading.committed" && e.source !== "transfer");
+    // An event about a centre this reader may not read (fix #77) still
+    // refreshes the totals below, but has nothing to show or to pulse.
+    const named = fresh.filter((e) => !e.withheld);
+    const decided = named.find((e) => e.kind === "transfer.decided");
+    const received = named.find((e) => e.kind === "movement.received");
+    const reading = named.find((e) => e.kind === "reading.committed" && e.source !== "transfer");
     const shown = decided ?? received ?? reading;
     if (shown) {
       setPulse({ id: shown.facility_id, nonce: shown.seq });
@@ -625,7 +632,9 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
           : "Showing every state. Scroll to zoom, or click a state."
         : view.tier === "district"
           ? `Showing districts${activeState ? ` around ${stateName(activeState)}` : ""}. Zoom in further for individual facilities.`
-          : `${view.pinsInView.toLocaleString("en-IN")} health centres in view. Click one for its medicine stock.`;
+          : activeState && !readsRows(user, activeState)
+            ? `${heldNote(user, stateName(activeState))} Districts are shown instead of centres.`
+            : `${view.pinsInView.toLocaleString("en-IN")} health centres in view. Click one for its medicine stock.`;
 
   return (
     <div className="flex h-full flex-col bg-canvas font-sans text-ink">
@@ -899,6 +908,20 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               canTrain={user.role === "admin"}
             />
             </>
+          ) : mode === "trust" && user.role === "admin" && !readsRows(user, activeState) ? (
+            // Fix #77: the queue is a list of named centres with their
+            // evidence, so it belongs to that state's and district's officers.
+            <div className="p-4">
+              <div className="text-[11px] font-semibold tracking-[0.09em] text-ink-3 uppercase">Data trust</div>
+              <h2 className="mt-1 text-[18px] font-semibold tracking-tight text-ink">
+                {activeState ? stateName(activeState) : "India"}
+              </h2>
+              <p role="note" className="mt-3 rounded border border-line bg-canvas px-3 py-2 text-[12.5px] leading-snug text-ink-2">
+                {heldNote(user, activeState ? stateName(activeState) : null)} The audit queue names
+                centres and shows their evidence; sign in as that state's officer to open it.
+                <span lang="hi" className="mt-1 block text-ink-3">{HELD_HINDI}</span>
+              </p>
+            </div>
           ) : mode === "trust" ? (
             <AuditQueuePanel
               // One value decides both the request and the heading. An
@@ -1013,6 +1036,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               key={`${activeState}:${sku ?? "all"}`}
               stateCode={activeState}
               stateLabel={stateName(activeState)}
+              heldRows={readsRows(user, activeState) ? null : heldNote(user, stateName(activeState))}
               sku={sku}
               skus={skus}
               refreshKey={refreshKey}
@@ -1054,6 +1078,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
             refreshKey={refreshKey}
             siloStates={siloStates}
             outbreakDistricts={outbreakMarks}
+            rowsScope={rowsScope(user)}
             selectedFacilityId={selected?.id ?? null}
             pulse={pulse}
             flyTarget={flyTarget}

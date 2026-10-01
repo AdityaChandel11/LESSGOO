@@ -80,6 +80,9 @@ interface Props {
   siloStates?: string[];
   /** Districts with an active outbreak (fix #59), marked at every zoom. */
   outbreakDistricts?: OutbreakMark[];
+  /** The area whose centres this reader may see (fix #77); null for the
+   *  national role. Elsewhere the district summary stands in for the pins. */
+  rowsScope?: { state: string; district: string | null } | null;
   /** Null until runtime config has loaded. */
   basemap?: { mode: "osm" | "google"; key: string } | null;
   onBasemapFallback?: (reason: string) => void;
@@ -234,6 +237,7 @@ export default function NationalMap({
   initialView = null,
   siloStates,
   outbreakDistricts,
+  rowsScope = null,
   basemap = null,
   onBasemapFallback,
   onView,
@@ -262,11 +266,11 @@ export default function NationalMap({
   // rather than capturing stale ones.
   const props = useRef({
     sku, selectedFacilityId, onView, onSelectFacility, routes, highlightRouteId, onSelectRoute,
-    onBasemapFallback, siloStates,
+    onBasemapFallback, siloStates, rowsScope,
   });
   props.current = {
     sku, selectedFacilityId, onView, onSelectFacility, routes, highlightRouteId, onSelectRoute,
-    onBasemapFallback, siloStates,
+    onBasemapFallback, siloStates, rowsScope,
   };
 
   const skuLabel = () => props.current.sku ?? "all medicines";
@@ -304,6 +308,18 @@ export default function NationalMap({
           .addTo(layer);
       }
       return;
+    }
+
+    // Fix #77: where this reader may not read centres, the district summary
+    // stands in for the pins instead of an empty map.
+    const scope = props.current.rowsScope;
+    for (const b of districtsRef.current) {
+      const readable =
+        !!scope && scope.state === b.parent && (scope.district === null || scope.district === b.label);
+      if (readable) continue;
+      L.marker([b.lat, b.lng], { icon: donutIcon(b, "district"), riseOnHover: true })
+        .bindTooltip(bucketTooltip(b, skuLabel()), { direction: "top", offset: [0, -22] })
+        .addTo(layer);
     }
 
     const selected = props.current.selectedFacilityId;

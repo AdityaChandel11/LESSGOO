@@ -228,6 +228,37 @@ export interface ChaseResult {
   status: string;
 }
 
+/**
+ * Fix #77, mirroring auth.can_read_facility_rows: the area whose centres this
+ * account may read, or null when it reads aggregates only. Facility-level
+ * rows stay with the state that holds them; the national role reads state and
+ * district summaries. A public demo administrator reads its sandbox district,
+ * the one labelled exception, so the drill can run.
+ */
+export function rowsScope(u: User): { state: string; district: string | null } | null {
+  if (u.role === "state_officer" && u.state_silo) return { state: u.state_silo, district: null };
+  if (u.role === "block_mo" && u.state_silo && u.district) return { state: u.state_silo, district: u.district };
+  if (u.role === "admin" && u.demo_sandbox) return { state: u.demo_sandbox.state, district: u.demo_sandbox.district };
+  return null;
+}
+
+/** Whether this account reads centres in that state (and district, if given). */
+export function readsRows(u: User, state: string | null, district?: string | null): boolean {
+  const scope = rowsScope(u);
+  if (!scope || !state || scope.state !== state) return false;
+  return scope.district === null || district == null || scope.district === district;
+}
+
+/** What a reader outside the scope is told instead of the rows. */
+export function heldNote(u: User, stateName: string | null): string {
+  const held = stateName ? `Held in ${stateName}'s store` : "Held in each state's store";
+  if (u.role === "admin") return `${held} — the national view sees district summaries only.`;
+  if (u.role === "block_mo") return `${held} — an officer of ${u.district} district sees district summaries outside it.`;
+  return `${held} — an officer of another state sees district summaries only.`;
+}
+
+export const HELD_HINDI = "केंद्र-स्तर के आँकड़े उसी राज्य के पास रहते हैं; यहाँ केवल ज़िला-स्तर का सार दिखता है।";
+
 export const can = {
   planState: (u: User, state: string) =>
     (u.role === "admin" || (u.role === "state_officer" && u.state_silo === state)) &&
@@ -746,7 +777,8 @@ export interface NextPair {
   /** Centres projected to run out inside the horizon. */
   centres: number;
   first_on: string;
-  first_centre: string;
+  /** Null where the reader may not read that centre's rows (fix #77). */
+  first_centre: string | null;
   by_forecast: number;
   /** Which rule the dates rest on. */
   source: "forecast" | "mixed" | "burn_rate" | "outbreak";
@@ -964,6 +996,8 @@ export interface Movements {
   counts: Record<string, number>;
   short_units: number;
   movements: Movement[];
+  /** Set when the totals are shown without their rows (fix #77). */
+  rows_withheld?: string | null;
 }
 
 export interface Receipt {
@@ -1121,6 +1155,9 @@ export interface LiveEvent {
     | "movement.received";
   facility_id: string;
   facility_name: string;
+  /** The event is about a centre whose rows this reader may not read (fix
+   *  #77): it still arrives, so the screen refreshes, but carries no detail. */
+  withheld?: boolean;
   sku_code?: string;
   qty_on_hand?: number;
   source?: string;
@@ -1398,6 +1435,9 @@ export interface ActiveOutbreak {
   expires_at: string | null;
   facilities: number;
   count_overdue: number;
+  /** Centres that run out inside the horizon; `warnings` names them only
+   *  for a reader who may read that district's rows (fix #77). */
+  warnings_count: number;
   /** Where the district sits on the map; null if it has no anchor. */
   lat: number | null;
   lng: number | null;
@@ -1477,6 +1517,8 @@ export interface OversightShort extends OversightPlace {
 
 export interface Oversight {
   state: string;
+  /** Set when the named lists are withheld and only the counts are shown (fix #77). */
+  rows_withheld?: string | null;
   window_days: number;
   recommended_open: number;
   requests_open: number;

@@ -132,24 +132,6 @@ def can_submit_reading(
     return False
 
 
-def can_view_facility(
-    p: Principal, *, facility_id: str, facility_state: str, facility_district: str
-) -> bool:
-    """Whether this person may open a facility's own workspace.
-
-    The same scope as reporting for it, deliberately. The national picture
-    stays visible to every signed-in user through the map — scope narrows what
-    you may change, never what you may see — but the workspace is not the
-    national picture: it is one centre's working screen, with its open
-    requests and its delivery queue on it, and that belongs to the people
-    responsible for that centre.
-    """
-    return can_submit_reading(
-        p,
-        facility_id=facility_id,
-        facility_state=facility_state,
-        facility_district=facility_district,
-    )
 
 
 # ------------------------------------------------------------ public demo ---
@@ -192,6 +174,72 @@ def demo_may_plan(p: Principal, state: str) -> bool:
     """A plan covers a whole state, so the sandbox's state is the only one a
     demo account may re-plan; single-medicine plans are what the drill runs."""
     return not is_public_demo(p) or state == settings.demo_sandbox_state
+
+
+def can_read_facility_rows(
+    p: Principal, *, state: str, district: str, facility_id: str | None = None
+) -> bool:
+    """Whether this person may read rows about one centre (fix list #77).
+
+    Facility-level rows stay with the state that holds them — that is what
+    "federated" means here, and it has to be true of the API, not only of the
+    training queries. A state's officer reads the centres of their own state,
+    a district officer those of their own district, a centre itself. The
+    national role, and an officer of any other state, read state and district
+    aggregates and model outputs: the challenge asks for national visibility,
+    and an aggregate gives it without a row crossing a state line.
+
+    One labelled exception, the same one every demo rule makes: inside the
+    demo sandbox district a public demo account reads the centres its role
+    oversaw before this rule, so the emergency drill can run. A real national
+    account reads no centre anywhere.
+    """
+    if (
+        p.role == "admin"
+        and is_public_demo(p)
+        and in_demo_sandbox(state, district)
+    ):
+        return True
+    if p.role == "state_officer":
+        return p.state_silo == state
+    if p.role == "block_mo":
+        return p.state_silo == state and p.district == district
+    if p.role == "facility_user":
+        return facility_id is not None and p.facility_id == facility_id
+    return False
+
+
+def held_message(p: Principal, state: str) -> str:
+    """What a reader outside the scope is told instead of the rows."""
+    geo = STATE_BY_CODE.get(state)
+    held = "Held in {0}'s store".format(geo.name if geo else state)
+    if p.role == "admin":
+        return held + " — the national view sees district summaries only."
+    if p.role == "state_officer":
+        own = STATE_BY_CODE.get(p.state_silo or "")
+        return held + " — an officer of {0} sees district summaries outside it.".format(
+            own.name if own else p.state_silo
+        )
+    if p.role == "block_mo":
+        return held + " — an officer of {0} district sees district summaries outside it.".format(
+            p.district
+        )
+    return held + " — a centre sees its own records."
+
+
+def can_view_facility(
+    p: Principal, *, facility_id: str, facility_state: str, facility_district: str
+) -> bool:
+    """Whether this person may open a facility's own workspace.
+
+    The workspace is one centre's working screen, with its open requests and
+    its delivery queue on it: rows about that centre, so it follows the rule
+    for reading them — the centre, its district officer and its state's
+    officer, and not the national role (fix list #77).
+    """
+    return can_read_facility_rows(
+        p, state=facility_state, district=facility_district, facility_id=facility_id
+    )
 
 
 def can_report_facts(

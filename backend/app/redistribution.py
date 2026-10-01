@@ -971,6 +971,8 @@ async def list_transfers(
                 "route_source": t.route_source,
                 "triggered_by": t.triggered_by,
                 "created_at": t.created_at,
+                # Transfers never cross a state line; the receiver's is the trip's.
+                "state": d.state_silo,
                 "rationale": t.rationale or {},
                 "from": {"id": f.id, "name": f.name, "district": f.district, "lat": f.lat, "lng": f.lng},
                 "to": {"id": d.id, "name": d.name, "district": d.district, "lat": d.lat, "lng": d.lng},

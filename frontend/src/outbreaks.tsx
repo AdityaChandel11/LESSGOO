@@ -421,9 +421,11 @@ function ActiveCard({
       </ul>
 
       <p className="mt-1.5 text-[11px] font-medium text-ink-2">
-        {o.warnings.length === 0
+        {o.warnings_count === 0
           ? `No centre runs out within ${ttlDays} days at the outbreak rate.`
-          : `${o.warnings.length} centre–medicine pairs run out within ${ttlDays} days at the outbreak rate:`}
+          : o.warnings.length === 0
+            ? `${o.warnings_count} centre–medicine pairs run out within ${ttlDays} days at the outbreak rate. The centres are named to ${o.district}'s own officers.`
+            : `${o.warnings.length} centre–medicine pairs run out within ${ttlDays} days at the outbreak rate:`}
       </p>
       {shown.length > 0 && (
         <ul className="mt-0.5 flex flex-col gap-0.5">

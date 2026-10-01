@@ -30,6 +30,7 @@ DEMO_ADMIN = Principal(1, "admin@demo.swasthsetu.in", "Platform Admin", "admin",
 DEMO_STATE = Principal(2, "mh.officer@demo.swasthsetu.in", "MH officer", "state_officer", "MH", None, None, None)
 REAL_ADMIN = Principal(3, "admin@health.example", "Admin", "admin", None, None, None, None)
 REAL_STATE = Principal(4, "mh@health.example", "MH officer", "state_officer", "MH", None, None, None)
+REAL_RJ = Principal(5, "rj@health.example", "RJ officer", "state_officer", "RJ", None, None, None)
 
 
 def _facility(fid: str, state: str, district: str) -> Facility:
@@ -155,11 +156,13 @@ def test_a_demo_stock_report_inside_the_sandbox_goes_through():
     passes_guard(api.submit_reading(body, session=FakeSession(NASHIK), user=DEMO_STATE))
 
 
-def test_a_real_admin_is_not_confined_by_the_demo_rule():
+def test_a_real_officer_is_not_confined_by_the_demo_rule():
     # A stock request, not a stock report: since fix #74 no officer reports a
     # centre's facts at all, so that endpoint cannot show this rule on its own.
+    # Rajasthan's own officer, because since fix #77 the national role does
+    # not open a centre anywhere.
     body = api.RequestIn(sku_code="ORS", from_facility=JAIPUR_B.id, qty=10)
-    passes_guard(api.create_request(JAIPUR.id, body, session=FakeSession(JAIPUR), user=REAL_ADMIN))
+    passes_guard(api.create_request(JAIPUR.id, body, session=FakeSession(JAIPUR), user=REAL_RJ))
 
 
 def test_a_demo_stock_photo_outside_the_sandbox_is_refused():

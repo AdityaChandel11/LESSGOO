@@ -36,8 +36,14 @@ def _capture(monkeypatch) -> dict:
 
 def test_the_officer_drawer_scores_the_centre_live(monkeypatch):
     seen = _capture(monkeypatch)
+
+    async def readable(session, facility_id, user):
+        return type("F", (), {"id": facility_id})()
+
+    # Who may open the drawer is fix #77's rule, tested in test_governance_tiers.
+    monkeypatch.setattr(api, "_readable_facility", readable)
     with pytest.raises(HTTPException):
-        asyncio.run(api.get_facility("HFR-MH-PHC-00001", session=object()))
+        asyncio.run(api.get_facility("HFR-MH-PHC-00001", session=object(), user=None))
     assert seen["live_trust"] is True
 
 

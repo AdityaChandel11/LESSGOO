@@ -280,6 +280,8 @@ export function MovementsPanel({
 
   const counts = data?.counts ?? {};
   const rows = data?.movements ?? [];
+  // Fix #77: the totals above are an aggregate; the rows are each state's own.
+  const withheld = data?.rows_withheld ?? null;
 
   const confirm = useMemo(
     () => (m: Movement) => async (qty: number, note: string) => {
@@ -349,6 +351,10 @@ export function MovementsPanel({
           <p className="p-3 text-[12.5px] text-crit">{error}</p>
         ) : loading && rows.length === 0 ? (
           <p className="p-3 text-[12.5px] text-ink-3">Loading the ledger…</p>
+        ) : withheld ? (
+          <p role="note" className="m-3 rounded border border-line bg-canvas px-3 py-2 text-[12.5px] leading-snug text-ink-2">
+            {withheld} The totals above are shown; each consignment is a row about one centre.
+          </p>
         ) : rows.length === 0 ? (
           <p className="p-3 text-[12.5px] text-ink-2">
             {view === "attention"

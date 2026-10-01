@@ -16,6 +16,10 @@ from app import api, redistribution, trust, vision
 from app.auth import Principal
 
 
+# A trip's figures are its two centres' rows (fix #77): the state's officer asks.
+OFFICER = Principal(1, "mh@example.org", "MH officer", "state_officer", "MH", None, None, None)
+
+
 @pytest.fixture(autouse=True)
 def _fresh_cache():
     vision.clear_explanation_cache()
@@ -43,6 +47,7 @@ def _trip(**rationale) -> dict:
     base.update(rationale)
     return {
         "id": 1,
+        "state": "MH",
         "sku_name": "ORS",
         "unit": "sachet",
         "qty": 414.0,
@@ -191,7 +196,7 @@ def test_with_the_model_off_a_trip_gets_the_rules_line_unlabelled(monkeypatch):
         return [_trip()]
 
     monkeypatch.setattr(redistribution, "list_transfers", rows)
-    out = asyncio.run(api.explain_trip(api.TripExplainIn(transfer_ids=[1]), session=None))
+    out = asyncio.run(api.explain_trip(api.TripExplainIn(transfer_ids=[1]), session=None, user=OFFICER))
     assert out.source == "rules" and out.ai is False and out.model is None
     assert out.text.startswith("Nanded PHC 26 has less than 1 day of ORS")
 
@@ -205,7 +210,7 @@ def test_transfers_from_two_trips_are_refused(monkeypatch):
 
     monkeypatch.setattr(redistribution, "list_transfers", rows)
     with pytest.raises(api.HTTPException) as exc:
-        asyncio.run(api.explain_trip(api.TripExplainIn(transfer_ids=[1, 2]), session=None))
+        asyncio.run(api.explain_trip(api.TripExplainIn(transfer_ids=[1, 2]), session=None, user=OFFICER))
     assert exc.value.status_code == 422
 
 
@@ -219,5 +224,5 @@ def test_a_model_failure_falls_back_and_says_why(monkeypatch):
     monkeypatch.setattr(redistribution, "list_transfers", rows)
     monkeypatch.setattr(vision, "explanation_available", lambda: True)
     monkeypatch.setattr(vision, "explain_transfer", refuses)
-    out = asyncio.run(api.explain_trip(api.TripExplainIn(transfer_ids=[1]), session=None))
+    out = asyncio.run(api.explain_trip(api.TripExplainIn(transfer_ids=[1]), session=None, user=OFFICER))
     assert out.ai is False and "quota" in (out.note or "")
