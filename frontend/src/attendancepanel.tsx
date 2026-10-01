@@ -10,6 +10,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { ApiError, api, type Attendance, type User, can } from "./api";
+import { ChaseButton } from "./chase";
 
 const METHOD_LABEL: Record<string, string> = {
   gps: "phone GPS",
@@ -120,6 +121,13 @@ export function AttendancePanel({
         </p>
       )}
 
+      {mayReport && demoMode && user.role !== "facility_user" && (
+        // The labelled sandbox exception (fix #74): outside the public demo's
+        // sandbox, no officer checks a centre's staff in.
+        <p className="mt-2 text-[11px] text-ink-3">
+          Demo, sandbox only: these buttons act for the centre's staff, which an officer cannot do.
+        </p>
+      )}
       {mayReport && demoMode && (
         <div className="mt-2 flex flex-wrap gap-1.5">
           <button
@@ -139,6 +147,9 @@ export function AttendancePanel({
             {busy === "ivr" ? "Sending…" : "Check in by phone call"}
           </button>
         </div>
+      )}
+      {can.chase(user, facility) && (
+        <ChaseButton facilityId={facilityId} topic="checkin" label="Chase today's check-ins · उपस्थिति की याद दिलाएँ" />
       )}
       {error && <p className="mt-1.5 text-[11.5px] text-crit">{error}</p>}
     </div>

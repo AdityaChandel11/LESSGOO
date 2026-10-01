@@ -52,6 +52,28 @@ WEIGHTS = {
     "verification_quality": 0.10,
 }
 
+# Fix #60: a signal is scored only on at least this many observations. Below
+# it the signal is listed as not scored and moves nothing: three shifts with
+# no patients logged is an afternoon, not a pattern.
+MIN_OBSERVATIONS = {
+    "attendance_vs_footfall": 5,
+    "consumption_vs_footfall": 5,
+    "beds_vs_register": 3,
+    "receipt_discipline": 3,
+    "implausible_smoothness": 8,
+    "verification_quality": 3,
+}
+# What one observation is, singular and plural, for "based on 12 shifts".
+SAMPLE_UNIT = {
+    "attendance_vs_footfall": ("shift", "shifts"),
+    "consumption_vs_footfall": ("stock report", "stock reports"),
+    "beds_vs_register": ("ward report", "ward reports"),
+    "receipt_discipline": ("consignment", "consignments"),
+    "implausible_smoothness": ("stock report", "stock reports"),
+    "verification_quality": ("ward report", "ward reports"),
+}
+RECEIPT_WINDOW_DAYS = 60
+
 GOOD, WATCH, AUDIT = "good", "watch", "audit"
 
 
@@ -105,10 +127,18 @@ class Component:
     # link that opens exactly those rows, because a score an officer cannot
     # click through to is a score they have to take on faith.
     evidence: dict | None = None
+    # How many observations the sentence rests on (fix #60).
+    sample: int | None = None
+    # False when there were too few to score: listed, and worth nothing.
+    scored: bool = True
 
     @property
     def contribution(self) -> float:
-        return round(self.penalty * self.weight, 4)
+        return round(self.penalty * self.weight, 4) if self.scored else 0.0
+
+    @property
+    def basis(self) -> str | None:
+        return basis(self.signal, self.sample) if self.sample is not None and self.scored else None
 
 
 @dataclass
@@ -127,16 +157,75 @@ class Score:
                 "cost": c.contribution,
                 "reason": c.reason,
                 "evidence": c.evidence,
+                "sample": c.sample,
+                "basis": c.basis,
+                "scored": c.scored,
             }
             for c in self.components
         ]
 
 
 def _component(
-    signal: str, penalty: float, reason: str, evidence: dict | None = None
+    signal: str,
+    penalty: float,
+    reason: str,
+    evidence: dict | None = None,
+    sample: int | None = None,
 ) -> Component:
     return Component(
-        signal, max(0.0, min(1.0, penalty)), WEIGHTS[signal], reason, evidence
+        signal, max(0.0, min(1.0, penalty)), WEIGHTS[signal], reason, evidence, sample
+    )
+
+
+def _window_days(signal: str) -> int:
+    return RECEIPT_WINDOW_DAYS if signal == "receipt_discipline" else WINDOW_DAYS
+
+
+def _observations(signal: str, n: int) -> str:
+    one, many = SAMPLE_UNIT[signal]
+    return "{0} {1} in the last {2} days".format(n, one if n == 1 else many, _window_days(signal))
+
+
+def enough(signal: str, n: int) -> bool:
+    """Whether a signal has enough observations to be scored (fix #60)."""
+    return n >= MIN_OBSERVATIONS[signal]
+
+
+def basis(signal: str, n: int) -> str:
+    return "Based on {0}.".format(_observations(signal, n))
+
+
+def not_scored(signal: str, n: int) -> Component:
+    """A signal with too few observations: on the list, out of the score."""
+    return Component(
+        signal, 0.0, WEIGHTS[signal],
+        "Not scored: {0}, and at least {1} are needed.".format(
+            _observations(signal, n), MIN_OBSERVATIONS[signal]
+        ),
+        None, n, False,
+    )
+
+
+def combine(facility_id: str, components: list[Component]) -> Score | None:
+    """One centre's score from its signals, or None when nothing could be
+    scored — absence of evidence is not a good score.
+
+    Scored only against the signals a centre actually has, so a centre with no
+    beds is not penalised for having no ward photos. A signal with too few
+    observations is listed after the scored ones and costs nothing.
+    """
+    scored = [c for c in components if c.scored]
+    if not scored:
+        return None
+    available = sum(c.weight for c in scored)
+    cost = sum(c.contribution for c in scored)
+    score = round(max(0.0, 1.0 - (cost / available if available else 0.0)), 3)
+    return Score(
+        facility_id=facility_id,
+        score=score,
+        band=band_for(score),
+        components=sorted(scored, key=lambda c: -c.contribution)
+        + [c for c in components if not c.scored],
     )
 
 
@@ -170,11 +259,15 @@ async def _attendance_vs_footfall(
     for fid, checkins, no_patients, verified, checked in rows:
         if not checkins:
             continue
+        if not enough("attendance_vs_footfall", checkins):
+            out[fid] = not_scored("attendance_vs_footfall", checkins)
+            continue
         share = no_patients / checkins
         if share <= 0.2:
             out[fid] = _component(
                 "attendance_vs_footfall", 0.0,
                 "Attendance and patient numbers move together.",
+                sample=checkins,
             )
             continue
         out[fid] = _component(
@@ -184,6 +277,7 @@ async def _attendance_vs_footfall(
             min(1.0, (share - 0.2) / 0.3),
             f"Staff recorded present on {no_patients} of {checkins} shifts where no "
             f"patients were logged at all.",
+            sample=checkins,
         )
         if checked and verified / checked < 0.5:
             # Recorded separately below under verification quality.
@@ -220,13 +314,15 @@ async def _consumption_vs_footfall(
 
     out: dict[str, Component] = {}
     for fid, readings, no_patients, _distinct in rows:
-        if readings < 5:
+        if not enough("consumption_vs_footfall", readings):
+            out[fid] = not_scored("consumption_vs_footfall", readings)
             continue
         share = no_patients / readings
         if share <= 0.3:
             out[fid] = _component(
                 "consumption_vs_footfall", 0.0,
                 "Medicine use tracks the patients seen.",
+                sample=readings,
             )
         else:
             out[fid] = _component(
@@ -234,6 +330,7 @@ async def _consumption_vs_footfall(
                 min(1.0, (share - 0.3) / 0.4),
                 f"Stock reported on {no_patients} of {readings} days with no patient "
                 f"footfall recorded.",
+                sample=readings,
             )
     return out
 
@@ -265,7 +362,8 @@ async def _beds_vs_register(
 
     out: dict[str, Component] = {}
     for fid, reports, disputed in rows:
-        if reports < 3:
+        if not enough("beds_vs_register", reports):
+            out[fid] = not_scored("beds_vs_register", reports)
             continue
         share = disputed / reports
         out[fid] = _component(
@@ -275,6 +373,7 @@ async def _beds_vs_register(
             if share < 0.1
             else f"The bed count disputed the admission register on {disputed} of "
             f"{reports} days.",
+            sample=reports,
         )
     return out
 
@@ -296,7 +395,7 @@ async def _receipt_discipline(
                 func.count().filter(MedicineMovement.status == "short").label("short"),
             )
             .where(
-                MedicineMovement.dispatched_at >= now - timedelta(days=60),
+                MedicineMovement.dispatched_at >= now - timedelta(days=RECEIPT_WINDOW_DAYS),
                 MedicineMovement.to_facility.in_(ids),
             )
             .group_by(MedicineMovement.to_facility)
@@ -305,7 +404,8 @@ async def _receipt_discipline(
 
     out: dict[str, Component] = {}
     for fid, total, overdue, short in rows:
-        if total < 2:
+        if not enough("receipt_discipline", total):
+            out[fid] = not_scored("receipt_discipline", total)
             continue
         # An unconfirmed batch weighs more than a short one: a short delivery
         # was at least reported, which is the behaviour we want.
@@ -328,6 +428,7 @@ async def _receipt_discipline(
             evidence={"tab": "movements", "facility": fid, "view": "attention"}
             if (overdue or short)
             else None,
+            sample=total,
         )
     return out
 
@@ -364,7 +465,8 @@ async def _implausible_smoothness(
 
     out: dict[str, Component] = {}
     for fid, readings, round_numbers, distinct_qty in rows:
-        if readings < 8:
+        if not enough("implausible_smoothness", readings):
+            out[fid] = not_scored("implausible_smoothness", readings)
             continue
         roundness = round_numbers / readings
         variety = distinct_qty / readings
@@ -379,6 +481,7 @@ async def _implausible_smoothness(
             if penalty < 0.05
             else f"{round(roundness * 100)}% of reported figures are round numbers and "
             f"only {distinct_qty} distinct values appear in {readings} reports.",
+            sample=readings,
         )
     return out
 
@@ -429,7 +532,8 @@ async def _verification_quality(
 
     out: dict[str, Component] = {}
     for fid, reports, verified, rejected in bed_rows:
-        if reports < 3:
+        if not enough("verification_quality", reports):
+            out[fid] = not_scored("verification_quality", reports)
             continue
         verified_share = verified / reports
         geofence_rate = checkin_rows.get(fid)
@@ -447,6 +551,7 @@ async def _verification_quality(
             else f"{verified} of {reports} ward photos verified"
             + (f", {rejected} rejected" if rejected else "")
             + ("; no channel here can supply a location." if geofence_rate is None else "."),
+            sample=reports,
         )
     return out
 
@@ -482,22 +587,8 @@ async def compute(session: AsyncSession, scope: Scope = Scope()) -> list[Score]:
         for fid, component in signal.items():
             by_facility.setdefault(fid, []).append(component)
 
-    scores: list[Score] = []
-    for fid, components in by_facility.items():
-        # Score only against the signals a facility actually has, so a facility
-        # with no beds is not penalised for having no bed photos.
-        available = sum(c.weight for c in components)
-        cost = sum(c.contribution for c in components)
-        score = round(max(0.0, 1.0 - (cost / available if available else 0.0)), 3)
-        scores.append(
-            Score(
-                facility_id=fid,
-                score=score,
-                band=band_for(score),
-                components=sorted(components, key=lambda c: -c.contribution),
-            )
-        )
-    return scores
+    scores = [combine(fid, components) for fid, components in by_facility.items()]
+    return [s for s in scores if s is not None]
 
 
 async def store(session: AsyncSession, scores: list[Score]) -> int:
@@ -598,13 +689,13 @@ def why_rows(score: Score) -> list[str]:
     return [
         f"{c.signal.replace('_', ' ')}: {c.reason}"
         for c in score.components
-        if c.penalty >= 0.05
+        if c.scored and c.penalty >= 0.05
     ]
 
 
 def rules_why(score: Score) -> str:
     """The same finding without a model: the two clearest sentences, verbatim."""
-    flagged = [c for c in score.components if c.penalty >= 0.05]
+    flagged = [c for c in score.components if c.scored and c.penalty >= 0.05]
     if not flagged:
         return "Its signals agree with each other."
     text = " ".join(c.reason for c in flagged[:2])

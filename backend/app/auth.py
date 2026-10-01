@@ -7,12 +7,17 @@ rather than when its token expires.
 
 Roles and what they may *change* (every signed-in user may *view* everything):
 
-    admin          everything
-    state_officer  plans and decisions for transfers inside their state;
-                   stock corrections for facilities in their state
-    block_mo       decisions for transfers where both facilities are in their
-                   district; stock reports for facilities in their district
-    facility_user  stock reports for their own facility only
+    admin          plans for any state; decisions on any transfer
+    state_officer  plans for their own state
+    block_mo       nothing beyond viewing and chasing their district's centres
+    facility_user  facts about their own facility — stock, deliveries
+                   received, staff check-ins, beds — and decisions on
+                   transfers out of it
+
+Facts about a centre are reported only by the centre itself (fix list #74):
+officers view them and chase the centre for them. A public demo account may
+act for a centre inside the demo sandbox, and only there — see
+can_report_facts and demo_may_write.
 """
 
 from __future__ import annotations
@@ -29,9 +34,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
 from .db import get_session
+from .geo import STATE_BY_CODE
 from .models import LoginFailure, User
 
 DEMO_EMAIL_DOMAIN = "@demo.swasthsetu.in"
+# The neighbouring centre's pharmacist, so a request can be shown from both
+# ends in two windows (fix list #36). Created by `scripts.users demo`.
+DEMO_DONOR_EMAIL = "donor.pharmacist" + DEMO_EMAIL_DOMAIN
 
 _hasher = PasswordHash.recommended()
 # Verified against when the email is unknown, so a failed sign-in takes the
@@ -99,11 +108,11 @@ def can_decide_transfer(
 
     Stock leaves a shelf only when the staff of the centre that holds it say
     yes, so the human approval of spec 1.6 sits with the donor. District and
-    state officers see every transfer on the dashboard but do not decide them.
-    The platform administrator can act on any transfer.
+    state officers and the platform administrator see every transfer and act
+    on exceptions; none of them approves a routine trip (fix #39, decision
+    recorded in the fix list). The labelled sandbox drill is the one place an
+    officer acts for the donor, and api._decide grants that, not this rule.
     """
-    if p.role == "admin":
-        return True
     if p.role == "facility_user":
         return from_facility is not None and p.facility_id == from_facility
     return False
@@ -123,24 +132,154 @@ def can_submit_reading(
     return False
 
 
+
+
+# ------------------------------------------------------------ public demo ---
+# A public showcase lets anyone into a demo account without a password, so a
+# demo account is a stranger. Outside one sandbox district it may look but not
+# change anything: the deployed database is small and shared by every visitor,
+# and a stranger painting centres red in another state is vandalism, not a
+# demo. Real accounts are untouched by every rule in this block.
+
+
+def is_public_demo(p: Principal) -> bool:
+    return settings.demo_mode and p.email.lower().endswith(DEMO_EMAIL_DOMAIN)
+
+
+def in_demo_sandbox(state: str, district: str) -> bool:
+    return state == settings.demo_sandbox_state and district == settings.demo_sandbox_district
+
+
+def _sandbox_state_name() -> str:
+    state = STATE_BY_CODE.get(settings.demo_sandbox_state)
+    return state.name if state else settings.demo_sandbox_state
+
+
+def demo_sandbox_label() -> str:
+    return "{0}, {1}".format(settings.demo_sandbox_district, _sandbox_state_name())
+
+
+def demo_sandbox_refusal() -> str:
+    return (
+        "Public demo: changes are limited to the {0} sandbox in {1}. "
+        "Everything else is view-only."
+    ).format(settings.demo_sandbox_district, _sandbox_state_name())
+
+
+def demo_may_write(p: Principal, *, state: str, district: str) -> bool:
+    return not is_public_demo(p) or in_demo_sandbox(state, district)
+
+
+def demo_may_plan(p: Principal, state: str) -> bool:
+    """A plan covers a whole state, so the sandbox's state is the only one a
+    demo account may re-plan; single-medicine plans are what the drill runs."""
+    return not is_public_demo(p) or state == settings.demo_sandbox_state
+
+
+def can_read_facility_rows(
+    p: Principal, *, state: str, district: str, facility_id: str | None = None
+) -> bool:
+    """Whether this person may read rows about one centre (fix list #77).
+
+    Facility-level rows stay with the state that holds them — that is what
+    "federated" means here, and it has to be true of the API, not only of the
+    training queries. A state's officer reads the centres of their own state,
+    a district officer those of their own district, a centre itself. The
+    national role, and an officer of any other state, read state and district
+    aggregates and model outputs: the challenge asks for national visibility,
+    and an aggregate gives it without a row crossing a state line.
+
+    One labelled exception, the same one every demo rule makes: inside the
+    demo sandbox district a public demo account reads the centres its role
+    oversaw before this rule, so the emergency drill can run. A real national
+    account reads no centre anywhere.
+    """
+    if (
+        p.role == "admin"
+        and is_public_demo(p)
+        and in_demo_sandbox(state, district)
+    ):
+        return True
+    if p.role == "state_officer":
+        return p.state_silo == state
+    if p.role == "block_mo":
+        return p.state_silo == state and p.district == district
+    if p.role == "facility_user":
+        return facility_id is not None and p.facility_id == facility_id
+    return False
+
+
+def held_message(p: Principal, state: str) -> str:
+    """What a reader outside the scope is told instead of the rows."""
+    geo = STATE_BY_CODE.get(state)
+    held = "Held in {0}'s store".format(geo.name if geo else state)
+    if p.role == "admin":
+        return held + " — the national view sees district summaries only."
+    if p.role == "state_officer":
+        own = STATE_BY_CODE.get(p.state_silo or "")
+        return held + " — an officer of {0} sees district summaries outside it.".format(
+            own.name if own else p.state_silo
+        )
+    if p.role == "block_mo":
+        return held + " — an officer of {0} district sees district summaries outside it.".format(
+            p.district
+        )
+    return held + " — a centre sees its own records."
+
+
 def can_view_facility(
     p: Principal, *, facility_id: str, facility_state: str, facility_district: str
 ) -> bool:
     """Whether this person may open a facility's own workspace.
 
-    The same scope as reporting for it, deliberately. The national picture
-    stays visible to every signed-in user through the map — scope narrows what
-    you may change, never what you may see — but the workspace is not the
-    national picture: it is one centre's working screen, with its open
-    requests and its delivery queue on it, and that belongs to the people
-    responsible for that centre.
+    The workspace is one centre's working screen, with its open requests and
+    its delivery queue on it: rows about that centre, so it follows the rule
+    for reading them — the centre, its district officer and its state's
+    officer, and not the national role (fix list #77).
     """
-    return can_submit_reading(
-        p,
-        facility_id=facility_id,
-        facility_state=facility_state,
-        facility_district=facility_district,
+    return can_read_facility_rows(
+        p, state=facility_state, district=facility_district, facility_id=facility_id
     )
+
+
+def can_report_facts(
+    p: Principal, *, facility_id: str, facility_state: str, facility_district: str
+) -> bool:
+    """Who may state a fact about a centre: its stock, a delivery's arrival, a
+    staff check-in, a ward's beds.
+
+    The centre itself, and nobody else. The two-sided ledger and the
+    attendance checks exist because the other side cannot settle these; an
+    officer who could confirm a centre's delivery or check its staff in would
+    be both sides at once (fix list #74). Officers view and chase instead.
+
+    The one exception is labelled on screen: in the public demo, a demo
+    account may act for a centre inside the sandbox — the emergency drill and
+    the console's demo buttons — still within its own role's area.
+    """
+    if p.role == "facility_user":
+        return p.facility_id == facility_id
+    return (
+        is_public_demo(p)
+        and in_demo_sandbox(facility_state, facility_district)
+        and can_submit_reading(
+            p,
+            facility_id=facility_id,
+            facility_state=facility_state,
+            facility_district=facility_district,
+        )
+    )
+
+
+def next_full_plan_at(
+    last_run: datetime | None, now: datetime, interval_minutes: float
+) -> datetime | None:
+    """When a demo account may start the next all-medicine plan for a state,
+    or None if it may start one now."""
+    if last_run is None:
+        return None
+    allowed = last_run + timedelta(minutes=interval_minutes)
+    return allowed if allowed > now else None
 
 
 # ==================================================================== tokens ===
@@ -299,6 +438,12 @@ class LoginIn(BaseModel):
     password: str
 
 
+class DemoSandboxOut(BaseModel):
+    state: str
+    district: str
+    label: str
+
+
 class UserOut(BaseModel):
     id: int
     email: str
@@ -311,6 +456,9 @@ class UserOut(BaseModel):
     # decide whether to offer the tab. The pseudonymous reference itself stays
     # on the server: the client has no use for it and nothing to do with it.
     has_staff_record: bool = False
+    # Set only for a public demo account: the one district it may change. The
+    # browser mirrors demo_may_write with it so no button offers a 403.
+    demo_sandbox: DemoSandboxOut | None = None
 
 
 class SessionOut(BaseModel):
@@ -328,6 +476,15 @@ def _session_out(p: Principal) -> SessionOut:
             # shown a synthetic, labelled record (attendance.synthetic_record).
             has_staff_record=p.staff_ref is not None
             or (settings.demo_mode and p.role == "facility_user" and p.facility_id is not None),
+            demo_sandbox=(
+                DemoSandboxOut(
+                    state=settings.demo_sandbox_state,
+                    district=settings.demo_sandbox_district,
+                    label=demo_sandbox_label(),
+                )
+                if is_public_demo(p)
+                else None
+            ),
         ),
         demo_mode=settings.demo_mode,
         environment=settings.environment,
@@ -399,6 +556,34 @@ class DemoAccountOut(BaseModel):
     name: str
     role: str
     scope: str
+    # What you will see behind this card, in a line (fix list #72).
+    sees: str = ""
+
+
+_DEMO_ROLE_ORDER = {"admin": 0, "state_officer": 1, "block_mo": 2, "facility_user": 3}
+
+
+def demo_account_order(u) -> tuple:
+    """Admin, state, district, then the pharmacist before the donor centre."""
+    return (_DEMO_ROLE_ORDER.get(u.role, 9), u.email == DEMO_DONOR_EMAIL, u.name)
+
+
+def demo_account_sees(
+    *, role: str, email: str, name: str, state: str | None, district: str | None
+) -> str:
+    """One line on a demo role card: what that person sees, not who they are."""
+    if role == "admin":
+        return "Every state: federation, outbreaks, redistribution oversight, data trust"
+    if role == "state_officer":
+        s = STATE_BY_CODE.get(state or "")
+        return "{0}: recommendations, outbreak warnings, which centres to visit".format(
+            s.name if s else state
+        )
+    if role == "block_mo":
+        return "{0}: its centres, deliveries in transit, spot checks".format(district)
+    if email == DEMO_DONOR_EMAIL:
+        return "The neighbouring centre, for the two-screen demo: answers requests for its stock"
+    return "Demo PHC interface: stock, orders, beds and attendance on a phone-style screen"
 
 
 class DemoLoginIn(BaseModel):
@@ -413,21 +598,25 @@ def _require_demo() -> None:
 @router.get("/demo-accounts", response_model=list[DemoAccountOut])
 async def demo_accounts(session: AsyncSession = Depends(get_session)) -> list[DemoAccountOut]:
     _require_demo()
-    order = {"admin": 0, "state_officer": 1, "block_mo": 2, "facility_user": 3}
     users = (
         await session.execute(
             select(User).where(User.email.like(f"%{DEMO_EMAIL_DOMAIN}"), User.is_active.is_(True))
         )
     ).scalars().all()
     out = []
-    for u in sorted(users, key=lambda u: order.get(u.role, 9)):
+    for u in sorted(users, key=demo_account_order):
         scope = (
             "All of India" if u.role == "admin"
             else u.state_silo if u.role == "state_officer"
             else f"{u.district}, {u.state_silo}" if u.role == "block_mo"
             else u.facility_id or ""
         )
-        out.append(DemoAccountOut(email=u.email, name=u.name, role=u.role, scope=scope or ""))
+        sees = demo_account_sees(
+            role=u.role, email=u.email, name=u.name, state=u.state_silo, district=u.district
+        )
+        out.append(
+            DemoAccountOut(email=u.email, name=u.name, role=u.role, scope=scope or "", sees=sees)
+        )
     return out
 
 

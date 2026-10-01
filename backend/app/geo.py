@@ -4,8 +4,8 @@ Two consumers: the seeder places facilities against these anchors, and the
 aggregation layer uses the centroids to position state bubbles on the map.
 
 HONESTY NOTE for the pitch: every coordinate here is a real city or district
-headquarters. `facilities` is a proportional *sample* of each state's published
-PHC count (roughly 12%), not the real count — enough to make national zoom feel
+headquarters. `facilities` is a *sample* per state, not the real count — enough
+to make national zoom feel
 real without seeding 38,000 rows. Real network size, per Rural Health
 Statistics, is ~31,900 PHCs and ~6,400 CHCs; state the sample ratio out loud
 rather than implying full coverage.
@@ -248,6 +248,18 @@ INDIA_STATES: list[StateGeo] = [
 ]
 
 STATE_BY_CODE: dict[str, StateGeo] = {s.code: s for s in INDIA_STATES}
+
+
+def district_anchor(state_code: str, district: str) -> tuple[float, float] | None:
+    """Where a district sits on the map: its anchor, or None if the network
+    has no such district."""
+    state = STATE_BY_CODE.get(state_code)
+    if state is None:
+        return None
+    for name, lat, lng in state.anchors:
+        if name.lower() == district.lower():
+            return lat, lng
+    return None
 
 TOTAL_SEEDED_FACILITIES = sum(s.facilities for s in INDIA_STATES)
 

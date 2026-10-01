@@ -25,21 +25,23 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass, field, replace
+from datetime import date, datetime, timedelta, timezone
 from typing import Literal
 
 import numpy as np
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from . import maps, movements
+from . import maps, movements, outbreak, services
+from .movements import OPEN as MOVEMENT_OPEN, RECEIVED as MOVEMENT_RECEIVED, SHORT as MOVEMENT_SHORT
 from .config import settings
 from .models import (
     Approval,
     Facility,
     FacilitySkuState,
+    MedicineMovement,
     Sku,
     StockReading,
     Transfer,
@@ -63,6 +65,93 @@ class StockNode:
     burn: float
     days: float | None
     status: str
+
+
+@dataclass(frozen=True)
+class Promise:
+    """Stock already asked for in an open request: it leaves `from_id` and
+    reaches `to_id` if the donor says yes."""
+
+    from_id: str
+    to_id: str
+    qty: float
+
+
+# Only the solver's own proposals are a re-plan's to replace. A centre's own
+# request (FACILITY_REQUEST), and anything of unknown origin, is work
+# somebody is waiting on, and a re-plan leaves it alone (fix list #37).
+SOLVER_PROPOSAL = "threshold"
+# A transfer a pharmacist asked for. Written on insert and read by the caps,
+# the reply window and the sandbox cleanup, so it is spelled once, here.
+FACILITY_REQUEST = "facility_request"
+
+INDIA = timezone(timedelta(hours=5, minutes=30))
+
+
+def request_window() -> timedelta:
+    """How long a centre's request waits for the donor's reply (fix list #31)."""
+    if settings.demo_mode:
+        return timedelta(minutes=settings.demo_request_reply_minutes)
+    return timedelta(hours=settings.request_reply_hours)
+
+
+def request_lapsed(created_at: datetime, now: datetime, window: timedelta) -> bool:
+    """A request nobody answered in time. Derived, like a movement's
+    "overdue": nothing writes it, so nothing has to keep it true."""
+    return created_at + window <= now
+
+
+def lapsed_message(lapsed_at: datetime, requester: str) -> str:
+    return (
+        "This request lapsed at {0} (India time) with no reply. Ask {1} to send it again."
+    ).format(lapsed_at.astimezone(INDIA).strftime("%H:%M"), requester)
+
+
+def replaceable_on_replan(triggered_by: str | None) -> bool:
+    return triggered_by == SOLVER_PROPOSAL
+
+
+def after_promises(nodes: list[StockNode], promises: list[Promise]) -> list[StockNode]:
+    """Each centre's stock as the solver should see it: a donor's less what it
+    has already been asked for, a receiver's plus what is already owed to it.
+
+    Without this the solver can offer the same spare stock twice — against
+    spec 12.3's "never propose taking a donor below its own safety stock" —
+    and plan a second delivery to a centre whose first is still pending.
+    Status is re-derived from the adjusted cover with no trust multiplier; it
+    only orders and weights recipients, and never decides eligibility.
+    """
+    outgoing: dict[str, float] = defaultdict(float)
+    incoming: dict[str, float] = defaultdict(float)
+    for p in promises:
+        outgoing[p.from_id] += p.qty
+        incoming[p.to_id] += p.qty
+    adjusted: list[StockNode] = []
+    for n in nodes:
+        qty = max(0.0, n.qty - outgoing.get(n.facility_id, 0.0) + incoming.get(n.facility_id, 0.0))
+        if qty == n.qty:
+            adjusted.append(n)
+            continue
+        days = qty / n.burn if n.burn > 0 else n.days
+        adjusted.append(replace(n, qty=qty, days=days, status=services.classify(days)))
+    return adjusted
+
+
+def replacement_note(
+    key: tuple[str, str, str], replaced: dict[tuple[str, str, str], int], at: datetime
+) -> dict:
+    """What a new proposal carries when it repeats one the re-plan removed
+    (same donor, receiver and medicine), so the donor sees it was updated
+    rather than finding a different card under their thumb."""
+    old = replaced.get(key)
+    return {} if old is None else {"replaces_transfer": old, "updated_at": at.isoformat()}
+
+
+def replaced_message(at: datetime) -> str:
+    return (
+        "This recommendation was replaced when the plan was recomputed at {0} (India "
+        "time). The list now shows the current one."
+    ).format(at.astimezone(INDIA).strftime("%H:%M"))
 
 
 @dataclass(frozen=True)
@@ -408,6 +497,327 @@ def _refresh_plan_outcomes(
         p.rationale["donor_days_after_plan"] = round((d.qty - sum(x.qty for x in outs)) / d.burn, 2)
 
 
+def _outbreak_note(
+    p: Proposal,
+    surges: dict[tuple[str, str], "outbreak.Surge"],
+    unsurged: dict[tuple[str, str], StockNode],
+) -> dict:
+    """Why a trip is pre-positioning: which outbreak, how big, on what basis,
+    and the recipient's cover without it."""
+    surge = surges.get((p.to_id, p.sku_code))
+    if surge is None:
+        return {}
+    base = unsurged.get((p.to_id, p.sku_code))
+    days = round(base.qty / base.burn, 2) if base is not None and base.burn > 0 else None
+    return {"outbreak": surge.rationale(days)}
+
+
+# ================================================= oversight (fix #39) ===
+# The Redistribution tab is oversight, not an approval queue: the donor
+# centre decides every trip, and officers watch the pipeline and act on its
+# exceptions. Everything below is counted from the rows, bounded by one state
+# and OVERSIGHT_DAYS.
+
+OVERSIGHT_DAYS = 30
+
+
+def pipeline(transfers: list[dict], movements: list[dict]) -> dict[str, int]:
+    """Where every recommendation and request of the window stands now."""
+    by_status = defaultdict(int)
+    for t in transfers:
+        by_status[t["status"]] += 1
+    moved = defaultdict(int)
+    for m in movements:
+        moved[m["status"]] += 1
+    return {
+        "recommended": len(transfers),
+        "awaiting_donor": by_status["proposed"],
+        "accepted": by_status["approved"] + by_status["completed"],
+        "declined": by_status["rejected"],
+        "withdrawn": by_status["cancelled"],
+        "in_transit": moved[MOVEMENT_OPEN],
+        "received": moved[MOVEMENT_RECEIVED] + moved[MOVEMENT_SHORT] + moved["over"],
+        # Received in full: the receipt matched the dispatch.
+        "verified": moved[MOVEMENT_RECEIVED],
+    }
+
+
+def would_lift(proposals: list[dict], critical_days: float) -> int:
+    """Receivers the open plan takes from under the critical line to over it,
+    if every donor accepts — a promise, not an outcome, and worded as one."""
+    lifted = {
+        p["to"]
+        for p in proposals
+        if p["status"] == "proposed"
+        and p.get("recipient_days_before") is not None
+        and p["recipient_days_before"] < critical_days
+        and (p.get("recipient_days_after_plan") or 0) >= critical_days
+    }
+    return len(lifted)
+
+
+def no_reply(transfers: list[dict], now: datetime, window: timedelta) -> list[dict]:
+    """Proposals still waiting for the donor after the reply window."""
+    return [t for t in transfers if t["status"] == "proposed" and now - t["created_at"] > window]
+
+
+def not_received(movements: list[dict], now: datetime) -> list[dict]:
+    """Deliveries still on the road after the day they were expected."""
+    return [m for m in movements if m["status"] == MOVEMENT_OPEN and m["expected_by"] < now]
+
+
+SETTLED = ("received", "short", "over")
+
+
+def outcomes(
+    transfers: list[dict],
+    movements: list[dict],
+    critical_now: set[tuple[str, str]],
+    *,
+    critical_days: float,
+) -> dict:
+    """What happened to the trips that were accepted (fix #49), from the
+    ledger: what was sent against what the receiver counted, how long a
+    recommendation took to arrive, and whether the centres that were critical
+    when the trip was made are above the line now.
+
+    `critical_now` is the (centre, medicine) pairs that are critical today.
+    Nothing here estimates what would have happened otherwise: "stock-outs
+    averted" is a counterfactual, and no row records it.
+    """
+    by_id = {t["id"]: t for t in transfers}
+    settled = [m for m in movements if m["status"] in SETTLED and m.get("received_at") is not None]
+    short = [m for m in settled if m["status"] == "short"]
+    hours = sorted(
+        (m["received_at"] - by_id[m["transfer_id"]]["created_at"]).total_seconds() / 3600
+        for m in settled
+        if m["transfer_id"] in by_id
+    )
+    was_critical = {
+        (by_id[m["transfer_id"]]["to"], by_id[m["transfer_id"]]["sku"])
+        for m in settled
+        if m["transfer_id"] in by_id
+        and (by_id[m["transfer_id"]].get("recipient_days_before") is not None)
+        and by_id[m["transfer_id"]]["recipient_days_before"] < critical_days
+    }
+    median = None
+    if hours:
+        mid = len(hours) // 2
+        median = round(hours[mid] if len(hours) % 2 else (hours[mid - 1] + hours[mid]) / 2, 1)
+    return {
+        "received": len(settled),
+        "in_full": sum(1 for m in settled if m["status"] == "received"),
+        "short": len(short),
+        "over": sum(1 for m in settled if m["status"] == "over"),
+        "units_short": round(sum(m["qty"] - (m["qty_received"] or 0) for m in short), 1),
+        "median_hours": median,
+        "were_critical": len(was_critical),
+        "lifted": len(was_critical - critical_now),
+        # The mismatches themselves, worst first: sent against counted.
+        "short_deliveries": [
+            {
+                "movement_id": m["id"], "transfer_id": m["transfer_id"], "batch": m.get("batch"),
+                "sku": m.get("sku"), "to": m.get("to"),
+                "sent": m["qty"], "received": m["qty_received"],
+            }
+            for m in sorted(short, key=lambda m: (m["qty_received"] or 0) - m["qty"])
+        ][:20],
+    }
+
+
+def cross_district_trips(transfers: list[dict], district_of: dict[str, str]) -> int:
+    """Open trips whose donor and receiver sit in different districts (fix
+    #38). A trip is one donor-receiver pair, whatever it carries. A centre
+    whose district is not known is not called cross-district."""
+    pairs = {
+        (t["from"], t["to"])
+        for t in transfers
+        if t["status"] == "proposed"
+    }
+    return sum(
+        1
+        for src, dst in pairs
+        if src in district_of and dst in district_of and district_of[src] != district_of[dst]
+    )
+
+
+async def oversight(session: AsyncSession, state: str, now: datetime) -> dict:
+    """The officer's view of one state's redistribution, from the rows."""
+    since = now - timedelta(days=OVERSIGHT_DAYS)
+    in_state = select(Facility.id).where(Facility.state_silo == state)
+    names = {
+        fid: (name, district)
+        for fid, name, district in (
+            await session.execute(
+                select(Facility.id, Facility.name, Facility.district).where(
+                    Facility.state_silo == state
+                )
+            )
+        ).all()
+    }
+    sku_names = {s.code: s.name for s in (await session.execute(select(Sku))).scalars()}
+
+    transfers = [
+        {
+            "id": t.id, "status": t.status, "triggered_by": t.triggered_by, "to": t.to_facility,
+            "from": t.from_facility, "sku": t.sku_code, "qty": float(t.qty or 0),
+            "created_at": t.created_at,
+            "recipient_days_before": (t.rationale or {}).get("recipient_days_before"),
+            "recipient_days_after_plan": (t.rationale or {}).get("recipient_days_after_plan"),
+        }
+        for t in (
+            await session.execute(
+                select(Transfer).where(
+                    Transfer.to_facility.in_(in_state), Transfer.created_at >= since
+                )
+            )
+        ).scalars()
+    ]
+    ids = [t["id"] for t in transfers]
+    movements = (
+        [
+            {
+                "id": m.id, "status": m.status, "transfer_id": m.transfer_id,
+                "to": m.to_facility, "sku": m.sku_code, "batch": m.batch_id,
+                "qty": float(m.qty_dispatched), "expected_by": m.expected_by,
+                "qty_received": float(m.qty_received) if m.qty_received is not None else None,
+                "received_at": m.received_at,
+            }
+            for m in (
+                await session.execute(
+                    select(MedicineMovement).where(MedicineMovement.transfer_id.in_(ids))
+                )
+            ).scalars()
+        ]
+        if ids
+        else []
+    )
+
+    solver_open = [
+        t for t in transfers if t["status"] == "proposed" and t["triggered_by"] == SOLVER_PROPOSAL
+    ]
+    computed_at = max((t["created_at"] for t in solver_open), default=None)
+    reports_since = 0
+    if computed_at is not None:
+        reports_since = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(StockReading)
+                .where(
+                    StockReading.reported_at > computed_at,
+                    StockReading.facility_id.in_(in_state),
+                )
+            )
+            or 0
+        )
+
+    # Exceptions read from the map's stored rows for this state: the
+    # controlled medicines the solver never touches, and centres under the
+    # critical line that no open trip reaches.
+    short_rows = (
+        await session.execute(
+            select(
+                FacilitySkuState.facility_id, FacilitySkuState.sku_code,
+                FacilitySkuState.days_of_stock, Sku.is_controlled,
+            )
+            .join(Sku, Sku.code == FacilitySkuState.sku_code)
+            .where(
+                FacilitySkuState.facility_id.in_(in_state),
+                FacilitySkuState.status.in_(("critical", "at_risk")),
+            )
+        )
+    ).all()
+    reached = {
+        (t["to"], t["sku"]) for t in transfers if t["status"] in ("proposed", "approved")
+    }
+    done = outcomes(
+        transfers,
+        movements,
+        {
+            (fid, sku)
+            for fid, sku, days, _controlled in short_rows
+            if days is not None and days < settings.critical_days
+        },
+        critical_days=settings.critical_days,
+    )
+
+    def where(fid: str) -> dict:
+        name, district = names.get(fid, (fid, ""))
+        return {"facility_id": fid, "name": name, "district": district}
+
+    controlled = [
+        {**where(fid), "sku_code": sku, "sku_name": sku_names.get(sku, sku),
+         "days": round(days, 1) if days is not None else None}
+        for fid, sku, days, is_controlled in short_rows
+        if is_controlled
+    ]
+    unreached = [
+        {**where(fid), "sku_code": sku, "sku_name": sku_names.get(sku, sku),
+         "days": round(days, 1) if days is not None else None}
+        for fid, sku, days, is_controlled in short_rows
+        if not is_controlled
+        and days is not None
+        and days < settings.critical_days
+        and (fid, sku) not in reached
+    ]
+    unreached.sort(key=lambda r: r["days"] if r["days"] is not None else 1e9)
+
+    # The real reply window, not the demo's minutes-long one: an officer's
+    # "no reply" means a donor centre has sat on it for a working day.
+    reply_window = timedelta(hours=settings.request_reply_hours)
+
+    def trip(t: dict) -> dict:
+        return {
+            "transfer_id": t["id"], "sku_code": t["sku"], "sku_name": sku_names.get(t["sku"], t["sku"]),
+            "qty": t["qty"], "from": where(t["from"]) if t["from"] in names else {"facility_id": t["from"], "name": t["from"], "district": ""},
+            "to": where(t["to"]), "created_at": t["created_at"],
+        }
+
+    return {
+        "state": state,
+        "window_days": OVERSIGHT_DAYS,
+        "recommended_open": len(solver_open),
+        "requests_open": sum(
+            1 for t in transfers if t["status"] == "proposed" and t["triggered_by"] != SOLVER_PROPOSAL
+        ),
+        "computed_at": computed_at,
+        "reports_since": reports_since,
+        "would_lift": would_lift(
+            [t for t in transfers if t["status"] == "proposed"], settings.critical_days
+        ),
+        "critical_days": settings.critical_days,
+        # Fix #38: how many open trips cross a district line — so
+        # "cross-district" on screen is a count, not a claim.
+        "cross_district_open": cross_district_trips(
+            transfers, {fid: district for fid, (_name, district) in names.items()}
+        ),
+        "pipeline": pipeline(transfers, movements),
+        "no_reply": [trip(t) for t in no_reply(transfers, now, reply_window)][:20],
+        "no_reply_total": len(no_reply(transfers, now, reply_window)),
+        "reply_window_hours": settings.request_reply_hours,
+        "not_received": [
+            {"movement_id": m["id"], "transfer_id": m["transfer_id"], "batch": m["batch"],
+             "sku_name": sku_names.get(m["sku"], m["sku"]), "qty": m["qty"],
+             "to": where(m["to"]), "expected_by": m["expected_by"]}
+            for m in not_received(movements, now)
+        ][:20],
+        "not_received_total": len(not_received(movements, now)),
+        "declined": [trip(t) for t in transfers if t["status"] == "rejected"][:20],
+        "controlled": controlled[:20],
+        "controlled_total": len(controlled),
+        "unreached": unreached[:20],
+        "unreached_total": len(unreached),
+        # Fix #49: what happened to the trips that were accepted. The counts
+        # are an aggregate; the mismatched deliveries name centres, so they
+        # are a list of their own (and withheld with the other lists, #77).
+        "outcomes": {k: v for k, v in done.items() if k != "short_deliveries"},
+        "short_deliveries": [
+            {**d, "sku_name": sku_names.get(d["sku"], d["sku"]), "to": where(d["to"])}
+            for d in done["short_deliveries"]
+        ],
+    }
+
+
 @dataclass
 class PlanResult:
     state: str
@@ -417,26 +827,91 @@ class PlanResult:
     transfer_ids: list[int]
     unmet: list[dict]
     manual_review: list[dict]
+    # The solver's own earlier proposals this run removed, so anyone acting on
+    # one can be told it was replaced, and when (see replaced_message).
+    replaced_ids: list[int] = field(default_factory=list)
+
+
+async def open_promises(
+    session: AsyncSession, state: str, sku: str | None = None
+) -> dict[str, list[Promise]]:
+    """Stock already asked for in open requests touching this state, per
+    medicine. Bounded by status and state; open requests are few by design
+    (workspace caps them)."""
+    in_state = select(Facility.id).where(Facility.state_silo == state)
+    stmt = select(Transfer.sku_code, Transfer.from_facility, Transfer.to_facility, Transfer.qty).where(
+        Transfer.status == "proposed",
+        Transfer.triggered_by.is_distinct_from(SOLVER_PROPOSAL),
+        Transfer.to_facility.in_(in_state) | Transfer.from_facility.in_(in_state),
+    )
+    if sku:
+        stmt = stmt.where(Transfer.sku_code == sku)
+    out: dict[str, list[Promise]] = defaultdict(list)
+    for code, src, dst, qty in (await session.execute(stmt)).all():
+        out[code].append(Promise(src, dst, float(qty or 0)))
+    return out
 
 
 async def generate_plan(
     session: AsyncSession, state: str, sku: str | None = None
 ) -> PlanResult:
-    """Replace this state's open proposals with a freshly solved plan.
+    """Replace the solver's own open proposals for this state with a freshly
+    solved plan.
 
-    Decided transfers (approved or rejected) are history and are never touched.
+    Only the solver's own proposals are replaced (replaceable_on_replan): a
+    centre's request is work somebody is waiting on and survives any number of
+    re-plans, and the stock it already promises is taken off the donor before
+    the solver sees it (after_promises). Decided transfers (approved or
+    rejected) are history and are never touched. One plan per state at a
+    time: a second run for the same state waits for the first to commit, so
+    two runs cannot interleave their deletes and inserts.
     """
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:key))"), {"key": "plan:" + state}
+    )
     rules = PlanRules.from_settings()
     skus = {s.code: s for s in (await session.execute(select(Sku))).scalars().all()}
-    nodes_by_sku = await load_state_nodes(session, state, sku)
+    promises = await open_promises(session, state, sku)
+    nodes_by_sku = {
+        code: after_promises(nodes, promises.get(code, []))
+        for code, nodes in (await load_state_nodes(session, state, sku)).items()
+    }
+    # Spec 12.5: an active outbreak is a temporary multiplier on the burn of
+    # the medicines it drives in its district — the same solver then sees the
+    # shorter cover and proposes pre-positioning trips (fix #41).
+    surges = await outbreak.surges_for_state(session, state, datetime.now(timezone.utc))
+    if sku:
+        surges = {k: v for k, v in surges.items() if k[1] == sku}
+    unsurged = {
+        (n.facility_id, code): n for code, ns in nodes_by_sku.items() for n in ns
+    }
+    nodes_by_sku = outbreak.apply_surges(
+        nodes_by_sku, {k: v.multiplier for k, v in surges.items()}
+    )
 
     in_state = select(Facility.id).where(Facility.state_silo == state)
-    stmt = delete(Transfer).where(
-        Transfer.status == "proposed", Transfer.to_facility.in_(in_state)
+    replaceable = select(
+        Transfer.id, Transfer.from_facility, Transfer.to_facility, Transfer.sku_code
+    ).where(
+        Transfer.status == "proposed",
+        Transfer.triggered_by == SOLVER_PROPOSAL,
+        Transfer.to_facility.in_(in_state),
     )
     if sku:
-        stmt = stmt.where(Transfer.sku_code == sku)
-    await session.execute(stmt)
+        replaceable = replaceable.where(Transfer.sku_code == sku)
+    replaced = {
+        (src, dst, code): tid for tid, src, dst, code in (await session.execute(replaceable)).all()
+    }
+    if replaced:
+        # Re-checked at delete time: a donor's decision that committed while
+        # this plan was solving has moved the row out of 'proposed', and the
+        # delete leaves it alone.
+        await session.execute(
+            delete(Transfer).where(
+                Transfer.id.in_(list(replaced.values())), Transfer.status == "proposed"
+            )
+        )
+    replaced_at = datetime.now(timezone.utc)
 
     unmet: list[dict] = []
     manual: list[dict] = []
@@ -526,8 +1001,12 @@ async def generate_plan(
             eta_hours=p.eta_hours,
             route_source=p.rationale["distance_source"],
             status="proposed",
-            triggered_by="threshold",
-            rationale=p.rationale,
+            triggered_by=SOLVER_PROPOSAL,
+            rationale={
+                **p.rationale,
+                **replacement_note((p.from_id, p.to_id, p.sku_code), replaced, replaced_at),
+                **_outbreak_note(p, surges, unsurged),
+            },
         )
         for _, p in kept
     ]
@@ -543,6 +1022,7 @@ async def generate_plan(
         transfer_ids=[r.id for r in rows],
         unmet=unmet,
         manual_review=manual,
+        replaced_ids=sorted(replaced.values()),
     )
 
 
@@ -591,6 +1071,8 @@ async def list_transfers(
                 "route_source": t.route_source,
                 "triggered_by": t.triggered_by,
                 "created_at": t.created_at,
+                # Transfers never cross a state line; the receiver's is the trip's.
+                "state": d.state_silo,
                 "rationale": t.rationale or {},
                 "from": {"id": f.id, "name": f.name, "district": f.district, "lat": f.lat, "lng": f.lng},
                 "to": {"id": d.id, "name": d.name, "district": d.district, "lat": d.lat, "lng": d.lng},
@@ -642,6 +1124,153 @@ def why_rows(items: list[dict], critical_days: float) -> list[str]:
     return rows
 
 
+# ------------------------------------------------- what the card cannot say ---
+# Fix #46. The trip card already shows the quantities and the days of cover;
+# an explanation that repeats them tells nobody anything. These are the facts
+# behind the choice, worked out after the plan from the same rows the solver
+# read: the nearer centre that was not used and why, when the receiver runs
+# out if nobody sends, how fresh the donor's figure is, and whether the
+# distance is a road route or an estimate.
+
+
+def _pair_km(a: StockNode, b: StockNode, road_factor: float) -> float:
+    lat1, lng1, lat2, lng2 = map(np.radians, (a.lat, a.lng, b.lat, b.lng))
+    h = np.sin((lat2 - lat1) / 2) ** 2 + np.cos(lat1) * np.cos(lat2) * np.sin((lng2 - lng1) / 2) ** 2
+    return float(2 * EARTH_RADIUS_KM * np.arcsin(np.sqrt(h)) * road_factor)
+
+
+def alternative_donor(
+    receiver: StockNode,
+    donor: StockNode,
+    nodes: list[StockNode],
+    rules: PlanRules,
+    committed: dict[str, float],
+) -> dict | None:
+    """The nearest centre to the receiver that is closer than the chosen
+    donor, and the reason the plan did not use it. None when the donor is
+    already the nearest centre holding the medicine.
+
+    `nodes` are the state's centres for this medicine; `committed` is what
+    each already owes to other open trips. The reason is read from the same
+    figures the solver used — it is never guessed.
+    """
+    reach = _pair_km(receiver, donor, rules.road_factor)
+    closer = [
+        (km, n)
+        for n in nodes
+        if n.facility_id not in (receiver.facility_id, donor.facility_id)
+        and (km := _pair_km(receiver, n, rules.road_factor)) < reach
+    ]
+    if not closer:
+        return None
+    km, n = min(closer, key=lambda pair: pair[0])
+    lead = "{0} is closer (about {1} km)".format(n.name, round(km))
+    spare = max(0.0, n.qty - n.burn * rules.donor_floor_days)
+    if n.days is not None and n.days < rules.trigger_days:
+        reason = "short_itself"
+        sentence = "{0} but is itself short: {1} of stock.".format(lead, _days(n.days))
+    elif n.days is not None and n.days <= rules.donor_floor_days:
+        reason = "below_floor"
+        sentence = "{0} but holds {1} of stock, below the {2:g}-day floor a donor must keep.".format(
+            lead, _days(n.days), rules.donor_floor_days
+        )
+    elif spare - committed.get(n.facility_id, 0.0) < rules.min_units:
+        reason = "committed"
+        sentence = "{0}, but its spare stock is already promised to other trips in this plan.".format(lead)
+    else:
+        reason = "could_spare"
+        sentence = (
+            "{0} and could also spare stock; the plan is solved for the whole state at once, "
+            "and this trip is part of its cheapest overall answer."
+        ).format(lead)
+    return {
+        "facility_id": n.facility_id, "name": n.name, "district": n.district,
+        "km": round(km, 1), "days": n.days, "reason": reason, "sentence": sentence,
+    }
+
+
+SOURCE_WORDS = {
+    "form": "entered on the stock form",
+    "voice": "spoken into the app",
+    "sms": "reported by SMS",
+    "ivr": "reported by phone call",
+    "whatsapp": "reported by WhatsApp",
+    "photo": "read from a photographed document",
+    "transfer": "updated by a confirmed delivery",
+    "seed": "a seeded demonstration figure",
+}
+
+
+def trip_facts(
+    *,
+    sku_name: str,
+    receiver: StockNode,
+    donor: StockNode,
+    alternative: dict | None,
+    receiver_runs_out_on: date | None,
+    today: date,
+    donor_counted_on: date | None,
+    donor_source: str | None,
+    receiver_trust: tuple[int, str] | None,
+    route_source: str | None,
+    road_factor: float,
+    requested: bool = False,
+) -> list[str]:
+    """What a first-time reader needs and the card does not show, as plain
+    sentences. Each is omitted when its figure is not known. `requested` is a
+    centre's own request: the receiver picked the donor, the plan did not."""
+    from .workspace import day_words  # workspace imports this module
+
+    if requested:
+        why = "{0} chose this donor itself, from the nearest centres that could spare {1}.".format(
+            receiver.name, sku_name
+        )
+    elif alternative:
+        why = alternative["sentence"]
+    else:
+        why = "{0} is the nearest centre that holds {1} above its floor.".format(donor.name, sku_name)
+    out = [why]
+    if receiver_runs_out_on is not None:
+        when = day_words(receiver_runs_out_on)
+        out.append(
+            "Without this delivery {0} runs out of {1} around {2}.".format(receiver.name, sku_name, when)
+            if receiver_runs_out_on >= today
+            else "At its usual use {0} would already have run out around {1}; its count is "
+            "overdue.".format(receiver.name, when)
+        )
+    if donor_counted_on is not None:
+        out.append(
+            "{0}'s figure is its count of {1}, {2}.".format(
+                donor.name, day_words(donor_counted_on), SOURCE_WORDS.get(donor_source or "", "reported")
+            )
+        )
+    if receiver_trust is not None:
+        out.append(
+            "{0}'s data confidence is {1} out of 100 ({2}).".format(receiver.name, *receiver_trust)
+        )
+    if route_source != "google_routes":
+        out.append(
+            "The distance is a straight-line estimate multiplied by {0:g}, not a road route.".format(
+                road_factor
+            )
+        )
+    return out
+
+
+def planned_by(items: list[dict]) -> str:
+    """Who decided this trip, read from the trip itself: the solver that ran
+    (it falls back to a greedy one when OR-Tools is unavailable), or a centre
+    that asked another for stock."""
+    first = items[0]
+    if first.get("triggered_by") == FACILITY_REQUEST:
+        return "This is a request one centre raised to another, not a recommendation of the state plan."
+    solver = (first.get("rationale") or {}).get("solver")
+    name = {"ortools": "OR-Tools", "greedy": "the greedy fallback solver"}.get(
+        solver, "the redistribution solver"
+    )
+    return "The plan is computed by {0}.".format(name)
+
+
 def rules_why(items: list[dict]) -> str:
     """The same reason in a fixed sentence, for when no model answers."""
     worst = min(items, key=lambda t: t["rationale"].get("recipient_days_before", 1e9))
@@ -689,8 +1318,19 @@ async def decide_transfer(
     )
     if t is None:
         return None
+    # Re-checked under the row lock, so a cancel or a lapse that lands while
+    # the donor is deciding wins (fix list #31).
+    if t.status == "cancelled":
+        raise TransferConflict("This request was cancelled by the centre that raised it.")
     if t.status != "proposed":
         raise TransferConflict(f"Transfer {transfer_id} was already {t.status}.")
+    if t.triggered_by == FACILITY_REQUEST:
+        window = request_window()
+        if request_lapsed(t.created_at, datetime.now(timezone.utc), window):
+            requester = await session.get(Facility, t.to_facility)
+            raise TransferConflict(
+                lapsed_message(t.created_at + window, requester.name if requester else "the centre")
+            )
 
     if decision == "approved":
         donor = await session.get(

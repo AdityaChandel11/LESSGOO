@@ -19,9 +19,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import settings
-from . import trust
+from . import beds, trust
 from .models import (
-    BedStatus,
     Facility,
     FacilitySkuState,
     FacilityTrust,
@@ -90,6 +89,43 @@ class SkuStock:
     last_reported_at: datetime | None
     last_source: str | None
     last_confidence: float | None
+    # When the forecast behind a "federated" rate was published (fix #81).
+    forecast_published_at: datetime | None = None
+
+
+# The shared model's coverage: the states that trained it and the medicines it
+# trained on. The web service carries no torch, so this mirrors the federation
+# code; tests/test_forecast_visible.py keeps the two in step.
+MODEL_STATES = ("MH", "KL", "BR", "UP")
+MODEL_SKUS = ("ORS", "PARA500", "AMOX", "IRONFA", "IVFLUID", "ZINC")
+
+
+def forecast_applies(state: str, sku: str) -> bool:
+    """Whether the shared model's forecast may be used here (fix #55).
+
+    Only where it trained. No held-out-state check exists, so a forecast for a
+    state the model never saw would be an unverified number wearing the
+    model's name; the burn rate is used there, and the screen says so.
+    """
+    return state in MODEL_STATES and sku in MODEL_SKUS
+
+
+def pick_rate(
+    burn: float | None,
+    forecast: tuple[float, datetime] | None,
+    *,
+    state: str | None = None,
+    sku: str | None = None,
+) -> tuple[float | None, str, datetime | None]:
+    """The forecast replaces the burn rate only when one has been published
+    recently for this exact facility and medicine, inside the model's
+    coverage. Every other case — switch off, no row, stale row, failed
+    training run, a state or medicine the model never trained on — falls
+    through to the rule that needs nothing but the readings."""
+    covered = state is None or sku is None or forecast_applies(state, sku)
+    if covered and forecast is not None and forecast[0] > 0:
+        return forecast[0], "federated", forecast[1]
+    return burn, "burn_rate", None
 
 
 @dataclass
@@ -102,7 +138,11 @@ class FacilitySnapshot:
     lat: float
     lng: float
     beds_total: int
+    # The latest verified ward count and when it was verified (fix #68). A
+    # stale one is shown with its date and never counted as available.
     beds_occupied: int | None
+    beds_verified_at: datetime | None
+    beds_stale: bool
     bed_occupancy_pct: float | None
     staff_checkin_pct: float | None
     # Data confidence (spec 12.6) and the threshold widening it causes.
@@ -140,11 +180,55 @@ def _burn_rate(series: list[tuple[datetime, float, str | None]]) -> float | None
     return drops / span_days
 
 
+@dataclass(frozen=True)
+class TrustFigure:
+    score: float
+    band: str
+
+
+async def trust_figures(
+    session: AsyncSession, ids: list[str], *, live: bool
+) -> dict[str, TrustFigure]:
+    """Each facility's data-confidence score, from one of two places only.
+
+    `live` scores the centres now, through `trust.compute()` — what a
+    single-centre view must show (spec 12.6). Otherwise the materialised copy
+    the national map reads, which `scripts.trust` refreshes from that same
+    function. Never a third calculation.
+    """
+    if live:
+        scores = await trust.compute(session, trust.Scope(facility_ids=tuple(ids)))
+        return {s.facility_id: TrustFigure(score=s.score, band=s.band) for s in scores}
+    rows = await session.execute(
+        select(FacilityTrust.facility_id, FacilityTrust.score, FacilityTrust.band).where(
+            FacilityTrust.facility_id.in_(ids)
+        )
+    )
+    return {fid: TrustFigure(score=float(score), band=band) for fid, score, band in rows.all()}
+
+
+def trust_reason(score: float | None, multiplier: float) -> str | None:
+    """The escalation line for a widened warning, on the 0-100 scale every
+    view uses (fix list #89)."""
+    if score is None or multiplier <= 1.01:
+        return None
+    return (
+        f"data confidence {round(score * 100)} out of 100, so this facility is warned "
+        f"{multiplier:.1f}x earlier"
+    )
+
+
 async def get_snapshots(
     session: AsyncSession,
     facility_ids: list[str] | None = None,
+    *,
+    live_trust: bool = False,
 ) -> list[FacilitySnapshot]:
-    """Compute status for every facility (or a subset) in a handful of queries."""
+    """Compute status for every facility (or a subset) in a handful of queries.
+
+    `live_trust` scores the facilities' data confidence now instead of reading
+    the national map's materialised copy; single-centre views pass it, so the
+    pharmacist's card and the officer's drawer show the same number."""
     now = datetime.now(timezone.utc)
     window_start = now - timedelta(days=settings.burn_rate_window_days + 1)
 
@@ -164,11 +248,11 @@ async def get_snapshots(
     # and this is a copy of that one calculation, never a second one.
     # Published forecasts, when the switch is on. Reading rows here keeps torch
     # out of the web service entirely: a training job writes, the API reads.
-    forecasts: dict[tuple[str, str], float] = {}
+    forecasts: dict[tuple[str, str], tuple[float, datetime]] = {}
     if settings.forecast_mode == "federated":
         fresh = now - timedelta(days=settings.forecast_max_age_days)
         forecasts = {
-            (f.facility_id, f.sku_code): f.predicted_daily_use
+            (f.facility_id, f.sku_code): (f.predicted_daily_use, f.computed_at)
             for f in (
                 await session.execute(
                     select(Forecast).where(
@@ -178,15 +262,7 @@ async def get_snapshots(
             ).scalars()
         }
 
-    trust_rows = dict(
-        (
-            await session.execute(
-                select(FacilityTrust.facility_id, FacilityTrust).where(
-                    FacilityTrust.facility_id.in_(ids)
-                )
-            )
-        ).all()
-    )
+    figures = await trust_figures(session, ids, live=live_trust)
 
     readings_stmt = (
         select(
@@ -215,15 +291,7 @@ async def get_snapshots(
         series[key].append((at, float(qty), source))
         latest_meta[key] = (at, source, float(conf) if conf is not None else None)
 
-    beds_stmt = (
-        select(BedStatus.facility_id, BedStatus.beds_occupied)
-        .where(BedStatus.facility_id.in_(ids))
-        .order_by(BedStatus.facility_id, BedStatus.recorded_at.desc())
-    )
-    latest_beds: dict[str, int] = {}
-    for fid, occupied in (await session.execute(beds_stmt)).all():
-        if fid not in latest_beds and occupied is not None:
-            latest_beds[fid] = occupied
+    bed_figures = await beds.latest_verified(session, ids, now)
 
     # Staff presence, aggregated to the facility only — never per person (rule 8).
     roster: dict[str, set[str]] = defaultdict(set)
@@ -241,8 +309,8 @@ async def get_snapshots(
 
     snapshots: list[FacilitySnapshot] = []
     for fac in facilities:
-        trust_row = trust_rows.get(fac.id)
-        trust_score = float(trust_row.score) if trust_row is not None else None
+        figure = figures.get(fac.id)
+        trust_score = figure.score if figure is not None else None
         multiplier = trust.warning_multiplier(trust_score)
         sku_rows: list[SkuStock] = []
         for sku_code, sku in skus.items():
@@ -250,15 +318,10 @@ async def get_snapshots(
             if not pts:
                 continue
             qty = pts[-1][1]
-            burn = _burn_rate(pts)
-            rate_source = "burn_rate"
-            # The forecast replaces the burn rate only when one has been
-            # published recently for this exact facility and medicine. Every
-            # other case — switch off, no row, stale row, failed training run —
-            # falls through to the rule that needs nothing but the readings.
-            predicted = forecasts.get((fac.id, sku_code))
-            if predicted is not None and predicted > 0:
-                burn, rate_source = predicted, "federated"
+            burn, rate_source, published = pick_rate(
+                _burn_rate(pts), forecasts.get((fac.id, sku_code)),
+                state=fac.state_silo, sku=sku_code,
+            )
             dos = None if burn is None else qty / max(burn, EPSILON)
             at, source, conf = latest_meta[(fac.id, sku_code)]
             sku_rows.append(
@@ -275,12 +338,14 @@ async def get_snapshots(
                     last_reported_at=at,
                     last_source=source,
                     last_confidence=conf,
+                    forecast_published_at=published,
                 )
             )
 
         stock_status = worst([s.status for s in sku_rows])
 
-        occupied = latest_beds.get(fac.id)
+        bed_figure = bed_figures.get(fac.id)
+        occupied = bed_figure.occupied if bed_figure is not None else None
         occupancy_pct = (
             round(100.0 * occupied / fac.beds_total, 1)
             if occupied is not None and fac.beds_total
@@ -293,13 +358,12 @@ async def get_snapshots(
         )
 
         reasons: list[str] = []
-        if trust_row is not None and multiplier > 1.01:
-            reasons.append(
-                f"data confidence {trust_score:.0%}, so this facility is warned "
-                f"{multiplier:.1f}x earlier"
-            )
+        trust_line = trust_reason(trust_score, multiplier)
+        if trust_line:
+            reasons.append(trust_line)
         if (
             occupancy_pct is not None
+            and not bed_figure.stale
             and occupancy_pct > settings.bed_occupancy_escalate_pct
         ):
             reasons.append(f"bed occupancy {occupancy_pct}%")
@@ -320,10 +384,12 @@ async def get_snapshots(
                 lng=fac.lng,
                 beds_total=fac.beds_total,
                 beds_occupied=occupied,
+                beds_verified_at=bed_figure.as_of if bed_figure is not None else None,
+                beds_stale=bed_figure.stale if bed_figure is not None else False,
                 bed_occupancy_pct=occupancy_pct,
                 staff_checkin_pct=checkin_pct,
                 trust_score=trust_score,
-                trust_band=trust_row.band if trust_row is not None else None,
+                trust_band=figure.band if figure is not None else None,
                 warning_multiplier=multiplier,
                 # The widened threshold has already moved stock_status; a low
                 # score must not also escalate the facility a second time.

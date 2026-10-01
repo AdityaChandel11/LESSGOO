@@ -17,10 +17,13 @@
 import { useCallback, useEffect, useState } from "react";
 
 import {
+  ApiError,
+  type OwnRequest,
   type ProvenanceKind,
   type Supply,
   type WorkspaceSku,
   type WorkspaceView,
+  TRUST_BAND,
   api,
   formatDays,
 } from "../api";
@@ -29,15 +32,20 @@ import StockPhoto from "./StockPhoto";
 import Team from "./Team";
 import FindSupply from "./FindSupply";
 import { both } from "./labels";
+import UsageChart from "../usagechart";
 
 const STATUS_STYLE: Record<string, { dot: string; text: string; label: string }> = {
   critical: { dot: "bg-crit", text: "text-crit", label: "Critical" },
   at_risk: { dot: "bg-risk", text: "text-risk", label: "At risk" },
   healthy: { dot: "bg-ok", text: "text-ok", label: "Healthy" },
+  // Past the run-out date since the last count (fix #26): the real level is
+  // unknown, so the card asks for a count rather than showing a colour.
+  count_overdue: { dot: "bg-ink-2", text: "text-ink", label: "Count overdue" },
 };
 
 const PROVENANCE_LABEL: Record<ProvenanceKind, string> = {
   counted: "Counted by hand",
+  photo: "Read from a photo",
   delivery: "Confirmed on delivery",
   phone: "Reported by phone",
   system: "Not yet verified",
@@ -59,20 +67,117 @@ function longDate(iso: string): string {
   });
 }
 
-function MedicineCard({
-  s,
-  onFindSupply,
+/** "12 min ago", "3 h ago" — how long a request has been waiting. */
+function waited(iso: string): string {
+  const minutes = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  if (minutes < 60) return `${minutes} min ago`;
+  return `${Math.round(minutes / 60)} h ago`;
+}
+
+function clock(iso: string): string {
+  return new Date(iso).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+}
+
+/**
+ * This centre's own request for the medicine, while it waits and after
+ * (fix list #31). A request still waiting replaces "Find supply" — asking a
+ * second donor for the same shortfall is refused anyway — and can be
+ * cancelled here. One that closed says how, in words.
+ */
+function RequestChip({
+  r,
+  unit,
+  onCancel,
 }: {
-  s: WorkspaceSku;
-  onFindSupply: (s: WorkspaceSku) => void;
+  r: OwnRequest;
+  unit: string;
+  onCancel: (r: OwnRequest) => Promise<void>;
 }) {
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const live = r.status === "proposed" && !r.lapsed;
+  return (
+    <div className="border-t border-line px-3.5 py-2.5">
+      <p className="text-[12.5px] leading-snug text-ink">
+        <span className="font-medium">
+          Requested {Math.round(r.qty).toLocaleString("en-IN")} {unit} from {r.from_name}
+        </span>
+        <span className="text-ink-2">
+          {" "}· {live ? `awaiting reply · sent ${waited(r.created_at)}` : r.words}
+        </span>
+      </p>
+      {live ? (
+        <div className="mt-1.5 flex items-center justify-between gap-2">
+          <span className="text-[11px] text-ink-3">
+            Lapses at {clock(r.lapses_at)} if {r.from_name} does not reply.
+          </span>
+          <button
+            onClick={async () => {
+              setBusy(true);
+              setErr(null);
+              try {
+                await onCancel(r);
+              } catch (e) {
+                setErr(e instanceof ApiError ? e.message : String(e));
+              } finally {
+                setBusy(false);
+              }
+            }}
+            disabled={busy}
+            className="min-h-9 shrink-0 rounded-md border border-line px-2.5 text-[12px] font-medium text-ink-2 hover:border-crit hover:text-crit disabled:opacity-50"
+          >
+            {busy ? "Cancelling…" : "Cancel request"}
+          </button>
+        </div>
+      ) : (
+        r.lapsed && (
+          <p className="mt-0.5 text-[11px] text-ink-3">
+            No reply by {clock(r.lapses_at)}. You can ask another centre.
+          </p>
+        )
+      )}
+      {err && <p role="alert" className="mt-1 text-[11.5px] text-crit">{err}</p>}
+    </div>
+  );
+}
+
+/** Fix #84: the last 28 days' use and the forecast, loaded only when opened. */
+function UseAndForecast({ facilityId, sku }: { facilityId: string; sku: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="px-3.5 py-2.5">
+      <details onToggle={(e) => setOpen(e.currentTarget.open)}>
+        <summary className="cursor-pointer text-[12px] text-ink-2">{both("useAndForecast")}</summary>
+        {open && <UsageChart facilityId={facilityId} sku={sku} />}
+      </details>
+    </div>
+  );
+}
+
+function MedicineCard({
+  facilityId,
+  s,
+  request,
+  onFindSupply,
+  onCancel,
+}: {
+  facilityId: string;
+  s: WorkspaceSku;
+  /** This centre's latest request for the medicine in the last day, if any. */
+  request: OwnRequest | undefined;
+  onFindSupply: (s: WorkspaceSku) => void;
+  onCancel: (r: OwnRequest) => Promise<void>;
+}) {
+  const waiting = !!request && request.status === "proposed" && !request.lapsed;
   const style = STATUS_STYLE[s.status] ?? STATUS_STYLE.healthy;
   const short = s.status === "critical" || s.status === "at_risk";
   // The rule that produced days-of-cover changes what the date means, so it is
   // named rather than left implied. rate_source is already on the wire.
   const rule =
     s.rate_source === "federated"
-      ? "from the shared model's forecast"
+      ? `from the shared model's forecast${
+          s.forecast_published_at ? `, published ${longDate(s.forecast_published_at)}` : ""
+        }`
       : "from the last 28 days of readings";
 
   return (
@@ -101,14 +206,22 @@ function MedicineCard({
         <div className="flex items-baseline justify-between gap-3 px-3.5 py-2.5">
           <dt className="text-[12px] text-ink-2">{both("daysOfCover")}</dt>
           <dd className="text-right text-[12.5px] font-medium text-ink">
-            {formatDays(s.days_of_stock)}
+            {s.count_overdue ? both("countOverdue") : formatDays(s.days_of_stock)}
           </dd>
         </div>
 
         <div className="px-3.5 py-2.5">
           <dt className="text-[12px] text-ink-2">{both("runsOut")}</dt>
           <dd className="mt-0.5 text-[12.5px] text-ink">
-            {s.stockout_on ? (
+            {s.count_overdue && s.stockout_on && s.last_reported_at ? (
+              // As of now, not as of the count (fix #26).
+              <>
+                Last counted {Math.round(s.qty_on_hand).toLocaleString("en-IN")} {s.unit} on{" "}
+                {longDate(s.last_reported_at)}. At your usual use it would have run out around{" "}
+                <span className="font-medium">{longDate(s.stockout_on)}</span>.{" "}
+                <span className="font-medium">{both("countTheShelf")}.</span>
+              </>
+            ) : s.stockout_on ? (
               <>
                 <span className="font-medium">{longDate(s.stockout_on)}</span>
                 <span className="text-ink-3"> — {rule}</span>
@@ -120,6 +233,8 @@ function MedicineCard({
             )}
           </dd>
         </div>
+
+        <UseAndForecast facilityId={facilityId} sku={s.sku_code} />
 
         <div className="px-3.5 py-2.5">
           <dt className="text-[12px] text-ink-2">How this was checked</dt>
@@ -135,7 +250,8 @@ function MedicineCard({
         </div>
       </dl>
 
-      {short && (
+      {request && <RequestChip r={request} unit={s.unit} onCancel={onCancel} />}
+      {short && !waiting && (
         <div className="border-t border-line px-3.5 py-2.5">
           <button
             onClick={() => onFindSupply(s)}
@@ -153,10 +269,13 @@ export default function Medicines({
   facilityId,
   refreshKey,
   onChanged,
+  onOpenField,
 }: {
   facilityId: string;
   refreshKey: number;
   onChanged: () => void;
+  /** Opens the field simulator in place — no navigation, no reload. */
+  onOpenField: () => void;
 }) {
   const [view, setView] = useState<WorkspaceView | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -198,10 +317,64 @@ export default function Medicines({
   }
 
   const trust = view.facility.trust_score;
+  const band = view.facility.trust_band ? TRUST_BAND[view.facility.trust_band] : null;
+  // Newest first from the server, so the first match is the latest request.
+  const requestFor = (code: string) => view.requests.find((r) => r.sku_code === code);
+  // Errors stay on the chip that raised them (RequestChip); success reloads.
+  const cancel = async (r: OwnRequest) => {
+    await api.cancelRequest(r.transfer_id);
+    onChanged();
+  };
 
   return (
     <>
-      <Briefing facilityId={facilityId} computed={view.briefing} />
+      {/* Fix #58: shown only when an outbreak is active in this district —
+          the same rows the officer's panel reads, never a separate copy. */}
+      {view.outbreaks.map((o) => (
+        <section
+          key={o.outbreak_id}
+          role="alert"
+          className="mb-3 rounded-lg border border-risk/40 bg-risk/5 px-3.5 py-3"
+        >
+          <h2 className="text-[13px] font-semibold text-ink">{o.headline}</h2>
+          <p className="mt-0.5 text-[11.5px] text-ink-2">
+            प्रकोप की सूचना · Expected use is raised for these medicines until the outbreak ends.
+          </p>
+          <ul className="mt-1.5 space-y-1">
+            {o.medicines.map((m) => {
+              const s = view.skus.find((x) => x.sku_code === m.sku_code);
+              return (
+                <li key={m.sku_code} className="flex items-baseline justify-between gap-2 text-[12px]">
+                  <span className="text-ink">
+                    <span className="font-medium">{m.sku_name}</span>
+                    {m.multiplier !== null ? (
+                      <span className="text-ink-2">
+                        {" "}
+                        · {formatDays(m.days_at_outbreak_rate)} at the outbreak rate ({formatDays(m.days_now)} usually
+                        {m.basis === "assumption" ? "; the rise is the officer's assumption" : "; rise observed in this district"})
+                      </span>
+                    ) : (
+                      <span className="text-ink-3"> · no rise expected yet</span>
+                    )}
+                  </span>
+                  {s && m.multiplier !== null && (
+                    <button onClick={() => openSupply(s)} className="shrink-0 font-medium text-brand hover:underline">
+                      {both("findSupply")}
+                    </button>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ))}
+
+      <Briefing
+        facilityId={facilityId}
+        computed={view.briefing}
+        todo={view.todo}
+        localLanguage={view.local_language}
+      />
 
       <StockPhoto facilityId={facilityId} onCommitted={onChanged} />
 
@@ -224,12 +397,16 @@ export default function Medicines({
           <span className="font-mono text-[11.5px] text-ink">ORS 60</span> updates
           this same shelf.
         </p>
-        <a
-          href="/?view=field"
-          className="mt-2 inline-block min-h-11 text-[12.5px] font-medium text-brand underline"
+        {/* Opens inside this workspace (fix list #24). It was a link to the
+            officer console's field view: a full page load that landed on the
+            front door, for a view a pharmacist's account never reaches. */}
+        <button
+          type="button"
+          onClick={onOpenField}
+          className="mt-2 min-h-11 text-left text-[12.5px] font-medium text-brand underline"
         >
-          See the field simulator
-        </a>
+          {both("openFieldSimulator")}
+        </button>
       </section>
 
       <Team facilityId={facilityId} refreshKey={refreshKey} />
@@ -240,24 +417,41 @@ export default function Medicines({
       >
         <div className="flex items-baseline justify-between gap-3">
           <h2 className="text-[12px] font-medium text-ink-2">{both("dataConfidence")}</h2>
-          <span className="font-mono text-[14px] font-semibold text-ink">
-            {trust === null ? "—" : trust.toFixed(2)}
+          {/* Same score, scale and band words as the officer's drawer (fix #89). */}
+          <span className="flex items-baseline gap-1.5">
+            <span className="font-mono text-[14px] font-semibold text-ink">
+              {trust === null ? "—" : Math.round(trust * 100)}
+            </span>
+            {trust !== null && <span className="text-[11.5px] text-ink-2">out of 100</span>}
+            {band && (
+              <span
+                className={`ml-1 rounded-full border px-2 py-0.5 text-[11px] font-medium ${band.className}`}
+              >
+                {band.label}
+              </span>
+            )}
           </span>
         </div>
         <p className="mt-1 text-[11.5px] leading-snug text-ink-3">
-          {view.facility.trust_band
-            ? `Band: ${view.facility.trust_band}. Computed live from this centre's own reports — reporting regularly and consistently raises it.`
+          {band
+            ? "Computed live from this centre's own reports — reporting regularly and consistently raises it."
             : "Not enough history at this centre to compute a confidence score yet."}
         </p>
         <p className="mt-1.5 text-[11.5px] text-ink-3">
-          {view.open_requests} of {view.max_open_requests} stock requests open
+          {view.open_requests} of {view.max_open_requests} stock requests waiting for a reply
         </p>
       </section>
 
       <ul className="flex flex-col gap-3">
         {view.skus.map((s) => (
           <li key={s.sku_code}>
-            <MedicineCard s={s} onFindSupply={openSupply} />
+            <MedicineCard
+              facilityId={facilityId}
+              s={s}
+              request={requestFor(s.sku_code)}
+              onFindSupply={openSupply}
+              onCancel={cancel}
+            />
           </li>
         ))}
       </ul>

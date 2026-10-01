@@ -95,3 +95,11 @@ def test_the_district_is_named_once_and_is_the_sandbox() -> None:
         "the sandbox moved. That is a decision, not a refactor: the live loop's "
         "UI names this district too (frontend/src/liveloop.tsx, SANDBOX)"
     )
+
+
+def test_the_reset_ends_the_sandboxs_outbreaks_and_only_those() -> None:
+    # Fix #44: the outbreak drill declares an outbreak in the sandbox, and a
+    # reset puts the district back, so the drill's surge must end with it.
+    assert "update(OutbreakEvent)" in SOURCE
+    assert "OutbreakEvent.state_silo == STATE" in SOURCE
+    assert "OutbreakEvent.district == DISTRICT" in SOURCE

@@ -76,6 +76,40 @@ export function WhyLine({
         )}
       </div>
       <p className="mt-0.5 text-[12px] leading-snug text-ink">{a.text}</p>
+      {a.text_hi && (
+        <p lang="hi" className="mt-1 text-[12px] leading-snug text-ink-2">
+          {a.text_hi}
+        </p>
+      )}
+      {/* Fix #46: what the card cannot show. With the model's wording above
+          these are its sources, one click away; without it they are the answer. */}
+      {a.facts && a.facts.length > 0 &&
+        (a.ai ? (
+          <details className="mt-1">
+            <summary className="cursor-pointer text-[10.5px] text-ink-3">
+              The figures this was written from ({a.facts.length})
+            </summary>
+            <ul className="mt-0.5 list-disc space-y-0.5 pl-4 text-[11px] leading-snug text-ink-2">
+              {a.facts.map((f) => (
+                <li key={f}>{f}</li>
+              ))}
+            </ul>
+          </details>
+        ) : (
+          <ul className="mt-1 list-disc space-y-0.5 pl-4 text-[11.5px] leading-snug text-ink">
+            {a.facts.map((f) => (
+              <li key={f}>{f}</li>
+            ))}
+          </ul>
+        ))}
+      {a.facts && a.facts.length > 0 && (
+        <p className="mt-1 text-[10.5px] leading-snug text-ink-3">
+          {a.ai
+            ? "Explanation written by Gemini from the figures below."
+            : "Computed from the stock figures; no model wrote this."}{" "}
+          {a.planned_by}
+        </p>
+      )}
       {a.note && <p className="mt-0.5 text-[10.5px] text-ink-3">{a.note}</p>}
     </div>
   );

@@ -65,6 +65,47 @@ def test_the_committed_file_keeps_only_structured_fields():
     assert data["rows"] and all(set(r) == keys for r in data["rows"])
 
 
-def test_the_endpoint_filters_by_state():
-    out = asyncio.run(api.outbreaks("KL"))
-    assert out.rows and all(r.state_code == "KL" for r in out.rows)
+# The endpoint's state filter is pinned in tests/test_outbreak_panel.py, with
+# the facility counts and active outbreaks it now reads (fix #59).
+
+
+# --------------------------------------------------- the 2026 layout (#43) ---
+# Verbatim text as pypdf extracts it from week 32/2026: the date cells break
+# around their hyphens, and the diseases include names older reports lacked.
+WEEK32_2026 = """AP/KAK/2026/32/1290 Andhra Pradesh Kakinada Hepatitis A 32 0 07-08- 2026 08-08-
+2026 Under Surveillance Cases of fever, abdominal pain and dark coloured urine
+AP/VIS/2026/32/1291 Andhra Pradesh Visakhapatnam Acute Gastroenteritis 25 0 08-08-
+2026 08-08- 2026 Under Surveillance Cases of loose motion and abdominal pain
+BR/PAS/2026/32/1293 Bihar Pashchim Champaran Measles 6 0 01- 08- 2026 03- 08- 2026 Under
+Surveillance Cases of fever with rash were reported, 3 -16 years
+"""
+STATES_2026 = STATES + ["Andhra Pradesh", "Bihar"]
+
+
+def test_dates_broken_across_lines_are_read_whole():
+    rows = idsp.parse_report(WEEK32_2026, STATES_2026)
+    assert [r["unique_id"] for r in rows] == [
+        "AP/KAK/2026/32/1290", "AP/VIS/2026/32/1291", "BR/PAS/2026/32/1293",
+    ]
+    assert (rows[0]["start_date"], rows[0]["reported_date"]) == ("2026-08-07", "2026-08-08")
+    assert (rows[2]["start_date"], rows[2]["reported_date"]) == ("2026-08-01", "2026-08-03")
+    assert rows[2]["status"] == "Under Surveillance"
+
+
+def test_acute_gastroenteritis_is_read_and_drives_rehydration_medicines():
+    rows = idsp.parse_report(WEEK32_2026, STATES_2026)
+    assert rows[1]["disease"] == "Acute Gastroenteritis"
+    assert idsp.DISEASE_MEDICINES["Acute Gastroenteritis"] == ["ORS", "ZINC", "IVFLUID"]
+
+
+def test_the_upload_day_comes_from_ncdc_s_file_name():
+    from datetime import date
+
+    assert idsp.uploaded_on("week32_1790680151.pdf") == date(2026, 9, 29)
+    assert idsp.uploaded_on("week53.pdf") is None
+
+
+def test_the_committed_file_is_the_latest_published_reports():
+    weeks = [(r["year"], r["week"]) for r in idsp.load()["reports"]]
+    assert weeks == [(2026, 31), (2026, 32)]
+    assert all(r["uploaded_on"] for r in idsp.load()["reports"])

@@ -16,11 +16,20 @@ import { type FacilityDetail, type StockRequest } from "../api";
 import DataNotice from "../DataNotice";
 import { both } from "./labels";
 
-const ROLE_WORDS: Record<string, string> = {
-  block_mo: "District logistics officer",
-  state_officer: "State NHM officer",
-  admin: "Platform administrator",
-};
+/** "14:00 today" / "14:00 tomorrow", in the reader's own clock. */
+function approveBy(iso: string): string {
+  const at = new Date(iso);
+  const time = at.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+  const today = new Date();
+  const tomorrow = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+  if (at.toDateString() === today.toDateString()) return `${time} today`;
+  if (at.toDateString() === tomorrow.toDateString()) return `${time} tomorrow`;
+  return `${time} on ${longDate(iso)}`;
+}
+
+function clock(iso: string): string {
+  return new Date(iso).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" });
+}
 
 /** The server returns the constants it used; this turns each into a sentence. */
 const ASSUMPTION_WORDS: Record<string, (v: number) => string> = {
@@ -83,7 +92,8 @@ export default function Receipt({
           {request.reference}
         </h1>
         <p className="mt-2 text-[12.5px] leading-relaxed text-ink-2">
-          This request is awaiting approval. No stock has moved.
+          {request.status_words}. No stock moves until they accept. If there is no reply by{" "}
+          {clock(request.lapses_at)}, the request lapses and you can ask another centre.
         </p>
 
         <dl className="mt-5">
@@ -108,9 +118,12 @@ export default function Receipt({
               {facility.district}, {facility.state_silo}
             </span>
           </Row>
-          <Row label="Status">{request.status}</Row>
-          <Row label="Awaiting approval from">
-            {ROLE_WORDS[request.approver_role] ?? request.approver_role}
+          <Row label="Status">{request.status_words}</Row>
+          <Row label="Decided by">
+            {request.from_name}
+            <span className="block text-[11px] font-normal text-ink-3">
+              the centre that holds the stock accepts or declines
+            </span>
           </Row>
           <Row label="Distance">
             {request.km} km
@@ -119,6 +132,7 @@ export default function Receipt({
             </span>
           </Row>
           <Row label="Estimated delivery">
+            If approved by {approveBy(request.approve_by)}, about{" "}
             {longDate(request.estimated_delivery)}
             <span className="block text-[11px] font-normal text-ink-3">
               {request.estimate_label} — not a scheduled time

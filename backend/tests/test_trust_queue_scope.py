@@ -1,10 +1,11 @@
-"""The audit queue refuses a national scope instead of taking 46 seconds.
+"""The audit queue is never scored for the whole country.
 
 Scoring every facility in the country live measured 46.2s against the deployed
-database (docs/STORAGE_NOTES.md), long enough for the panel's live refresh to
+database, long enough for the panel's live refresh to
 pile requests on top of each other. The queue is about where to send someone,
-which is always a state or a district, so an unbounded request is refused
-before any query runs.
+which is always a state or a district — and since fix #77 it is a list of
+named centres, so it belongs to that state's and district's officers. The
+national role is refused before any query runs.
 """
 
 from __future__ import annotations
@@ -54,15 +55,28 @@ def test_an_administrator_with_no_state_is_refused_before_any_query(monkeypatch)
     monkeypatch.setattr(trust, "audit_queue", spy)
     with pytest.raises(HTTPException) as exc:
         _call(_user("admin"))
-    assert exc.value.status_code == 400
+    assert exc.value.status_code == 403
+    assert not called
+
+
+def test_an_administrator_naming_a_state_is_refused_too(monkeypatch):
+    called = False
+
+    async def spy(*args, **kwargs):
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(trust, "audit_queue", spy)
+    with pytest.raises(HTTPException) as exc:
+        _call(_user("admin"), state="MH")
+    assert exc.value.status_code == 403 and "Maharashtra" in exc.value.detail
     assert not called
 
 
 @pytest.mark.parametrize(
     "user, query, expected",
     [
-        (_user("admin"), {"state": "MH"}, ("MH", None)),
-        (_user("admin"), {"state": "MH", "district": "Nashik"}, ("MH", "Nashik")),
         (_user("state_officer", "BR"), {}, ("BR", None)),
         (_user("block_mo", "MH", "Nashik"), {}, ("MH", "Nashik")),
     ],

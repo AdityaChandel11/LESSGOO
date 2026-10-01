@@ -13,20 +13,49 @@
  * that out is the small rudeness that loses the first thirty seconds.
  */
 
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 
 import DataNotice from "./DataNotice";
-import { ApiError, type DemoAccount, ROLE_LABEL, type Session, auth } from "./api";
+import {
+  ApiError,
+  type DemoAccount,
+  ROLE_LABEL,
+  ROLE_LABEL_HI,
+  type Session,
+  auth,
+} from "./api";
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * What a role card says. Display text only: the account behind the card and
+ * how it signs in are unchanged. The cards name a job, not a place. The one
+ * exception is the pharmacist, whose centre is given as the demo's example.
+ */
+function cardTitle(a: DemoAccount): string {
+  if (a.role === "admin") return "Platform Admin";
+  if (a.role === "state_officer") return "State NHM Officer";
+  if (a.role === "block_mo") return "District Logistics Officer";
+  return `Pharmacist (demo example: ${a.name.replace(/^Pharmacist,\s*/, "")})`;
+}
+
+function cardSees(a: DemoAccount): string {
+  const sees = a.sees ?? "";
+  if (a.role === "state_officer") return sees.replace(/^[^:]+:/, "One state:");
+  if (a.role === "block_mo") return sees.replace(/^[^:]+:/, "One district:");
+  return sees;
+}
 
 export default function SignInPanel({
   onSignedIn,
   showNotice = true,
+  demoGuide,
 }: {
   onSignedIn: (s: Session) => void;
   /** The front door carries its own notice in the footer; the bare page does not. */
   showNotice?: boolean;
+  /** Shown under the demo cards, only when there are demo cards (the front door's script). */
+  demoGuide?: ReactNode;
 }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -46,7 +75,7 @@ export default function SignInPanel({
     e.preventDefault();
     const trimmed = email.trim();
     if (!EMAIL_PATTERN.test(trimmed)) {
-      setEmailError("Enter the email address of your account, for example name@health.gov.in");
+      setEmailError("Enter the email address of your account, for example name@example.org");
       return;
     }
     setBusy(true);
@@ -100,12 +129,18 @@ export default function SignInPanel({
                 >
                   <span className="min-w-0">
                     <span className="block text-[13.5px] font-medium text-ink">
-                      {ROLE_LABEL[a.role]}
+                      {ROLE_LABEL[a.role]}{" "}
+                      <span lang="hi" className="font-normal text-ink-3">
+                        · {ROLE_LABEL_HI[a.role]}
+                      </span>{" "}
+                      <span className="text-[11.5px] font-normal text-ink-3">(demo role)</span>
                     </span>
-                    <span className="block truncate text-[12px] text-ink-3">
-                      {a.name}
-                      {a.role !== "admin" && a.role !== "facility_user" ? ` · ${a.scope}` : ""}
-                    </span>
+                    <span className="block truncate text-[12px] text-ink-3">{cardTitle(a)}</span>
+                    {a.sees && (
+                      <span className="mt-0.5 block text-[12px] leading-snug text-ink-2">
+                        {cardSees(a)}
+                      </span>
+                    )}
                   </span>
                   <span className="shrink-0 text-[12.5px] font-medium text-brand">
                     {demoBusy === a.email ? "Opening…" : "Continue →"}
@@ -114,6 +149,7 @@ export default function SignInPanel({
               </li>
             ))}
           </ul>
+          {demoGuide}
           <div className="mt-8 flex items-center gap-3 text-[11.5px] text-ink-3">
             <span className="h-px flex-1 bg-line" />
             or sign in with an account
@@ -149,7 +185,7 @@ export default function SignInPanel({
               setEmail(e.target.value);
               setEmailError(null);
             }}
-            placeholder="name@health.gov.in"
+            placeholder="name@example.org"
             className="mt-1.5 h-10 w-full rounded-md border border-line bg-panel px-3 text-[14px] placeholder:text-ink-3/70 focus:border-brand focus:ring-2 focus:ring-brand/15 focus:outline-none aria-[invalid]:border-crit"
           />
           {emailError && (

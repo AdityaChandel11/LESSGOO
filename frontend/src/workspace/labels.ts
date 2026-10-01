@@ -24,6 +24,9 @@ export const L = {
   inStock: ["In stock", "उपलब्ध स्टॉक"],
   daysOfCover: ["Days of cover", "कितने दिन का स्टॉक"],
   runsOut: ["Runs out about", "लगभग समाप्त"],
+  countOverdue: ["Count overdue", "गिनती बाकी"],
+  useAndForecast: ["Use and forecast", "खपत और पूर्वानुमान"],
+  countTheShelf: ["Count the shelf", "अलमारी गिनें"],
   notEnoughReadings: ["Not enough readings to estimate", "अनुमान के लिए पर्याप्त रिकॉर्ड नहीं"],
 
   // Verification
@@ -49,6 +52,14 @@ export const L = {
   noCheckIn: ["No check-in recorded", "कोई उपस्थिति दर्ज नहीं"],
   randomChecks: ["Random verification", "आकस्मिक जाँच"],
   onlyYou: ["Only you can see this page.", "यह पृष्ठ केवल आप देख सकते हैं।"],
+
+  // Field simulator (fix list #24)
+  openFieldSimulator: ["Open the field simulator", "फ़ील्ड सिम्युलेटर खोलें"],
+  fieldSimulator: ["Field simulator", "फ़ील्ड सिम्युलेटर"],
+  backToMedicines: ["Back to medicines", "दवाइयों पर वापस"],
+  sentToMap: ["Sent to the district map", "ज़िला नक्शे पर भेजा गया"],
+  rowWritten: ["Row written", "दर्ज रिकॉर्ड"],
+  statusWas: ["Status", "स्थिति"],
 
   // Beds
   bedsOccupied: ["Beds occupied", "भरे हुए बिस्तर"],

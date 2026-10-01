@@ -14,11 +14,15 @@ from __future__ import annotations
 from sqlalchemy import delete, func, select
 
 from app import ingest, movements
+from app.config import settings
 from app.models import BedReport, Facility, MedicineMovement, StaffCheckin, StockReading
 
 from .harness import PREFIX, Checker, Report, client, db
 
-STATE = "MH"
+# The demo accounts may write only inside the public demo sandbox
+# (auth.demo_may_write), so the handsets used here belong to a centre there.
+STATE = settings.demo_sandbox_state
+DISTRICT = settings.demo_sandbox_district
 BATCH = "{0}-SPINE".format(PREFIX)
 
 
@@ -29,7 +33,11 @@ async def run() -> Report:
         facility = (
             await session.execute(
                 select(Facility)
-                .where(Facility.state_silo == STATE, Facility.beds_total > 0)
+                .where(
+                    Facility.state_silo == STATE,
+                    Facility.district == DISTRICT,
+                    Facility.beds_total > 0,
+                )
                 .order_by(Facility.id)
                 .limit(1)
             )

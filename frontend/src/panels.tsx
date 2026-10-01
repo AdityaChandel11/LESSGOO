@@ -4,6 +4,7 @@ import { AttendancePanel } from "./attendancepanel";
 import { BedPanel } from "./bedpanel";
 import { inSandbox } from "./liveloop";
 import { TrustBlock } from "./trustpanel";
+import UsageChart from "./usagechart";
 import {
   type Bucket,
   type FacilityDetail,
@@ -170,15 +171,19 @@ export function NationalPanel({
   onPickState: (b: Bucket) => void;
 }) {
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="border-b border-line px-4 pt-4 pb-4">
+    // No min-h-0 here: the panel may not shrink below its header plus five
+    // list rows. On a short screen the whole side panel scrolls instead.
+    <div className="flex flex-1 flex-col">
+      <div className="shrink-0 border-b border-line px-4 pt-4 pb-4">
         <Eyebrow>National overview</Eyebrow>
         <h2 className="mt-1 text-[22px] font-semibold tracking-tight text-ink">India</h2>
         <p className="mt-0.5 text-[12.5px] text-ink-2">
           {summary
-            ? `${summary.facilities.toLocaleString("en-IN")} facilities · ${summary.states} states & UTs · ${summary.districts} districts`
+            ? `${summary.facilities.toLocaleString("en-IN")} synthetic facilities · ${summary.states} states & UTs · ${summary.districts} districts`
             : "Loading network…"}
         </p>
+        {/* Fix #62: the scale, said plainly; no real-world count without a source. */}
+        <p className="mt-0.5 text-[11px] text-ink-3">A sample for the demo — India has far more health centres and districts than this.</p>
         <p className="mt-3 text-[12px] text-ink-2">
           Condition of <span className="font-medium text-ink">{medicineLabel(sku, skus)}</span>
           {!sku && <span className="text-ink-3"> — each facility's lowest-stocked item</span>}
@@ -194,7 +199,7 @@ export function NationalPanel({
         <Eyebrow>States by facilities critical</Eyebrow>
         <span className="text-[10.5px] text-ink-3">count · share</span>
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto pb-2">
+      <div className="list-min overflow-y-auto pb-2">
         {states.map((b, i) => (
           <BucketRow key={b.key} b={b} rankNo={i + 1} onClick={() => onPickState(b)} />
         ))}
@@ -212,6 +217,7 @@ export function StatePanel({
   skus,
   refreshKey,
   selectedFacilityId,
+  heldRows = null,
   onPickDistrict,
   onPickFacility,
 }: {
@@ -221,6 +227,9 @@ export function StatePanel({
   skus: Sku[];
   refreshKey: number;
   selectedFacilityId: string | null;
+  /** Set when this reader may not read this state's centres (fix #77): the
+   *  facility list says where they are held instead of "none match". */
+  heldRows?: string | null;
   onPickDistrict: (b: Bucket) => void;
   onPickFacility: (p: Pin) => void;
 }) {
@@ -260,17 +269,18 @@ export function StatePanel({
   const med = medicineLabel(sku, skus);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      <div className="border-b border-line px-4 pt-4 pb-4">
+    <div className="flex flex-1 flex-col">
+      <div className="shrink-0 border-b border-line px-4 pt-4 pb-4">
         <Eyebrow>State view</Eyebrow>
         <h2 className="mt-1 text-[22px] font-semibold tracking-tight text-ink">
           {stateLabel || summary?.state_name || stateCode}
         </h2>
         <p className="mt-0.5 text-[12.5px] text-ink-2">
           {summary
-            ? `${summary.facilities} facilities · ${summary.phcs} PHCs · ${summary.chcs} CHCs · ${summary.districts} districts`
+            ? `${summary.facilities} synthetic facilities · ${summary.phcs} PHCs · ${summary.chcs} CHCs · ${summary.districts} districts`
             : "Loading state data…"}
         </p>
+        <p className="mt-0.5 text-[11px] text-ink-3">A sample for the demo, not the state's full network.</p>
         <p className="mt-3 text-[12px] text-ink-2">
           Condition of <span className="font-medium text-ink">{med}</span>
         </p>
@@ -301,7 +311,7 @@ export function StatePanel({
       </div>
 
       {tab === "districts" ? (
-        <div className="min-h-0 flex-1 overflow-y-auto py-1">
+        <div className="list-min overflow-y-auto py-1">
           {districts.map((b, i) => (
             <BucketRow key={b.key} b={b} rankNo={i + 1} onClick={() => onPickDistrict(b)} />
           ))}
@@ -321,7 +331,7 @@ export function StatePanel({
               <span>{sku ? `Days of ${sku}` : "Lowest cover"}</span>
             </div>
           </div>
-          <div className="min-h-0 flex-1 overflow-y-auto pb-2">
+          <div className="list-min overflow-y-auto pb-2">
             {filtered.map((p) => (
               <button
                 key={p.id}
@@ -355,7 +365,9 @@ export function StatePanel({
               </button>
             ))}
             {filtered.length === 0 && (
-              <p className="px-4 py-6 text-center text-[12px] text-ink-3">No facilities match.</p>
+              <p className="px-4 py-6 text-center text-[12px] text-ink-3">
+                {heldRows ?? "No facilities match."}
+              </p>
             )}
           </div>
         </>
@@ -481,7 +493,7 @@ export function FacilityPanel({
                 onClick={() => onSimulateStockOut(detail)}
                 className="mt-3 h-9 w-full rounded-md border border-brand bg-brand/[0.04] text-[13px] font-medium text-brand hover:bg-brand/10 focus:ring-2 focus:ring-brand/30 focus:outline-none"
               >
-                Simulate a stock-out →
+                Stock-out drill →
               </button>
             )}
             <div className="mt-3.5 grid grid-cols-3 gap-2 text-center">
@@ -589,6 +601,8 @@ export function FacilityPanel({
                       title="Next week's rate from the federated model, trained across states. Without a fresh forecast this falls back to the last 28 days of readings."
                     >
                       forecast
+                      {s.forecast_published_at &&
+                        ` · ${new Date(s.forecast_published_at).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}`}
                     </span>
                   )}
                 </span>
@@ -596,6 +610,7 @@ export function FacilityPanel({
                   {s.last_source === "seed" ? "baseline" : `via ${s.last_source}`} · {ago(s.last_reported_at)}
                 </span>
               </div>
+              {detail && <SkuUsage facilityId={detail.id} sku={s.sku_code} />}
             </div>
           );
         })}
@@ -605,32 +620,47 @@ export function FacilityPanel({
   );
 }
 
+/** Fix #84: one medicine's use and forecast, loaded only when opened. */
+function SkuUsage({ facilityId, sku }: { facilityId: string; sku: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details className="mt-1" onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary className="cursor-pointer text-[10.5px] font-medium text-brand">Use and forecast</summary>
+      {open && <UsageChart facilityId={facilityId} sku={sku} />}
+    </details>
+  );
+}
+
 /* ======================================================== field activity === */
 
 export function ActivityFeed({
   events,
   onSimulate,
   canSimulate,
+  sandboxDistrict,
 }: {
   events: LiveEvent[];
   onSimulate: () => void;
   canSimulate: boolean;
+  /** Where the demo report lands — never a centre outside it (fix #79). */
+  sandboxDistrict: string;
 }) {
-  const readings = events.filter((e) => e.kind === "reading.committed").slice(0, 3);
+  const readings = events.filter((e) => e.kind === "reading.committed" && !e.withheld).slice(0, 3);
   return (
     // shrink-0: the footer keeps its own height whatever the panel above it
     // does, instead of being compressed while that panel overflows through it.
     <div className="shrink-0 border-t border-line bg-canvas/60 px-4 py-2.5">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-2">
         <Eyebrow>Field reports</Eyebrow>
-        <button
-          onClick={onSimulate}
-          disabled={!canSimulate}
-          className="text-[11px] font-medium text-brand hover:underline disabled:text-ink-3 disabled:no-underline"
-          title="Sends a report through the same pipeline an SMS will use"
-        >
-          Send test report
-        </button>
+        {canSimulate && (
+          <button
+            onClick={onSimulate}
+            className="text-right text-[11px] font-medium text-brand hover:underline"
+            title={`Writes a real report of 4 ORS sachets for a healthy centre in the ${sandboxDistrict} demo sandbox, through the same pipeline an SMS uses, so you can watch it turn red. Never a centre outside the sandbox.`}
+          >
+            Demo: send a low ORS count from a {sandboxDistrict} centre
+          </button>
+        )}
       </div>
       {readings.length === 0 ? (
         <p className="mt-1 text-[11.5px] text-ink-3">No reports this session yet.</p>

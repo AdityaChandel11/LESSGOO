@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 
 import App from "./App";
 import BrandMark from "./Brand";
+import DemoData from "./DemoData";
+import Notices from "./Notices";
 import Landing from "./Landing";
 import SignInPanel from "./SignInPanel";
 import Workspace from "./workspace/Shell";
@@ -21,6 +23,10 @@ import {
  */
 const LANDING_PATH = "/";
 const SIGN_IN_PATH = "/sign-in";
+/** Public, with or without a session: how the synthetic data is made (fix #28). */
+const DEMO_DATA_PATH = "/demo-data";
+/** Public: privacy, accessibility, sources, help (fix #91). */
+const NOTICES_PATH = "/notices";
 
 function SignIn({
   onSignedIn,
@@ -63,7 +69,12 @@ export default function AuthGate() {
   // whoever was last signed in on that browser — which is the one thing the
   // front door exists to prevent. It is not a sign-out: the session is intact
   // and one click resumes it.
-  const [entered, setEntered] = useState(false);
+  // A link that names a place in the console (view, facility, medicine or
+  // map position) is someone sending you somewhere: with a live session it
+  // opens there, not at the front door (fix #88).
+  const [entered, setEntered] = useState(() =>
+    ["view", "facility", "sku", "at"].some((k) => new URLSearchParams(window.location.search).has(k)),
+  );
 
   useEffect(() => {
     auth
@@ -117,6 +128,15 @@ export default function AuthGate() {
     }
   }, []);
 
+  // Describes the generator, not anybody's data, so it needs no session and
+  // does not wait for the session check.
+  if (path === DEMO_DATA_PATH) {
+    return <DemoData onBack={() => go(LANDING_PATH)} />;
+  }
+  if (path === NOTICES_PATH) {
+    return <Notices onBack={() => go(LANDING_PATH)} />;
+  }
+
   if (checking) {
     return (
       <div className="flex h-full items-center justify-center bg-canvas" aria-busy="true">
@@ -155,7 +175,8 @@ export default function AuthGate() {
       <Landing
         onSignedIn={signedIn}
         resume={{
-          label: `${session.user.name} · ${ROLE_LABEL[session.user.role]}`,
+          // The role, not the account name: the front door names no state or district.
+          label: ROLE_LABEL[session.user.role],
           onResume: () => setEntered(true),
         }}
       />

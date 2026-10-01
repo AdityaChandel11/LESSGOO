@@ -38,7 +38,7 @@ USER_ROLES = ("admin", "state_officer", "block_mo", "facility_user")
 READING_SOURCES = (
     "form", "voice", "photo", "sms", "ivr", "whatsapp", "seed", "transfer",
 )
-TRANSFER_STATUSES = ("proposed", "approved", "rejected", "completed")
+TRANSFER_STATUSES = ("proposed", "approved", "rejected", "completed", "cancelled")
 # Settled states of a batch. "Overdue" is derived from expected_by when read,
 # never stored — see MedicineMovement.
 MOVEMENT_STATUSES = ("in_transit", "received", "short", "over", "cancelled")
@@ -537,6 +537,39 @@ class OutbreakEvent(Base):
     triggered_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    # Fix #41: an active outbreak is a temporary multiplier into the solver
+    # (spec 12.5). District names repeat across states, so the state is part
+    # of the key. `source` is "officer" or "idsp"; `surge_pct` is the
+    # officer's stated expectation, used only when the readings show no rise.
+    state_silo: Mapped[str | None] = mapped_column(Text, index=True)
+    source: Mapped[str] = mapped_column(Text, nullable=False, server_default="officer")
+    source_ref: Mapped[str | None] = mapped_column(Text)
+    surge_pct: Mapped[Decimal | None] = mapped_column(Numeric)
+    declared_by: Mapped[str | None] = mapped_column(Text)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class IdspReport(Base):
+    """One IDSP weekly report as the model read it (fix #42): its rows, each
+    with the regex parser's verdict. Keyed by the PDF's hash, so a report is
+    never read twice; only the newest `idsp_reports_kept` are kept."""
+
+    __tablename__ = "idsp_reports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    sha256: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    year: Mapped[int | None] = mapped_column(Integer)
+    week: Mapped[int | None] = mapped_column(Integer)
+    # An uploaded file's name, or the NCDC address it was fetched from.
+    source: Mapped[str | None] = mapped_column(Text)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    read_by: Mapped[str | None] = mapped_column(Text)
+    read_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+    rows: Mapped[list] = mapped_column(JSONB, nullable=False)
+    dropped: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
 
 class RouteMatrixCache(Base):
@@ -693,8 +726,9 @@ class FacilityBriefing(Base):
     """One cached line of "what to do today", per facility per language.
 
     A cache, and shaped like one. The composite primary key is the per-facility
-    cap: two rows for a centre, ever, overwritten in place rather than appended
-    to, so a judge clicking the button fifty times writes the same two rows.
+    cap: one row per language for a centre, ever, overwritten in place rather
+    than appended to, so a judge clicking the button fifty times writes the
+    same rows.
     `max_briefing_rows` caps the table as a whole, evicting the least recently
     generated — 3,510 facilities in two languages would otherwise be ~4 MB of
     cache on a 1 GB volume.
@@ -723,7 +757,9 @@ class FacilityBriefing(Base):
     )
 
     __table_args__ = (
-        CheckConstraint("lang IN ('en', 'hi')", name="ck_briefings_lang"),
+        # English, Hindi, and the state's own language where one is written
+        # (fix #85): at most three rows for a centre.
+        CheckConstraint("lang ~ '^[a-z]{2}$'", name="ck_briefings_lang"),
         # Eviction reads this; nothing else does.
         Index("ix_briefings_generated_at", "generated_at"),
     )

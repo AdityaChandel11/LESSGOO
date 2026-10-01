@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   type Bucket,
+  type Oversight,
   type Plan,
   type Shortfall,
   type Sku,
@@ -10,6 +11,7 @@ import {
   api,
   formatDays,
 } from "./api";
+import { ChaseButton } from "./chase";
 import { StackBar } from "./panels";
 import { WhyLine } from "./why";
 
@@ -27,7 +29,7 @@ export interface Trip {
   km: number;
   etaHours: number;
   items: Transfer[];
-  status: "proposed" | "approved" | "rejected" | "mixed";
+  status: "proposed" | "approved" | "rejected" | "cancelled" | "mixed";
   urgent: boolean;
   worstDaysBefore: number;
 }
@@ -64,6 +66,19 @@ export function groupTrips(transfers: Transfer[]): Trip[] {
   return trips.sort(
     (a, b) => Number(b.urgent) - Number(a.urgent) || a.worstDaysBefore - b.worstDaysBefore || a.km - b.km,
   );
+}
+
+/**
+ * Fix #48: days of stock as a sentence says them. "<1 day → 2.0 days (14 days
+ * with 1 more)" is a formula; a first-time reader needs "has under 1 day
+ * left; this delivery gives it 2 days".
+ */
+export function daysWords(d: number | null | undefined): string {
+  if (d === null || d === undefined) return "an unknown number of days";
+  if (d < 1) return "under 1 day";
+  if (d >= 60) return "more than 60 days";
+  const shown = d < 10 ? Math.round(d * 10) / 10 : Math.round(d);
+  return `${shown} ${shown === 1 ? "day" : "days"}`;
 }
 
 function travelTime(hours: number): string {
@@ -177,7 +192,187 @@ function isHighImpact(trip: Trip): boolean {
   );
 }
 
+function clock(iso: string): string {
+  return new Date(iso).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+/**
+ * Fix #39: the pipeline and the exceptions, counted from the rows. The donor
+ * centre decides every trip; these are what an officer watches and acts on.
+ */
+function OversightBlock({ o }: { o: Oversight }) {
+  const p = o.pipeline;
+  const stages: [string, number][] = [
+    ["Recommended", p.recommended],
+    ["Awaiting donor", p.awaiting_donor],
+    ["Accepted", p.accepted],
+    ["In transit", p.in_transit],
+    ["Received", p.received],
+    ["Received in full", p.verified],
+  ];
+  return (
+    <div className="border-b border-line px-4 py-3">
+      <Eyebrow>Pipeline, last {o.window_days} days</Eyebrow>
+      <ol className="mt-1.5 flex flex-wrap items-center gap-x-1 gap-y-1 text-[11.5px]">
+        {stages.map(([label, n], i) => (
+          <li key={label} className="flex items-center gap-1">
+            {i > 0 && <span aria-hidden="true" className="text-ink-3">→</span>}
+            <span className="text-ink-2">{label}</span>
+            <span className="font-mono font-semibold tabular-nums text-ink">{n.toLocaleString("en-IN")}</span>
+          </li>
+        ))}
+      </ol>
+      {(p.declined > 0 || p.withdrawn > 0) && (
+        <p className="mt-1 text-[11px] text-ink-3">
+          {p.declined} declined by the donor · {p.withdrawn} withdrawn by the centre that asked
+        </p>
+      )}
+      {o.outcomes && <Outcomes o={o.outcomes} days={o.critical_days} />}
+    </div>
+  );
+}
+
+function span(hours: number): string {
+  if (hours < 1) return "under 1 hour";
+  if (hours < 48) return `${Math.round(hours)} hours`;
+  return `${(hours / 24).toFixed(1)} days`;
+}
+
+/**
+ * Fix #49: outcomes, not promises. Everything here is counted from confirmed
+ * receipts in the ledger; nothing estimates what would have happened without
+ * the trips, so there is no "stock-outs averted" figure.
+ */
+function Outcomes({ o, days }: { o: NonNullable<Oversight["outcomes"]>; days: number }) {
+  if (o.received === 0) {
+    return (
+      <p className="mt-2 text-[11px] leading-snug text-ink-3">
+        Outcomes: no delivery from these trips has been confirmed by its receiver yet.
+      </p>
+    );
+  }
+  return (
+    <div className="mt-2 border-t border-line pt-2">
+      <Eyebrow>Outcomes · नतीजे</Eyebrow>
+      <ul className="mt-1 space-y-0.5 text-[11.5px] leading-snug text-ink-2">
+        <li>
+          <span className="font-mono font-semibold tabular-nums text-ink">{o.received.toLocaleString("en-IN")}</span>{" "}
+          {o.received === 1 ? "delivery" : "deliveries"} confirmed by the receiver:{" "}
+          {o.in_full.toLocaleString("en-IN")} in full
+          {o.short > 0 && (
+            <>
+              , <span className="font-medium text-crit">{o.short.toLocaleString("en-IN")} short</span> (
+              {o.units_short.toLocaleString("en-IN")} units sent and not counted)
+            </>
+          )}
+          {o.over > 0 && `, ${o.over.toLocaleString("en-IN")} over`}.
+        </li>
+        {o.median_hours != null && (
+          <li>Recommendation to confirmed receipt: {span(o.median_hours)} (median).</li>
+        )}
+        {o.were_critical > 0 && (
+          <li>
+            {o.lifted.toLocaleString("en-IN")} of {o.were_critical.toLocaleString("en-IN")} centres that were under{" "}
+            {days} days when their trip was recommended are above that line now.
+          </li>
+        )}
+      </ul>
+      <p className="mt-1 text-[10.5px] leading-snug text-ink-3">
+        Counted from confirmed receipts. No estimate of stock-outs averted is made.
+      </p>
+    </div>
+  );
+}
+
+function ExceptionGroup({
+  title,
+  total,
+  children,
+}: {
+  title: string;
+  total: number;
+  children: React.ReactNode;
+}) {
+  if (total === 0) return null;
+  return (
+    <details className="border-b border-line px-4 py-2.5" open={total <= 5}>
+      <summary className="cursor-pointer text-[12px] font-semibold text-ink">
+        {title} <span className="font-mono text-ink-3">{total.toLocaleString("en-IN")}</span>
+      </summary>
+      <ul className="mt-1.5 space-y-1">{children}</ul>
+    </details>
+  );
+}
+
+function Exceptions({ o }: { o: Oversight }) {
+  const none =
+    o.no_reply_total + o.not_received_total + o.unreached_total + o.controlled_total + o.declined.length === 0;
+  return (
+    <div>
+      <div className="border-b border-line bg-canvas px-4 py-2">
+        <Eyebrow>Exceptions · officers act on these</Eyebrow>
+        {none && <p className="mt-1 text-[12px] text-ink-2">Nothing stuck and nothing unreached.</p>}
+      </div>
+      <ExceptionGroup
+        title="Arrived short — sent against what the receiver counted"
+        total={o.short_deliveries?.length ?? 0}
+      >
+        {(o.short_deliveries ?? []).map((d) => (
+          <li key={d.movement_id} className="text-[11.5px] text-ink-2">
+            <span className="font-medium text-ink">{d.to.name}</span> ({d.to.district}) · {d.sku_name} · sent{" "}
+            {d.sent.toLocaleString("en-IN")}, counted {d.received.toLocaleString("en-IN")}
+          </li>
+        ))}
+      </ExceptionGroup>
+      <ExceptionGroup title={`No reply from the donor in over ${o.reply_window_hours} h`} total={o.no_reply_total}>
+        {o.no_reply.slice(0, 8).map((t) => (
+          <li key={t.transfer_id} className="text-[11.5px] text-ink-2">
+            <span className="font-medium text-ink">{t.from.name}</span> → {t.to.name} · {t.sku_name} · asked{" "}
+            {new Date(t.created_at).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}
+          </li>
+        ))}
+      </ExceptionGroup>
+      <ExceptionGroup title="Dispatched, not received by the expected day" total={o.not_received_total}>
+        {o.not_received.slice(0, 8).map((m) => (
+          <li key={m.movement_id} className="text-[11.5px] text-ink-2">
+            <span className="font-medium text-ink">{m.to.name}</span> · {m.sku_name} · batch {m.batch} · expected{" "}
+            {new Date(m.expected_by).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}
+            <span className="ml-1.5 inline-block">
+              <ChaseButton facilityId={m.to.facility_id} topic="receipt" movementId={m.movement_id} label="Chase receipt" />
+            </span>
+          </li>
+        ))}
+      </ExceptionGroup>
+      <ExceptionGroup
+        title={`Under ${o.critical_days} days and no recommendation reaches them — escalate to the state warehouse`}
+        total={o.unreached_total}
+      >
+        {o.unreached.slice(0, 8).map((u) => (
+          <li key={`${u.facility_id}:${u.sku_code}`} className="text-[11.5px] text-ink-2">
+            <span className="font-medium text-ink">{u.name}</span> ({u.district}) · {u.sku_name} · {formatDays(u.days)} left
+          </li>
+        ))}
+      </ExceptionGroup>
+      <ExceptionGroup title="Controlled medicines short — manual review, never routed automatically" total={o.controlled_total}>
+        {o.controlled.slice(0, 8).map((u) => (
+          <li key={`${u.facility_id}:${u.sku_code}`} className="text-[11.5px] text-ink-2">
+            <span className="font-medium text-ink">{u.name}</span> ({u.district}) · {u.sku_name} · {formatDays(u.days)} left
+          </li>
+        ))}
+      </ExceptionGroup>
+      <ExceptionGroup title="Declined by the donor" total={o.declined.length}>
+        {o.declined.slice(0, 8).map((t) => (
+          <li key={t.transfer_id} className="text-[11.5px] text-ink-2">
+            <span className="font-medium text-ink">{t.from.name}</span> declined {t.sku_name} for {t.to.name}
+          </li>
+        ))}
+      </ExceptionGroup>
+    </div>
+  );
+}
+
 export function RedistributionPanel({
+  stateCode,
   stateLabel,
   sku,
   skus,
@@ -188,13 +383,17 @@ export function RedistributionPanel({
   planMs,
   highlightTripId,
   canPlan,
+  viewOnlyNote,
   canDecide,
   onPlan,
   onDecideTrip,
   onHoverTrip,
   onFocusTrip,
 }: {
+  stateCode: string;
   canPlan: boolean;
+  /** Why the plan is view-only, when the usual reason is not the true one. */
+  viewOnlyNote?: string;
   canDecide: (trip: Trip) => boolean;
   stateLabel: string;
   sku: string | null;
@@ -214,6 +413,33 @@ export function RedistributionPanel({
   const [visibleCount, setVisibleCount] = useState(40);
   const [busy, setBusy] = useState<Set<string>>(new Set());
   const [errors, setErrors] = useState<Record<number, string>>({});
+  const [oversight, setOversight] = useState<Oversight | null>(null);
+  // Once the list is scrolled, the header shrinks to its title and button so
+  // the trips keep the panel (fix #52).
+  const [compact, setCompact] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+
+  // Re-read whenever the trips change: the same poll that moves the list
+  // moves the pipeline.
+  useEffect(() => {
+    let alive = true;
+    api
+      .oversight(stateCode)
+      .then((o) => alive && setOversight(o))
+      .catch(() => alive && setOversight(null));
+    return () => {
+      alive = false;
+    };
+  }, [stateCode, transfers]);
+
+  // Progress while the solver runs: plain elapsed seconds, nothing animated.
+  useEffect(() => {
+    if (!planning) return;
+    setElapsed(0);
+    const started = Date.now();
+    const id = window.setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 1000);
+    return () => window.clearInterval(id);
+  }, [planning]);
 
   const medicine = sku ? (skus.find((s) => s.code === sku)?.name ?? sku) : "all medicines";
 
@@ -263,10 +489,30 @@ export function RedistributionPanel({
       <div className="border-b border-line px-4 pt-4 pb-4">
         <Eyebrow>Redistribution</Eyebrow>
         <h2 className="mt-1 text-[22px] font-semibold tracking-tight text-ink">{stateLabel}</h2>
-        <p className="mt-0.5 text-[12.5px] text-ink-2">
-          Transfers of <span className="font-medium text-ink">{medicine}</span> between facilities
-          in this state
+        <p className={`mt-0.5 text-[12.5px] leading-snug text-ink-2 ${compact ? "hidden" : ""}`}>
+          {oversight && oversight.computed_at ? (
+            <>
+              The system recommends{" "}
+              <span className="font-medium text-ink">{oversight.recommended_open.toLocaleString("en-IN")}</span> transfers
+              in {stateLabel}, last updated {clock(oversight.computed_at)} from the stock reported by then. Each goes to the
+              donor centre to accept — nothing moves without them.
+              {oversight.cross_district_open != null &&
+                (oversight.cross_district_open > 0
+                  ? ` ${oversight.cross_district_open.toLocaleString("en-IN")} of the open trips cross a district line.`
+                  : " None of the open trips crosses a district line.")}
+              {oversight.requests_open > 0 &&
+                ` ${oversight.requests_open} requests between centres are waiting for their donors too.`}
+            </>
+          ) : (
+            <>
+              No recommendations are open for {stateLabel}. Each one the system makes goes to the donor centre to
+              accept — nothing moves without them.
+            </>
+          )}
+          {sku && <> Showing <span className="font-medium text-ink">{medicine}</span>.</>}
         </p>
+        {/* Fix #92: the main channel this prototype does not model, said where supply is shown. */}
+        <p className={`mt-1 text-[11px] leading-snug text-ink-3 ${compact ? "hidden" : ""}`}>Most replenishment in practice is by indent to the district drug warehouse; this prototype models centre-to-centre transfers and the warehouse dispatch ledger.</p>
 
         <div className="mt-3 flex items-center gap-2">
           {canPlan ? (
@@ -275,34 +521,35 @@ export function RedistributionPanel({
               disabled={planning}
               className="h-9 rounded-md bg-brand px-3.5 text-[13px] font-medium text-white hover:bg-brand/90 disabled:opacity-60"
             >
-              {planning ? "Solving…" : plan || transfers.length ? "Re-run plan" : "Generate transfer plan"}
+              {planning ? `Solving… ${elapsed} s` : "Update recommendations"}
             </button>
           ) : (
             <p className="rounded-md bg-canvas px-2.5 py-1.5 text-[12px] text-ink-2">
-              View only. Plans for {stateLabel} are generated by its state officers.
+              {viewOnlyNote ?? `View only. Plans for ${stateLabel} are generated by its state officers.`}
             </p>
           )}
-          {plan && planMs !== null && (
+          {oversight?.computed_at && !planning && (
             <span className="text-[11px] text-ink-3">
-              Solved with {plan.solver === "ortools" ? "OR-Tools" : plan.solver} in{" "}
-              {(planMs / 1000).toFixed(1)} s
+              Last updated {clock(oversight.computed_at)} · {oversight.reports_since.toLocaleString("en-IN")} stock
+              reports since
+              {plan && planMs !== null &&
+                ` · solved with ${plan.solver === "ortools" ? "OR-Tools" : plan.solver} in ${(planMs / 1000).toFixed(1)} s`}
             </span>
           )}
         </div>
         {planError && <p className="mt-2 text-[12px] text-crit">{planError}</p>}
 
-        {plan ? (
+        {compact ? null : oversight && (oversight.recommended_open > 0 || oversight.unreached_total > 0) ? (
           <div className="mt-3 grid grid-cols-3 gap-px overflow-hidden rounded-lg border border-line bg-line">
-            <Stat value={counts.open.toLocaleString("en-IN")} label="trips to decide" />
+            <Stat value={counts.open.toLocaleString("en-IN")} label="trips awaiting their donors" />
             <Stat
-              value={String(plan.totals.facilities_helped)}
-              label="facilities helped"
-              tone={STATUS_COLOR.healthy}
+              value={oversight.would_lift.toLocaleString("en-IN")}
+              label={`would be lifted above ${oversight.critical_days} days if accepted`}
             />
             <Stat
-              value={String(plan.totals.facilities_still_short)}
-              label="still short"
-              tone={plan.totals.facilities_still_short ? STATUS_COLOR.critical : undefined}
+              value={oversight.unreached_total.toLocaleString("en-IN")}
+              label="short with no open trip — escalate to the state warehouse"
+              tone={oversight.unreached_total ? STATUS_COLOR.critical : undefined}
             />
           </div>
         ) : (
@@ -324,8 +571,8 @@ export function RedistributionPanel({
           {(
             [
               ["impact", "High impact", impact.length],
-              ["open", `To decide`, counts.open],
-              ["approved", "Approved", counts.approved],
+              ["open", "Awaiting donor", counts.open],
+              ["approved", "Accepted", counts.approved],
               ["all", "All", trips.length],
             ] as const
           ).map(([v, label, n]) => (
@@ -346,7 +593,10 @@ export function RedistributionPanel({
         </div>
       )}
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div
+        className="min-h-0 flex-1 overflow-y-auto"
+        onScroll={(e) => setCompact(e.currentTarget.scrollTop > 40)}
+      >
         {view === "impact" && trips.length > 0 && (
           <p className="border-b border-line bg-canvas px-4 py-2 text-[11.5px] text-ink-2">
             Receivers under {CRITICAL_DAYS} days of stock that this trip alone lifts to{" "}
@@ -384,14 +634,22 @@ export function RedistributionPanel({
           </p>
         )}
 
-        {scopedUnmet.length > 0 && (
+        {oversight?.rows_withheld && (
+          // Fix #77: the counts are an aggregate; trips and exceptions name centres.
+          <p role="note" className="mx-4 mt-3 rounded border border-line bg-canvas px-3 py-2 text-[12px] leading-snug text-ink-2">
+            {oversight.rows_withheld} The counts below are shown; the trips and the lists of centres are not.
+          </p>
+        )}
+        {oversight && <OversightBlock o={oversight} />}
+        {oversight && <Exceptions o={oversight} />}
+        {!oversight && scopedUnmet.length > 0 && (
           <ShortfallList
             title="Still short — escalate to state warehouse"
             tone={STATUS_COLOR.critical}
             items={scopedUnmet}
           />
         )}
-        {scopedManual.length > 0 && (
+        {!oversight && scopedManual.length > 0 && (
           <ShortfallList
             title="Controlled substances — manual review"
             tone="#4a525c"
@@ -439,6 +697,12 @@ function TripCard({
             <span className="font-medium text-ink">{trip.from.name}</span>
             <span className="mx-1.5 text-ink-3">→</span>
             <span className="font-medium text-ink">{trip.to.name}</span>
+            {/* Fix #38: said in words, so it does not rest on colour. */}
+            {trip.from.district !== trip.to.district && (
+              <span className="mt-0.5 block text-[11px] font-medium text-brand">
+                {trip.from.district} → {trip.to.district} · cross-district · अंतर-ज़िला
+              </span>
+            )}
           </div>
           <span
             className="shrink-0 font-mono text-[11px] text-ink-3 tabular-nums"
@@ -466,41 +730,55 @@ function TripCard({
                   {Math.round(t.qty).toLocaleString("en-IN")} {t.unit}
                 </span>
               </div>
-              <div className="flex items-baseline justify-between gap-2 text-[11px] text-ink-3">
-                <span>
-                  Receiver{" "}
-                  <span style={{ color: STATUS_COLOR[r.recipient_status ?? "at_risk"] }}>
-                    {formatDays(r.recipient_days_before)}
-                  </span>{" "}
-                  → <span className="text-ink-2">{formatDays(r.recipient_days_after_this)}</span>
-                  {others > 0 && (
-                    <span title="Once the other transfers of this medicine to this facility are approved too">
-                      {" "}
-                      ({formatDays(r.recipient_days_after_plan)} with {others} more)
-                    </span>
-                  )}
-                </span>
-                <span
-                  title={
-                    (r.donor_outgoing_transfers ?? 1) > 1
-                      ? `After all ${r.donor_outgoing_transfers} of this donor's transfers of this medicine`
-                      : undefined
-                  }
-                >
-                  donor keeps at least {formatDays(r.donor_days_after_plan)}
-                </span>
-              </div>
+              {/* Fix #48: the same figures, as sentences. */}
+              <p className="text-[11px] leading-snug text-ink-2">
+                {trip.to.name} has{" "}
+                <span className="font-medium" style={{ color: STATUS_COLOR[r.recipient_status ?? "at_risk"] }}>
+                  {daysWords(r.recipient_days_before)}
+                </span>{" "}
+                left. This delivery gives it{" "}
+                <span className="font-medium text-ink">{daysWords(r.recipient_days_after_this)}</span>
+                {others > 0 &&
+                  `; with the ${others} other ${others === 1 ? "delivery" : "deliveries"} of this medicine planned for it, ${daysWords(r.recipient_days_after_plan)}`}
+                .
+              </p>
+              <p className="text-[11px] leading-snug text-ink-3">
+                {trip.from.name} keeps at least {daysWords(r.donor_days_after_plan)}
+                {(r.donor_outgoing_transfers ?? 1) > 1 &&
+                  ` after all ${r.donor_outgoing_transfers} of its deliveries of this medicine`}
+                .
+              </p>
+              {r.outbreak && (
+                // Why this trip exists: an active outbreak raised the
+                // receiver's expected use (spec v3 §12.5), on a stated basis.
+                <p className="text-[11px] leading-snug text-ink-2">
+                  <span className="font-medium text-ink">Sent ahead</span> for {r.outbreak.disease} in{" "}
+                  {r.outbreak.district}: use there is taken as {r.outbreak.multiplier.toFixed(2)} times the usual (
+                  {r.outbreak.basis === "observed"
+                    ? "the rise seen in the district's own readings"
+                    : "the declaring officer's assumption"}
+                  ). Without the outbreak {trip.to.name} would have{" "}
+                  {daysWords(r.outbreak.recipient_days_without_outbreak)}.
+                </p>
+              )}
               {t.status !== "proposed" && (
                 <div
                   className="text-[11px] font-medium"
-                  style={{ color: t.status === "rejected" ? "#7d858f" : STATUS_COLOR.healthy }}
+                  style={{
+                    color:
+                      t.status === "rejected" || t.status === "cancelled"
+                        ? "#7d858f"
+                        : STATUS_COLOR.healthy,
+                  }}
                 >
                   {/* Approval dispatches the batch; the recipient's stock only
                       rises when someone at the receiving end confirms it
                       arrived, and that pair is tracked under Movements. */}
                   {t.status === "rejected"
                     ? "Rejected"
-                    : "Approved · dispatched, awaiting confirmation"}
+                    : t.status === "cancelled"
+                      ? "Cancelled by the centre that asked for it"
+                      : "Approved · dispatched, awaiting confirmation"}
                 </div>
               )}
               {errors[t.id] && <div className="mt-0.5 text-[11px] text-crit">{errors[t.id]}</div>}

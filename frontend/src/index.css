@@ -29,6 +29,44 @@ body {
   font-feature-settings: "tnum" 0;
 }
 
+/* ------------------------------------------------------- side panel --- */
+
+/* One scroll container per panel: the side panel itself (the page, on a
+   phone). Every view inside it used to be a fixed-height column with its own
+   inner scroller, so whatever sat above a list took the list's height. Here,
+   once, for every tab: nothing inside the panel scrolls on its own, nothing
+   inside it is height-capped, and no block gives up height to another. */
+.panel-scroll .overflow-y-auto {
+  overflow-y: visible;
+  max-height: none;
+}
+
+.panel-scroll .min-h-0 {
+  min-height: auto;
+}
+
+.panel-scroll .flex-col > * {
+  flex-shrink: 0;
+}
+
+.panel-scroll > .h-full {
+  height: auto;
+  flex: 1 0 auto;
+}
+
+/* A ranked list keeps room for five rows (5 x 51px) even while it loads. */
+.list-min {
+  min-height: 256px;
+}
+
+/* The Federation view is the centre of the product, so it reads at a larger
+   size than the side lists once it has the wider panel. */
+@media (min-width: 768px) {
+  .fed-panel {
+    zoom: 1.12;
+  }
+}
+
 /* ------------------------------------------------------------ map chrome --- */
 
 .leaflet-container {
@@ -162,6 +200,26 @@ body {
   animation: livepulse 2s ease-in-out infinite;
 }
 
+/* Landing map: a critical state's ring widens and fades once every 2 seconds,
+   well under one flash per second. */
+@keyframes pulsering {
+  0% {
+    transform: scale(1);
+    opacity: 0.5;
+  }
+  70%,
+  100% {
+    transform: scale(2.2);
+    opacity: 0;
+  }
+}
+
+.pulse-ring {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pulsering 2s ease-out infinite;
+}
+
 @keyframes toastin {
   from {
     opacity: 0;
@@ -183,6 +241,10 @@ body {
   .donut {
     animation: none;
     transition: none;
+  }
+  .pulse-ring {
+    animation: none;
+    display: none;
   }
 }
 

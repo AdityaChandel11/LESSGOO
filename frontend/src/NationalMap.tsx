@@ -78,6 +78,11 @@ interface Props {
    *  tab is open so the four silos are visible on the country, not only in a
    *  table beside it. */
   siloStates?: string[];
+  /** Districts with an active outbreak (fix #59), marked at every zoom. */
+  outbreakDistricts?: OutbreakMark[];
+  /** The area whose centres this reader may see (fix #77); null for the
+   *  national role. Elsewhere the district summary stands in for the pins. */
+  rowsScope?: { state: string; district: string | null } | null;
   /** Null until runtime config has loaded. */
   basemap?: { mode: "osm" | "google"; key: string } | null;
   onBasemapFallback?: (reason: string) => void;
@@ -90,6 +95,30 @@ const ROUTE_COLOR = { proposed: "#0b3d5c", approved: "#1b9150", mixed: "#0b3d5c"
 /** The ring marking a state that trains the shared model. Brand navy, so it
  *  reads as chrome rather than joining the three status colours. */
 const SILO_RING = "#0b3d5c";
+
+export interface OutbreakMark {
+  id: number;
+  lat: number;
+  lng: number;
+  /** "Cholera · Nashik" — the tooltip and the accessible name. */
+  label: string;
+}
+
+/** An active outbreak's district: a navy diamond outline, a different shape
+ *  from every stock marker so it is not read as a fourth status colour. */
+function outbreakIcon(label: string): L.DivIcon {
+  return L.divIcon({
+    className: "",
+    iconSize: [26, 26],
+    iconAnchor: [13, 13],
+    html: `<svg width="26" height="26" viewBox="0 0 26 26" role="img" aria-label="Active outbreak: ${label.replace(/"/g, "&quot;")}">
+      <rect x="5" y="5" width="16" height="16" transform="rotate(45 13 13)" fill="#ffffff" fill-opacity="0.85"
+        stroke="${SILO_RING}" stroke-width="2.5"/>
+      <rect x="11.75" y="7.5" width="2.5" height="7" fill="${SILO_RING}"/>
+      <rect x="11.75" y="16" width="2.5" height="2.5" fill="${SILO_RING}"/>
+    </svg>`,
+  });
+}
 // Past this many trips, per-route arrowheads become noise; only the highlighted
 // route keeps one.
 const MAX_ARROWS = 120;
@@ -207,6 +236,8 @@ export default function NationalMap({
   highlightRouteId = null,
   initialView = null,
   siloStates,
+  outbreakDistricts,
+  rowsScope = null,
   basemap = null,
   onBasemapFallback,
   onView,
@@ -216,6 +247,7 @@ export default function NationalMap({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
   const layerRef = useRef<L.LayerGroup | null>(null);
+  const outbreakLayerRef = useRef<L.LayerGroup | null>(null);
   const routesLayerRef = useRef<L.LayerGroup | null>(null);
   const routesRendererRef = useRef<L.Canvas | null>(null);
 
@@ -234,11 +266,11 @@ export default function NationalMap({
   // rather than capturing stale ones.
   const props = useRef({
     sku, selectedFacilityId, onView, onSelectFacility, routes, highlightRouteId, onSelectRoute,
-    onBasemapFallback, siloStates,
+    onBasemapFallback, siloStates, rowsScope,
   });
   props.current = {
     sku, selectedFacilityId, onView, onSelectFacility, routes, highlightRouteId, onSelectRoute,
-    onBasemapFallback, siloStates,
+    onBasemapFallback, siloStates, rowsScope,
   };
 
   const skuLabel = () => props.current.sku ?? "all medicines";
@@ -276,6 +308,18 @@ export default function NationalMap({
           .addTo(layer);
       }
       return;
+    }
+
+    // Fix #77: where this reader may not read centres, the district summary
+    // stands in for the pins instead of an empty map.
+    const scope = props.current.rowsScope;
+    for (const b of districtsRef.current) {
+      const readable =
+        !!scope && scope.state === b.parent && (scope.district === null || scope.district === b.label);
+      if (readable) continue;
+      L.marker([b.lat, b.lng], { icon: donutIcon(b, "district"), riseOnHover: true })
+        .bindTooltip(bucketTooltip(b, skuLabel()), { direction: "top", offset: [0, -22] })
+        .addTo(layer);
     }
 
     const selected = props.current.selectedFacilityId;
@@ -377,19 +421,25 @@ export default function NationalMap({
       if (totals.size) {
         focusState = [...totals.entries()].sort((a, b) => b[1] - a[1])[0][0];
       } else {
-        // Zoomed into a gap between district anchors: fall back to the
-        // nearest state centre so the panel never goes blank mid-pan.
+        // Zoomed into a gap between district anchors: fall back to the state
+        // of the nearest district, so the panel never goes blank mid-pan. Not
+        // the nearest state centre: a deep link to Nashik at zoom 11 sits
+        // closer to Dadra & Nagar Haveli's centre than to Maharashtra's (#88).
         const c = map.getCenter();
-        let best: Bucket | null = null;
-        let bestD = Infinity;
-        for (const s of statesRef.current) {
-          const dist = (s.lat - c.lat) ** 2 + (s.lng - c.lng) ** 2;
-          if (dist < bestD) {
-            bestD = dist;
-            best = s;
+        const near = (pts: Bucket[]) => {
+          let best: Bucket | null = null;
+          let bestD = Infinity;
+          for (const x of pts) {
+            const dist = (x.lat - c.lat) ** 2 + (x.lng - c.lng) ** 2;
+            if (dist < bestD) {
+              bestD = dist;
+              best = x;
+            }
           }
-        }
-        focusState = best?.key ?? null;
+          return best;
+        };
+        const district = near(districtsRef.current.filter((d) => d.parent));
+        focusState = district?.parent ?? near(statesRef.current)?.key ?? null;
       }
     }
 
@@ -473,7 +523,11 @@ export default function NationalMap({
     routesLayerRef.current = L.layerGroup().addTo(map);
 
     layerRef.current = L.layerGroup().addTo(map);
+    outbreakLayerRef.current = L.layerGroup().addTo(map);
     mapRef.current = map;
+    // The side panel changes width between views; Leaflet has to be told.
+    const resized = new ResizeObserver(() => map.invalidateSize());
+    resized.observe(hostRef.current);
 
     // Tier switches happen on every zoom frame, not at the end of the
     // animation — otherwise a fly-out shows stale facility dots for a second
@@ -528,9 +582,11 @@ export default function NationalMap({
     return () => {
       if (moveTimerRef.current) window.clearTimeout(moveTimerRef.current);
       abortRef.current?.abort();
+      resized.disconnect();
       map.remove();
       mapRef.current = null;
       layerRef.current = null;
+      outbreakLayerRef.current = null;
       routesLayerRef.current = null;
       routesRendererRef.current = null;
       pinMarkers.clear();
@@ -697,6 +753,26 @@ export default function NationalMap({
   useEffect(() => {
     if (mapRef.current && tierFor(mapRef.current.getZoom()) === "state") draw();
   }, [siloStates]);
+
+  // Fix #59: districts with an active outbreak, on a layer of their own so a
+  // redraw of the stock markers never drops them. Keyed on the ids and
+  // labels, not the array, which is rebuilt on every poll.
+  const outbreakKey = (outbreakDistricts ?? []).map((o) => `${o.id}:${o.label}`).join("|");
+  useEffect(() => {
+    const layer = outbreakLayerRef.current;
+    if (!layer) return;
+    layer.clearLayers();
+    for (const o of outbreakDistricts ?? []) {
+      L.marker([o.lat, o.lng], {
+        icon: outbreakIcon(o.label),
+        interactive: true,
+        keyboard: false,
+        zIndexOffset: 500,
+      })
+        .bindTooltip(`Active outbreak: ${o.label}`, { direction: "top", offset: [0, -12] })
+        .addTo(layer);
+    }
+  }, [outbreakKey]);
 
   useEffect(() => {
     if (flyTarget && mapRef.current) {

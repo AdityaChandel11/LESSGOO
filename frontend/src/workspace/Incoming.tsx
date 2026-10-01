@@ -12,10 +12,16 @@ export default function Incoming({
   facilityId,
   demoMode,
   onChanged,
+  mayDecide,
+  sandboxLabel,
 }: {
   facilityId: string;
   demoMode: boolean;
   onChanged: () => void;
+  /** Mirrors can.decideTransfer; absent means this centre decides everything here. */
+  mayDecide?: (t: Transfer) => boolean;
+  /** A public demo account's sandbox, named when a request falls outside it. */
+  sandboxLabel?: string;
 }) {
   const [rows, setRows] = useState<Transfer[] | null>(null);
   const [busy, setBusy] = useState<number | "demo" | null>(null);
@@ -46,6 +52,8 @@ export default function Incoming({
       onChanged();
     } catch (e) {
       setNote(e instanceof ApiError ? e.message : "Could not record the decision");
+      // A re-plan may have replaced this recommendation; show the current list.
+      load();
     } finally {
       setBusy(null);
     }
@@ -72,7 +80,7 @@ export default function Incoming({
         </h2>
         {demoMode && (
           <button onClick={simulate} disabled={busy !== null} className="text-[11.5px] font-medium text-brand hover:underline disabled:opacity-50">
-            {busy === "demo" ? "Asking…" : "Simulate a request from a neighbour"}
+            {busy === "demo" ? "Asking…" : "Demo: have a nearby centre ask you for stock"}
           </button>
         )}
       </div>
@@ -86,25 +94,50 @@ export default function Incoming({
           {rows.map((t) => (
             <li key={t.id} className="rounded-md border border-line px-2.5 py-2">
               <p className="text-[12.5px] text-ink">
-                <span className="font-medium">{t.to.name}</span> asks for{" "}
+                {/* Fix #40: a state-plan recommendation is not a request the centre typed. */}
+                <span className="font-medium">{t.to.name}</span>{" "}
+                {t.triggered_by === "facility_request" ? "asks for" : "is recommended"}{" "}
                 <span className="font-mono">{Math.round(t.qty).toLocaleString("en-IN")}</span> {t.unit} of{" "}
                 <span className="font-medium">{t.sku_name}</span>
               </p>
               <p className="mt-0.5 text-[11px] text-ink-3">
-                ~{Math.round(t.route_km)} km
+                {t.triggered_by === "facility_request"
+                  ? "Requested by the centre"
+                  : t.rationale.outbreak
+                    ? `Recommended by the state plan — pre-positioning for ${t.rationale.outbreak.disease}`
+                    : "Recommended by the state plan"}
+                {" · "}~{Math.round(t.route_km)} km
                 {t.rationale.recipient_days_before != null &&
                   ` · they have ${formatDays(t.rationale.recipient_days_before)} left`}
                 {t.rationale.donor_days_after_plan != null &&
                   ` · you keep ${formatDays(t.rationale.donor_days_after_plan)}`}
               </p>
-              <div className="mt-1.5 flex justify-end gap-2">
-                <button onClick={() => decide(t, "reject")} disabled={busy !== null} className="h-7 rounded-md border border-line px-2.5 text-[12px] font-medium text-ink-2 hover:bg-canvas disabled:opacity-50">
-                  Decline
-                </button>
-                <button onClick={() => decide(t, "approve")} disabled={busy !== null} className="h-7 rounded-md bg-ok px-2.5 text-[12px] font-medium text-white disabled:opacity-50">
-                  {busy === t.id ? "Sending…" : "Accept and send"}
-                </button>
-              </div>
+              {t.rationale.updated_at && (
+                <p className="mt-0.5 text-[11px] text-ink-3">
+                  This recommendation was updated at{" "}
+                  {new Date(t.rationale.updated_at).toLocaleTimeString("en-IN", {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                  })}{" "}
+                  when the plan was recomputed.
+                </p>
+              )}
+              {mayDecide && !mayDecide(t) ? (
+                <p className="mt-1.5 text-[11.5px] text-ink-3">
+                  {sandboxLabel
+                    ? `View only in the public demo: ${t.to.name} is outside the sandbox (${sandboxLabel}).`
+                    : "View only: this account cannot decide this request."}
+                </p>
+              ) : (
+                <div className="mt-1.5 flex justify-end gap-2">
+                  <button onClick={() => decide(t, "reject")} disabled={busy !== null} className="h-7 rounded-md border border-line px-2.5 text-[12px] font-medium text-ink-2 hover:bg-canvas disabled:opacity-50">
+                    Decline
+                  </button>
+                  <button onClick={() => decide(t, "approve")} disabled={busy !== null} className="h-7 rounded-md bg-ok px-2.5 text-[12px] font-medium text-white disabled:opacity-50">
+                    {busy === t.id ? "Sending…" : "Accept and send"}
+                  </button>
+                </div>
+              )}
             </li>
           ))}
         </ul>

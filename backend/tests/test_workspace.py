@@ -93,9 +93,14 @@ def test_a_phone_report_is_never_called_a_count(source):
     assert workspace.provenance(source, NOW, None, NOW).kind == "phone"
 
 
-@pytest.mark.parametrize("source", ["form", "voice", "photo"])
+@pytest.mark.parametrize("source", ["form", "voice"])
 def test_every_in_app_report_counts_as_a_count(source):
     assert workspace.provenance(source, NOW, None, NOW).kind == "counted"
+
+
+def test_a_photo_is_a_reading_of_a_document_not_a_count():
+    """Fix list #11: a photographed bill was labelled "Counted by hand"."""
+    assert workspace.provenance("photo", NOW, None, NOW).kind == "photo"
 
 
 @pytest.mark.parametrize("source", ["seed", "transfer"])

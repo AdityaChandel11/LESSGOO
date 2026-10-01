@@ -29,6 +29,7 @@ from datetime import date
 
 import httpx
 
+from . import stockphoto
 from .config import settings
 
 log = logging.getLogger(__name__)
@@ -379,53 +380,83 @@ async def read_ward_photo(
 # It runs on a *different* model from the ward photos on purpose. The free tier
 # caps GenerateRequestsPerDayPerProjectPerModel at 20 — per model — so a day of
 # bed photos cannot exhaust the briefings, or the reverse. `gemini_text_model`
-# is a lite model because the job is one sentence in two languages.
+# is a lite model because the job is a short list in two or three languages.
 #
 # What this never does is invent a figure. Every number the model may use is
-# handed to it in the prompt, and the prompt says so; the deterministic line in
-# `workspace.rules_briefing` is what renders when this is unavailable, out of
+# handed to it in the prompt, the prompt says so, and the answer is checked
+# against those figures; the computed list in `workspace.todo_items` is what renders when this is unavailable, out of
 # quota, or switched off, and it renders without an AI label.
 
 BRIEFING_PROMPT = (
-    "You write one short line of guidance for a pharmacist at a rural Indian "
-    "primary health centre, from their own stock position.\n"
+    "You write today's to-do list for a pharmacist at a rural Indian primary "
+    "health centre. The items below were computed from the centre's own "
+    "records and are already in priority order.\n"
     "Rules:\n"
-    "- Use ONLY the figures given below. Never invent a number, a date or a "
-    "medicine name.\n"
-    "- One sentence in English, one in Hindi. Plain words a busy person can "
-    "act on.\n"
-    "- Say what to do first, not what the data says.\n"
-    "- No clinical, dosing or treatment advice. This is about stock.\n"
+    "- Use ONLY the facts and figures given below. Never invent a number, a "
+    "date, a medicine name or a place. Do not calculate any new figure. Write "
+    "every number in Western digits (0-9).\n"
+    "- Keep the order. One short line per item, in plain words a busy person "
+    "can act on: what to do first, then why.\n"
+    "- You may join two items about the same medicine into one line. Never "
+    "add an item that is not below.\n"
+    "- No clinical, dosing or treatment advice. This is about stock, "
+    "deliveries, beds and attendance records.\n"
+    "- Write the whole list in {languages}. Keep medicine and centre names as "
+    "given.\n"
     "Centre: {facility}\n"
-    "Stock position today:\n"
+    "Today's items:\n"
     "{rows}\n"
 )
 
-BRIEFING_SCHEMA = {
-    "type": "object",
-    "properties": {"en": {"type": "string"}, "hi": {"type": "string"}},
-    "required": ["en", "hi"],
-}
+_LINES = {"type": "array", "items": {"type": "string"}}
 
-# One sentence each. Generous enough for Devanagari, which costs more tokens
-# per character than Latin script.
-BRIEFING_MAX_TOKENS = 400
+
+def briefing_schema(local: bool) -> dict:
+    """`local` is the state's language, asked for only where one is named."""
+    properties = {"en": _LINES, "hi": _LINES}
+    if local:
+        properties["local"] = _LINES
+    return {"type": "object", "properties": properties, "required": list(properties)}
+
+
+# A short line per item in up to three scripts. Generous enough for
+# Devanagari and the southern scripts, which cost more tokens per character
+# than Latin.
+BRIEFING_MAX_TOKENS = 1600
 
 
 @dataclass(frozen=True)
 class Briefing:
-    en: str
-    hi: str
+    # Language code -> the list in that language, in the order it was given.
+    lines: dict[str, list[str]]
     model: str
 
 
-def parse_briefing(payload: dict, *, model: str) -> Briefing:
-    """Validate what came back before any of it reaches a screen."""
-    en = (payload.get("en") or "").strip()
-    hi = (payload.get("hi") or "").strip()
-    if not en or not hi:
-        raise VisionError("The model did not return both languages")
-    return Briefing(en=en, hi=hi, model=model)
+def parse_briefing(
+    payload: dict, *, model: str, sources: list[str], local: str | None
+) -> Briefing:
+    """Validate what came back before any of it reaches a screen.
+
+    `sources` are the computed lines the model was given. An answer with more
+    lines than that has added something, and an answer holding a figure that
+    is in none of them has invented one; either is discarded whole, and the
+    caller shows the computed list instead.
+    """
+    wanted = {"en": "en", "hi": "hi"}
+    if local:
+        wanted[local] = "local"
+    lines: dict[str, list[str]] = {}
+    for code, key in wanted.items():
+        raw = payload.get(key)
+        got = [str(x).strip() for x in raw if str(x).strip()] if isinstance(raw, list) else []
+        if not got:
+            raise VisionError("The model did not return every language it was asked for")
+        if len(got) > len(sources):
+            raise VisionError("The model returned more lines than there are items")
+        if ungrounded_figures(" ".join(got), sources):
+            raise VisionError("The model used a figure that is not in this centre's records")
+        lines[code] = got
+    return Briefing(lines=lines, model=model)
 
 
 def briefing_available() -> bool:
@@ -443,30 +474,36 @@ async def write_briefing(
     *,
     facility_name: str,
     rows: list[str],
+    local: tuple[str, str] | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> Briefing:
-    """One line of guidance, in English and Hindi, from a live model.
+    """Today's list in English, Hindi and the state's language, from a live model.
 
-    `rows` are pre-formatted lines built by the caller from figures already on
-    screen — this function never reads the database, so there is no path by
-    which it can describe something the pharmacist is not also looking at.
+    `rows` are the computed to-do lines (workspace.todo_items) — this function
+    never reads the database, so there is no path by which it can describe
+    something the pharmacist is not also looking at. `local` is the state
+    language as (code, English name), or None where the state's language is
+    Hindi.
 
     Raises VisionError for every failure, including a spent quota. The caller
-    is expected to fall back to the deterministic line rather than retry.
+    is expected to fall back to the computed list rather than retry.
     """
     if settings.llm_mode != "live" or not settings.gemini_api_key:
         raise VisionError("The briefing model is not configured")
     if not rows:
-        raise VisionError("There is no stock position to describe")
+        raise VisionError("There is nothing to describe")
 
     model = settings.gemini_text_model
+    languages = "English, in Hindi and in {0}".format(local[1]) if local else "English and in Hindi"
     body = {
         "contents": [
             {
                 "parts": [
                     {
                         "text": BRIEFING_PROMPT.format(
-                            facility=facility_name, rows="\n".join(rows)
+                            facility=facility_name,
+                            languages=languages,
+                            rows="\n".join("- {0}".format(r) for r in rows),
                         )
                     }
                 ]
@@ -474,10 +511,10 @@ async def write_briefing(
         ],
         "generationConfig": {
             "responseMimeType": "application/json",
-            "responseSchema": BRIEFING_SCHEMA,
-            # Low, not zero: one sentence of advice reads better with a little
+            "responseSchema": briefing_schema(bool(local)),
+            # Low, not zero: a line of advice reads better with a little
             # freedom than a temperature-zero template, and the figures it may
-            # use are fixed by the prompt either way.
+            # use are fixed by the prompt and checked afterwards either way.
             "temperature": 0.2,
             "maxOutputTokens": BRIEFING_MAX_TOKENS,
         },
@@ -489,7 +526,9 @@ async def write_briefing(
         text = data["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError, TypeError) as exc:
         raise VisionError("the model returned no readable answer") from exc
-    return parse_briefing(_first_json_object(text), model=model)
+    return parse_briefing(
+        _first_json_object(text), model=model, sources=rows, local=local[0] if local else None
+    )
 
 
 # ======================================================= plain-language why ===
@@ -545,6 +584,34 @@ EXPLAIN_SCHEMA = {
     "required": ["text"],
 }
 
+# Fix #46: the answer a first-time reader needs. The card already shows the
+# quantities; the facts are what it cannot show, worked out by the server from
+# the solver's own rows (redistribution.trip_facts). The model's job is to say
+# them plainly, in English and in Hindi, and nothing else.
+TRANSFER_WHY_PROMPT = (
+    "You explain one proposed medicine transfer between two public health "
+    "centres in India to someone seeing it for the first time.\n"
+    "Rules:\n"
+    "- Use ONLY the facts and figures given below. Never invent a number, a "
+    "date, a place or a medicine. Do not calculate any new figure. Write every "
+    "number in Western digits (0-9).\n"
+    "- Three or four plain sentences, under 90 words: why the receiver needs "
+    "it, why this donor rather than a nearer centre, what happens if nobody "
+    "sends, and how far the figures can be relied on.\n"
+    "- Do not tell anyone what to decide. No clinical or dosing advice.\n"
+    "- Give the same explanation twice: in English as `text`, and in Hindi as "
+    "`hi`. Keep centre and medicine names as given.\n"
+    "The transfer, as its card shows it:\n{rows}\n"
+    "What the card does not show:\n{facts}\n"
+)
+
+TRANSFER_WHY_SCHEMA = {
+    "type": "object",
+    "properties": {"text": {"type": "string"}, "hi": {"type": "string"}},
+    "required": ["text", "hi"],
+}
+TRANSFER_WHY_MAX_TOKENS = 700
+
 # Spec 12.6: the trust layer is never described as fraud detection and never
 # points at a person. A sentence that reads as an accusation is not shown.
 ACCUSATORY = re.compile(
@@ -562,6 +629,8 @@ class Explanation:
     model: str
     latency_ms: int
     cached: bool = False
+    # The same explanation in Hindi, where it was asked for (fix #46).
+    hi: str | None = None
 
 
 def _figure(value: float) -> str:
@@ -591,16 +660,21 @@ def parse_explanation(
     sources: list[str],
     latency_ms: int,
     forbid_accusation: bool = False,
+    want_hi: bool = False,
 ) -> Explanation:
     """Validate what came back before any of it reaches a screen."""
     text = (payload.get("text") or "").strip()
     if not text:
         raise VisionError("the model returned an empty explanation")
-    if forbid_accusation and ACCUSATORY.search(text):
-        raise VisionError("the model's wording read as an accusation, so it was not shown")
-    if ungrounded_figures(text, sources):
-        raise VisionError("the model used a figure that is not in the data, so it was not shown")
-    return Explanation(text=text, model=model, latency_ms=latency_ms)
+    hi = (payload.get("hi") or "").strip() if want_hi else None
+    if want_hi and not hi:
+        raise VisionError("the model did not answer in both languages")
+    for words in (text, hi or ""):
+        if forbid_accusation and ACCUSATORY.search(words):
+            raise VisionError("the model's wording read as an accusation, so it was not shown")
+        if ungrounded_figures(words, sources):
+            raise VisionError("the model used a figure that is not in the data, so it was not shown")
+    return Explanation(text=text, model=model, latency_ms=latency_ms, hi=hi)
 
 
 _explain_cache: "OrderedDict[str, Explanation]" = OrderedDict()
@@ -621,6 +695,9 @@ async def _explain(
     what: str,
     forbid_accusation: bool,
     client: httpx.AsyncClient | None,
+    schema: dict = EXPLAIN_SCHEMA,
+    max_tokens: int = EXPLAIN_MAX_TOKENS,
+    want_hi: bool = False,
 ) -> Explanation:
     if not explanation_available():
         raise VisionError("the explanation model is not configured")
@@ -635,9 +712,9 @@ async def _explain(
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "responseMimeType": "application/json",
-            "responseSchema": EXPLAIN_SCHEMA,
+            "responseSchema": schema,
             "temperature": 0.2,
-            "maxOutputTokens": EXPLAIN_MAX_TOKENS,
+            "maxOutputTokens": max_tokens,
         },
     }
     started = time.perf_counter()
@@ -653,6 +730,7 @@ async def _explain(
         sources=sources,
         latency_ms=latency_ms,
         forbid_accusation=forbid_accusation,
+        want_hi=want_hi,
     )
     _explain_cache[key] = answer
     while len(_explain_cache) > EXPLAIN_CACHE_SIZE:
@@ -661,11 +739,33 @@ async def _explain(
 
 
 async def explain_transfer(
-    *, rows: list[str], client: httpx.AsyncClient | None = None
+    *,
+    rows: list[str],
+    facts: list[str] | None = None,
+    client: httpx.AsyncClient | None = None,
 ) -> Explanation:
-    """Why this trip, in one or two sentences, from the solver's own figures."""
+    """Why this trip, from the solver's own figures.
+
+    With `facts` (redistribution.trip_facts) the answer covers what the card
+    cannot show — the nearer centre that was not used, the run-out date, how
+    fresh the figures are — and comes back in English and Hindi. Without
+    them it is the one or two sentences the card's figures support.
+    """
     if not rows:
         raise VisionError("there is no transfer to explain")
+    if facts:
+        return await _explain(
+            TRANSFER_WHY_PROMPT.format(
+                rows="\n".join(rows), facts="\n".join("- " + f for f in facts)
+            ),
+            sources=[*rows, *facts],
+            what="transfer explanation",
+            forbid_accusation=False,
+            client=client,
+            schema=TRANSFER_WHY_SCHEMA,
+            max_tokens=TRANSFER_WHY_MAX_TOKENS,
+            want_hi=True,
+        )
     return await _explain(
         TRANSFER_PROMPT.format(rows="\n".join(rows)),
         sources=rows,
@@ -710,12 +810,24 @@ async def explain_trust(
 # reading is what the reorder threshold, the forecast and the redistribution
 # solver all read next.
 
+# The same number means three different things on three different documents,
+# so the model is asked which document it is looking at before any number is
+# used (fix list #11; app/stockphoto.py decides what each kind does).
 STOCK_PROMPT = (
-    "This is a photograph of a medicine bill, delivery slip or stock register "
-    "page from an Indian primary health centre.\n"
-    "Report only what is legibly written:\n"
-    "- lines: one entry per medicine, each with `medicine` exactly as printed "
-    "and `quantity` as a number\n"
+    "This is a photograph of a stock document from an Indian primary health "
+    "centre.\n"
+    "First decide which kind of document it is, and report it as document_type:\n"
+    "- delivery_slip: a delivery note, challan, dispatch slip or supplier's invoice "
+    "listing stock SENT TO this centre\n"
+    "- issue_record: a dispensing bill, issue register or issue voucher listing "
+    "stock GIVEN OUT or used by this centre\n"
+    "- stock_count: a stock register page or count sheet stating what is ON THE "
+    "SHELF (closing balance)\n"
+    "- unknown: anything else, or if you cannot tell\n"
+    "Then report only what is legibly written:\n"
+    "- lines: one entry per medicine, each with `medicine` exactly as printed, "
+    "`quantity` as a number, `unit` exactly as printed (null if no unit is "
+    "written) and `batch` as printed (null if none)\n"
     "- document_date: the date printed on the document in YYYY-MM-DD form, or "
     "null if none is legible\n"
     "- confidence: 0.0 to 1.0, how sure you are of the lines as a whole\n"
@@ -724,9 +836,13 @@ STOCK_PROMPT = (
     "total anything. If a quantity is unreadable, omit that line entirely."
 )
 
+# document_type is a plain string rather than a schema enum: the parser below
+# maps anything outside the three kinds to "unknown", which is the same
+# guarantee without depending on how the API validates enums.
 STOCK_SCHEMA = {
     "type": "object",
     "properties": {
+        "document_type": {"type": "string"},
         "lines": {
             "type": "array",
             "items": {
@@ -734,6 +850,8 @@ STOCK_SCHEMA = {
                 "properties": {
                     "medicine": {"type": "string"},
                     "quantity": {"type": "number"},
+                    "unit": {"type": "string", "nullable": True},
+                    "batch": {"type": "string", "nullable": True},
                 },
                 "required": ["medicine", "quantity"],
             },
@@ -742,7 +860,7 @@ STOCK_SCHEMA = {
         "confidence": {"type": "number"},
         "notes": {"type": "string", "nullable": True},
     },
-    "required": ["lines", "confidence"],
+    "required": ["document_type", "lines", "confidence"],
 }
 
 
@@ -750,6 +868,9 @@ STOCK_SCHEMA = {
 class StockLine:
     medicine: str
     quantity: float
+    # As printed, or None when the document does not say.
+    unit: str | None = None
+    batch: str | None = None
 
 
 @dataclass(frozen=True)
@@ -759,6 +880,8 @@ class StockExtraction:
     confidence: float
     notes: str | None
     model: str
+    # One of stockphoto.DOCUMENT_TYPES, or "unknown".
+    document_type: str = stockphoto.UNKNOWN
 
 
 def parse_stock_extraction(payload: dict, *, model: str) -> StockExtraction:
@@ -781,7 +904,17 @@ def parse_stock_extraction(payload: dict, *, model: str) -> StockExtraction:
             continue
         if not name or qty < 0:
             continue
-        lines.append(StockLine(medicine=name, quantity=qty))
+        lines.append(
+            StockLine(
+                medicine=name,
+                quantity=qty,
+                unit=_printed(raw.get("unit")),
+                batch=_printed(raw.get("batch")),
+            )
+        )
+
+    kind = payload.get("document_type")
+    kind = kind.strip().lower() if isinstance(kind, str) else ""
 
     parsed_date: date | None = None
     raw_date = payload.get("document_date")
@@ -804,19 +937,148 @@ def parse_stock_extraction(payload: dict, *, model: str) -> StockExtraction:
         confidence=confidence,
         notes=str(notes).strip() if notes else None,
         model=model,
+        document_type=kind if kind in stockphoto.DOCUMENT_TYPES else stockphoto.UNKNOWN,
     )
+
+
+def _printed(raw) -> str | None:
+    """A unit or batch exactly as the document prints it, or None."""
+    if not isinstance(raw, str):
+        return None
+    return raw.strip() or None
 
 
 def _mock_stock_extraction() -> StockExtraction:
     """What the mock path returns. Labelled `model="mock"` on every row it
-    produces, and never presented as real inference."""
+    produces, and never presented as real inference. A stock count, because
+    it is the one kind of document that needs nothing else in the database to
+    be applied."""
     return StockExtraction(
-        lines=[StockLine(medicine="ORS", quantity=250.0)],
+        lines=[StockLine(medicine="ORS", quantity=250.0, unit="sachets")],
         document_date=None,
         confidence=settings.channel_confidence_floor,
         notes="mock extraction — no model was called",
         model="mock",
+        document_type=stockphoto.STOCK_COUNT,
     )
+
+
+# ============================================ IDSP weekly report (#42) ===
+# Gemini reads the outbreak rows out of the IDSP Weekly Outbreak Report PDF.
+# Every row carries the text it was read from, so the regex parser can re-read
+# it and flag disagreement (idsp.cross_check). No mock: without the live model
+# a report cannot be read, and the panel says so.
+
+MAX_REPORT_BYTES = 12 * 1024 * 1024
+REPORT_TIMEOUT_S = 120.0
+
+IDSP_PROMPT = (
+    "This PDF is an IDSP Weekly Outbreak Report published by NCDC, India. It lists "
+    "disease outbreaks reported by states in one week, one row per outbreak, each "
+    "starting with a unique ID such as MH/NSK/2026/38/1021.\n"
+    "Return the report's year and week, and every outbreak row with:\n"
+    "- unique_id: exactly as printed\n"
+    "- state, district, disease: exactly as printed\n"
+    "- cases, deaths: the numbers printed in those columns\n"
+    "- start_date, reported_date: as printed, DD-MM-YYYY; empty if the column is absent\n"
+    "- status: the Current Status column as printed; empty if absent\n"
+    "- row_text: the row's printed text from the unique ID to the status, verbatim, "
+    "leaving out the Comments/Action Taken column\n"
+    "Copy numbers exactly. Never estimate, total or infer a value; if a row cannot "
+    "be read, leave it out."
+)
+
+IDSP_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "year": {"type": "integer"},
+        "week": {"type": "integer"},
+        "rows": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "unique_id": {"type": "string"},
+                    "state": {"type": "string"},
+                    "district": {"type": "string"},
+                    "disease": {"type": "string"},
+                    "cases": {"type": "integer"},
+                    "deaths": {"type": "integer"},
+                    "start_date": {"type": "string"},
+                    "reported_date": {"type": "string"},
+                    "status": {"type": "string"},
+                    "row_text": {"type": "string"},
+                },
+                "required": ["unique_id", "state", "district", "disease", "cases", "deaths", "row_text"],
+            },
+        },
+    },
+    "required": ["rows"],
+}
+
+
+@dataclass
+class IdspRead:
+    year: int | None
+    week: int | None
+    rows: list[dict]
+    # Rows the model returned that were dropped as unreadable.
+    dropped: int
+    model: str
+
+
+async def read_idsp_report(
+    pdf: bytes, *, client: httpx.AsyncClient | None = None
+) -> IdspRead:
+    """Every outbreak row in one IDSP weekly report, read by the model."""
+    if settings.llm_mode != "live" or not settings.gemini_api_key:
+        raise VisionError(
+            "reading an IDSP report needs the live model (LLM_MODE=live); this deployment "
+            "runs without it"
+        )
+    if not pdf:
+        raise VisionError("A PDF is required")
+    if len(pdf) > MAX_REPORT_BYTES:
+        raise VisionError("The report is too large to read in one request")
+
+    from . import idsp
+
+    model = settings.gemini_model
+    body = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": IDSP_PROMPT},
+                    {
+                        "inline_data": {
+                            "mime_type": "application/pdf",
+                            "data": base64.b64encode(pdf).decode(),
+                        }
+                    },
+                ]
+            }
+        ],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": IDSP_SCHEMA,
+            "temperature": 0.0,
+        },
+    }
+    data = await _post_generate(
+        model, body, client=client, what="IDSP report", timeout_s=REPORT_TIMEOUT_S
+    )
+    try:
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise VisionError("The model returned no readable answer") from exc
+    parsed = _first_json_object(text)
+    raw_rows = parsed.get("rows") if isinstance(parsed.get("rows"), list) else []
+    rows = [r for r in (idsp.normalise_row(x) for x in raw_rows if isinstance(x, dict)) if r]
+    year = parsed.get("year") if isinstance(parsed.get("year"), int) else None
+    week = parsed.get("week") if isinstance(parsed.get("week"), int) else None
+    if rows and (year is None or week is None):
+        year, week = rows[0]["year"], rows[0]["week"]
+    return IdspRead(year=year, week=week, rows=rows, dropped=len(raw_rows) - len(rows), model=model)
 
 
 async def read_stock_photo(

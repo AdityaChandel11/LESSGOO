@@ -34,6 +34,19 @@ function Bar({
 }) {
   const share = Math.min(100, c.penalty * 100);
   const clean = c.penalty < 0.05;
+  // Fix #60: too few observations to score. Listed, without a bar, so nobody
+  // reads an empty bar as "clear".
+  if (c.scored === false) {
+    return (
+      <li className="py-1">
+        <div className="flex items-baseline justify-between gap-2">
+          <span className="text-[11.5px] text-ink-2">{SIGNAL_LABEL[c.signal] ?? c.signal}</span>
+          <span className="font-mono text-[10.5px] text-ink-3">not scored</span>
+        </div>
+        <p className="mt-0.5 text-[11px] text-ink-3">{c.reason}</p>
+      </li>
+    );
+  }
   return (
     <li className="py-1">
       <div className="flex items-baseline justify-between gap-2">
@@ -61,6 +74,7 @@ function Bar({
       ) : (
         <p className="mt-0.5 text-[11px] text-ink-3">{c.reason}</p>
       )}
+      {c.basis && <p className="text-[10.5px] text-ink-3">{c.basis}</p>}
     </li>
   );
 }
@@ -422,6 +436,9 @@ function AuditQueue({
 
                 <p className="mt-1 text-[12px] text-ink-2">
                   {r.components[0]?.reason ?? "Signals disagree."}
+                  {r.components[0]?.basis && (
+                    <span className="text-ink-3"> {r.components[0].basis}</span>
+                  )}
                 </p>
 
                 <WhyLine
@@ -434,6 +451,7 @@ function AuditQueue({
                     {r.components.slice(1).map((c) => (
                       <li key={c.signal} className="text-[11.5px] text-ink-3">
                         {c.reason}
+                        {c.basis && ` ${c.basis}`}
                       </li>
                     ))}
                   </ul>

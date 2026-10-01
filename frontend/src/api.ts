@@ -82,6 +82,8 @@ export interface SkuStock {
   last_reported_at: string | null;
   last_source: string | null;
   last_confidence: number | null;
+  /** When the forecast behind a "federated" rate was published (fix #81). */
+  forecast_published_at: string | null;
 }
 
 export interface FacilityDetail {
@@ -96,7 +98,10 @@ export interface FacilityDetail {
   escalated: boolean;
   escalation_reasons: string[];
   beds_total: number;
+  /** Latest verified ward count, when, and whether it is older than a day (fix #68). */
   beds_occupied: number | null;
+  beds_verified_at: string | null;
+  beds_stale: boolean;
   bed_occupancy_pct: number | null;
   staff_checkin_pct: number | null;
   trust_score: number | null;
@@ -128,6 +133,11 @@ export interface User {
    * nothing the browser could do with it, and one fewer place it can leak.
    */
   has_staff_record: boolean;
+  /**
+   * Set only for a public demo account: the one district it may change
+   * (auth.demo_may_write). Everywhere else it is view-only.
+   */
+  demo_sandbox?: { state: string; district: string; label: string } | null;
 }
 
 export interface Session {
@@ -196,18 +206,89 @@ const post = <T>(path: string, body?: unknown) => request<T>("POST", path, { bod
  * only offers actions a person can actually take. The server still decides:
  * hiding a button is a courtesy, never the protection.
  */
+/** Mirrors auth.demo_may_write: a public demo account changes only its sandbox. */
+export const inDemoSandbox = (u: User, state: string, district: string) =>
+  !u.demo_sandbox || (u.demo_sandbox.state === state && u.demo_sandbox.district === district);
+
+/** The area an officer's role oversees (auth.can_view_facility for officers). */
+const oversees = (u: User, f: { state_silo: string; district: string }) =>
+  u.role === "admin" ||
+  (u.role === "state_officer" && u.state_silo === f.state_silo) ||
+  (u.role === "block_mo" && u.state_silo === f.state_silo && u.district === f.district);
+
+export type ChaseTopic = "receipt" | "checkin" | "beds";
+
+export interface ChaseResult {
+  facility_id: string;
+  /** The registered handset, masked — the system holds no phone numbers. */
+  sent_to: string;
+  channel: string;
+  body: string;
+  /** Always "simulated": the reminder goes to the channel simulator's log. */
+  status: string;
+}
+
+/**
+ * Fix #77, mirroring auth.can_read_facility_rows: the area whose centres this
+ * account may read, or null when it reads aggregates only. Facility-level
+ * rows stay with the state that holds them; the national role reads state and
+ * district summaries. A public demo administrator reads its sandbox district,
+ * the one labelled exception, so the drill can run.
+ */
+export function rowsScope(u: User): { state: string; district: string | null } | null {
+  if (u.role === "state_officer" && u.state_silo) return { state: u.state_silo, district: null };
+  if (u.role === "block_mo" && u.state_silo && u.district) return { state: u.state_silo, district: u.district };
+  if (u.role === "admin" && u.demo_sandbox) return { state: u.demo_sandbox.state, district: u.demo_sandbox.district };
+  return null;
+}
+
+/** Whether this account reads centres in that state (and district, if given). */
+export function readsRows(u: User, state: string | null, district?: string | null): boolean {
+  const scope = rowsScope(u);
+  if (!scope || !state || scope.state !== state) return false;
+  return scope.district === null || district == null || scope.district === district;
+}
+
+/** What a reader outside the scope is told instead of the rows. */
+export function heldNote(u: User, stateName: string | null): string {
+  const held = stateName ? `Held in ${stateName}'s store` : "Held in each state's store";
+  if (u.role === "admin") return `${held} — the national view sees district summaries only.`;
+  if (u.role === "block_mo") return `${held} — an officer of ${u.district} district sees district summaries outside it.`;
+  return `${held} — an officer of another state sees district summaries only.`;
+}
+
+export const HELD_HINDI = "केंद्र-स्तर के आँकड़े उसी राज्य के पास रहते हैं; यहाँ केवल ज़िला-स्तर का सार दिखता है।";
+
 export const can = {
   planState: (u: User, state: string) =>
-    u.role === "admin" || (u.role === "state_officer" && u.state_silo === state),
-  /** Mirrors auth.can_decide_transfer: the donor centre decides; officers watch. */
-  decideTransfer: (u: User, fromFacilityId: string) =>
-    u.role === "admin" || (u.role === "facility_user" && u.facility_id === fromFacilityId),
+    (u.role === "admin" || (u.role === "state_officer" && u.state_silo === state)) &&
+    (!u.demo_sandbox || u.demo_sandbox.state === state),
+  /**
+   * Mirrors auth.can_decide_transfer: the donor centre decides; officers
+   * watch. A decision moves stock at both ends, so a demo account needs both
+   * inside its sandbox.
+   */
+  decideTransfer: (
+    u: User,
+    t: { fromId: string; state: string; fromDistrict: string; toDistrict: string },
+  ) =>
+    // Fix #39: the donor centre decides; officers and administrators oversee.
+    u.role === "facility_user" &&
+    u.facility_id === t.fromId &&
+    inDemoSandbox(u, t.state, t.fromDistrict) &&
+    inDemoSandbox(u, t.state, t.toDistrict),
+  /**
+   * Mirrors auth.can_report_facts: stock, deliveries, check-ins and beds are
+   * stated by the centre itself. A public demo account may act for a centre
+   * inside its sandbox (the drill and the demo buttons), within its role's area.
+   */
   report: (u: User, f: { id: string; state_silo: string; district: string }) => {
-    if (u.role === "admin") return true;
-    if (u.role === "state_officer") return u.state_silo === f.state_silo;
-    if (u.role === "block_mo") return u.state_silo === f.state_silo && u.district === f.district;
-    return u.facility_id === f.id;
+    if (u.role === "facility_user") return u.facility_id === f.id && inDemoSandbox(u, f.state_silo, f.district);
+    return !!u.demo_sandbox && inDemoSandbox(u, f.state_silo, f.district) && oversees(u, f);
   },
+  /** Mirrors api.chase_facility: officers chase the centres they oversee. */
+  chase: (u: User, f: { state_silo: string; district: string }) =>
+    u.role !== "facility_user" && inDemoSandbox(u, f.state_silo, f.district) && oversees(u, f),
 };
 
 export const ROLE_LABEL: Record<Role, string> = {
@@ -222,7 +303,17 @@ export interface DemoAccount {
   name: string;
   role: Role;
   scope: string;
+  /** What you will see behind this card, in a line. */
+  sees?: string;
 }
+
+/** Hindi beside the English role titles on the demo cards. */
+export const ROLE_LABEL_HI: Record<Role, string> = {
+  admin: "प्रशासक",
+  state_officer: "राज्य अधिकारी",
+  block_mo: "ज़िला अधिकारी",
+  facility_user: "स्वास्थ्य केंद्र कर्मी",
+};
 
 export const auth = {
   me: () => get<Session>("/auth/me"),
@@ -248,6 +339,9 @@ export interface FederationSilo {
   trust: number;
   flagged_pct: number;
   train_loss: number;
+  /** Fix #54: the same score from today's ledger; set on the last round only. */
+  trust_now?: number | null;
+  flagged_pct_now?: number | null;
 }
 
 export interface FederationRound {
@@ -277,6 +371,23 @@ export interface FederationInspector {
   raw_rows_transmitted: number;
   tensor_shapes: Record<string, number[]>;
   note: string | null;
+  /** Fix #1: computed on the server from the recorded rounds. Round 0 is the
+   *  untrained model, so it is "before training" and nobody uploads for it. */
+  untrained_mae: number | null;
+  final_mae: number | null;
+  final_round: number | null;
+  final_improvement_pct: number | null;
+  beats_baseline_from_round: number | null;
+  training_rounds: number;
+  silos: number;
+  /** Every training round, every reporting state, one model each. */
+  upload_bytes_total: number;
+  /** The states' own training examples: the rows that never moved. */
+  total_windows: number;
+  /** Fix #54: states whose receipt discipline in today's ledger differs
+   *  materially from what the run recorded. Not empty means the run was
+   *  trained on a dataset that is no longer the one in the database. */
+  silos_changed_since_run: string[];
 }
 
 /** One real round started from the page; phases are lines Flower printed. */
@@ -339,7 +450,7 @@ export const api = {
       `/facilities/${encodeURIComponent(facilityId)}/stock-photo`,
       body,
     ),
-  briefing: (facilityId: string, lang: "en" | "hi") =>
+  briefing: (facilityId: string, lang: string) =>
     post<Briefing>(
       `/facilities/${encodeURIComponent(facilityId)}/briefing?lang=${lang}`,
     ),
@@ -380,6 +491,9 @@ export const api = {
   myAttendance: () => get<SelfRecord>("/me/attendance"),
   checkin: (facilityId: string, body: Record<string, unknown>) =>
     post<Checkin>(`/facilities/${encodeURIComponent(facilityId)}/checkins`, body),
+  /** Remind a centre to report something only it can report (fix #74). */
+  chase: (facilityId: string, body: { topic: ChaseTopic; movement_id?: number }) =>
+    post<ChaseResult>(`/facilities/${encodeURIComponent(facilityId)}/chase`, body),
   facilityTrust: (facilityId: string) =>
     get<Trust | null>(`/facilities/${encodeURIComponent(facilityId)}/trust`),
   /**
@@ -396,8 +510,24 @@ export const api = {
     get<Transfer[]>(`/facilities/${encodeURIComponent(facilityId)}/incoming`),
   demoRequest: (facilityId: string) =>
     post<Transfer>(`/facilities/${encodeURIComponent(facilityId)}/demo-request`),
+  /** Withdraw a request this centre raised, before the donor replies (fix #31). */
+  cancelRequest: (transferId: number) => post<Transfer>(`/transfers/${transferId}/cancel`),
   outbreakAdvice: (state: string | null) => get<StockingAdvice[]>("/outbreaks/advice", { state }),
   outbreaks: (state: string | null) => get<Outbreaks>("/outbreaks", { state }),
+  activeOutbreaks: (state: string | null) => get<ActiveOutbreaks>("/outbreaks/active", { state }),
+  nextWarnings: (state: string | null, source: "all" | "forecast" = "all") =>
+    get<NextWarnings>("/warnings/next", { state, source }),
+  declareOutbreak: (body: { state: string; district: string; disease: string; surge_pct: number | null }) =>
+    post<DeclaredOutbreak>("/outbreaks/declare", body),
+  oversight: (state: string) => get<Oversight>("/transfers/oversight", { state }),
+  usage: (facilityId: string, sku: string) =>
+    get<Usage>(`/facilities/${encodeURIComponent(facilityId)}/usage`, { sku }),
+  ncdcStatus: () => get<NcdcStatus>("/outbreaks/ncdc-status"),
+  ncdcCheck: () => post<{ checked_at: string; result: NcdcResult }>("/outbreaks/ncdc-check"),
+  latestIdspReport: () => get<IdspReport | null>("/outbreaks/idsp-reports/latest"),
+  readIdspReport: (body: { pdf_base64: string; filename: string }) =>
+    post<IdspReport>("/outbreaks/idsp-report", body),
+  endOutbreak: (id: number) => post<{ id: number; ended_at: string }>(`/outbreaks/${id}/end`),
   explainTrust: (facilityId: string) =>
     post<Explanation>(`/facilities/${encodeURIComponent(facilityId)}/trust/explain`),
 };
@@ -412,6 +542,13 @@ export interface Explanation {
   latency_ms: number | null;
   cached: boolean;
   note: string | null;
+  /** Fix #46: the same explanation in Hindi, when the model wrote it. */
+  text_hi?: string | null;
+  /** What the card cannot show, worked out by the server from the solver's
+   *  own rows; shown as they are when no model answers. */
+  facts?: string[];
+  /** Who decided the trip: the solver that actually ran, or a centre's request. */
+  planned_by?: string | null;
 }
 
 /* --------------------------------------------------------- attendance --- */
@@ -428,6 +565,8 @@ export interface Attendance {
   footfall_today: number | null;
   /** Set when staff are present and no patients were logged — worth a look, no more. */
   contradiction: string | null;
+  /** Latest check-in at this centre in the last 30 days, if any. */
+  last_checkin_at?: string | null;
 }
 
 /**
@@ -504,6 +643,11 @@ export interface TrustComponent {
   /** The rows this sentence was computed from — the same filter the movement
    *  tab uses, so the link opens exactly what the score counted. */
   evidence: { tab: string; facility?: string; view?: MovementView } | null;
+  /** Fix #60: how many observations the sentence rests on, in words. */
+  sample?: number | null;
+  basis?: string | null;
+  /** False when there were too few observations to score the signal. */
+  scored?: boolean;
 }
 
 export interface Trust {
@@ -568,14 +712,17 @@ export interface BedReport {
   model_confidence: number | null;
   /** "mock" when no photograph was analysed — shown, never hidden. */
   model: string | null;
+  /** Who produced the numbers in words: seeded, typed, or which model. */
+  read_by: string;
   reasons: string[];
 }
 
 /* ------------------------------------------------- pharmacist workspace --- */
 
 /** How a stock figure was last checked. `system` means nobody checked it:
- *  a seeded opening balance or an automatic transfer adjustment. */
-export type ProvenanceKind = "counted" | "delivery" | "phone" | "system" | "none";
+ *  a seeded opening balance or an automatic transfer adjustment. `photo` is a
+ *  document a model read — never a hand count. */
+export type ProvenanceKind = "counted" | "photo" | "delivery" | "phone" | "system" | "none";
 
 export interface LastReceipt {
   batch_id: string;
@@ -591,26 +738,107 @@ export interface Provenance {
   detail: string;
 }
 
-export interface WorkspaceSku extends SkuStock {
+export interface WorkspaceSku extends Omit<SkuStock, "status"> {
+  /** As of now (fix #26), so it can also be "count_overdue". */
+  status: Status | "count_overdue";
   /** Sachets, ampoules, blisters — a quantity on a phone needs its unit beside it. */
   unit: string;
   last_receipt: LastReceipt | null;
   provenance: Provenance;
   /** Absent when there is no burn rate: the system does not guess a date. */
   stockout_on: string | null;
+  /** Past the run-out date since the last count (fix #26): status is "count_overdue". */
+  count_overdue: boolean;
+}
+
+/** A request this centre raised in the last day, as its medicine card shows it. */
+export interface OwnRequest {
+  transfer_id: number;
+  sku_code: string;
+  qty: number;
+  from_facility: string;
+  from_name: string;
+  status: string;
+  /** Waited past the reply window with no answer — derived, never stored. */
+  lapsed: boolean;
+  /** The status in words, e.g. "Declined by Nashik PHC 13". */
+  words: string;
+  created_at: string;
+  lapses_at: string;
 }
 
 export interface WorkspaceView {
   facility: FacilityDetail;
   skus: WorkspaceSku[];
+  /** Requests still waiting for a reply; lapsed ones do not count. */
   open_requests: number;
   max_open_requests: number;
+  /** Newest first. */
+  requests: OwnRequest[];
   /** Both languages of the computed line. Always present, needs no key, and is
    *  what the screen shows until somebody asks the model for its version. */
   briefing: Record<string, string>;
+  /** Fix #85: today's list, most urgent first, computed from this centre's
+   *  rows. Absent from a server that predates it. */
+  todo?: TodoItem[];
+  /** The state's own language, where Gemini can write the list in it. */
+  local_language?: { code: string; name: string; native: string } | null;
+  /** Fix #58: active outbreaks in this centre's district; empty when none. */
+  outbreaks: {
+    outbreak_id: number;
+    headline: string;
+    expires_at: string | null;
+    medicines: {
+      sku_code: string;
+      sku_name: string;
+      multiplier: number | null;
+      basis: "observed" | "assumption" | null;
+      days_now: number | null;
+      days_at_outbreak_rate: number | null;
+    }[];
+  }[];
+}
+
+/** Fix #45: one district × medicine pair projected to run short. */
+export interface NextPair {
+  state: string;
+  state_name: string;
+  district: string;
+  sku_code: string;
+  sku_name: string;
+  /** Centres projected to run out inside the horizon. */
+  centres: number;
+  first_on: string;
+  /** Null where the reader may not read that centre's rows (fix #77). */
+  first_centre: string | null;
+  by_forecast: number;
+  /** Which rule the dates rest on. */
+  source: "forecast" | "mixed" | "burn_rate" | "outbreak";
+  outbreak: { disease: string; basis: "observed" | "assumption"; without_on: string } | null;
+  line: string;
+}
+
+export interface NextWarnings {
+  horizon_days: number;
+  as_of: string;
+  pairs: NextPair[];
+  /** Centre × medicine counts already past their own run-out date. */
+  counts_overdue: number;
+  forecast_published_at: string | null;
+  forecast_max_age_days: number;
+}
+
+export interface TodoItem {
+  kind: string;
+  en: string;
+  hi: string;
+  /** The workspace tab where the thing is done. */
+  tab: "medicines" | "orders" | "beds" | "attendance";
 }
 
 export interface Briefing {
+  /** The list in `lang`, most urgent first. */
+  lines: string[];
   body: string;
   lang: string;
   /** "rules" = computed here. "gemini" = written by the model. */
@@ -665,17 +893,32 @@ export interface StockRequest {
   estimated_delivery: string;
   estimate_label: string;
   assumptions: Record<string, number>;
+  /** The status in words — the screen never shows `status` or `approver_role` raw. */
+  status_words: string;
+  /** The approval the estimate depends on: the dispatch cutoff, India time. */
+  approve_by: string;
+  /** When the request lapses if nobody replies. */
+  lapses_at: string;
 }
+
+export type StockDocumentType = "delivery_slip" | "issue_record" | "stock_count" | "unknown";
 
 export interface StockPhotoLine {
   medicine: string;
   quantity: number;
+  /** As printed on the document. */
+  unit: string | null;
+  batch: string | null;
   sku_code: string | null;
   sku_name: string | null;
   match_score: number;
   committed: boolean;
-  /** Shelf figure before this photo. */
+  /** What the line did: a delivery is added, an issue subtracted, a count set. */
+  action: "added" | "subtracted" | "set" | "not_applied";
+  /** Shelf figure before and after this line. */
   qty_before: number | null;
+  qty_after: number | null;
+  movement_id: number | null;
   reason: string | null;
 }
 
@@ -685,12 +928,14 @@ export interface StockPhotoResult {
   /** False when the deterministic mock produced this. The screen must not put
    *  a model's name or a confidence figure on output nothing computed. */
   ai: boolean;
+  /** The model's own estimate of its reading — not a check. */
   confidence: number;
+  document_type: StockDocumentType;
   document_date: string | null;
+  document_age_days: number | null;
   notes: string | null;
   lines: StockPhotoLine[];
   committed: number;
-  verification: string;
 }
 
 /* ------------------------------------------------------ field simulator --- */
@@ -709,6 +954,13 @@ export interface SimulatedReading {
   qty: number;
   days_of_stock: number | null;
   status: string | null;
+  /** The stock_readings row this message wrote (fix #24). */
+  reading_id: number | null;
+  /** What the district map held for this medicine before the message; null
+   *  when the centre had never reported it. */
+  qty_before: number | null;
+  days_before: number | null;
+  status_before: string | null;
 }
 
 export interface SimulateResult {
@@ -720,6 +972,10 @@ export interface SimulateResult {
   duplicate: boolean;
   readings: SimulatedReading[];
   actions: string[];
+  /** The event the district map polls for; null when nothing was committed. */
+  event_id: number | null;
+  /** Rows written that are not stock readings, in words ("check-in #412"). */
+  written: string[];
 }
 
 export interface CallRecord {
@@ -772,6 +1028,8 @@ export interface Movements {
   counts: Record<string, number>;
   short_units: number;
   movements: Movement[];
+  /** Set when the totals are shown without their rows (fix #77). */
+  rows_withheld?: string | null;
 }
 
 export interface Receipt {
@@ -828,11 +1086,25 @@ export interface TransferRationale {
   distance_limit_km?: number;
   cold_chain?: boolean;
   distance_basis?: string;
+  /** Set when a re-plan replaced an earlier proposal for the same donor,
+   *  receiver and medicine (fix #37): the donor is told it was updated. */
+  replaces_transfer?: number;
+  updated_at?: string;
+  /** Pre-positioning for an active outbreak (fix #41, spec v3 §12.5). */
+  outbreak?: {
+    outbreak_id: number;
+    disease: string;
+    district: string;
+    multiplier: number;
+    basis: "observed" | "assumption";
+    detail: string;
+    recipient_days_without_outbreak: number | null;
+  };
 }
 
 export interface Transfer {
   id: number;
-  status: "proposed" | "approved" | "rejected" | "completed";
+  status: "proposed" | "approved" | "rejected" | "completed" | "cancelled";
   sku_code: string;
   sku_name: string;
   unit: string;
@@ -915,6 +1187,9 @@ export interface LiveEvent {
     | "movement.received";
   facility_id: string;
   facility_name: string;
+  /** The event is about a centre whose rows this reader may not read (fix
+   *  #77): it still arrives, so the screen refreshes, but carries no detail. */
+  withheld?: boolean;
   sku_code?: string;
   qty_on_hand?: number;
   source?: string;
@@ -1120,24 +1395,260 @@ export interface Outbreak {
   status: string | null;
   /** Whether this network has facilities in that district. */
   in_network: boolean;
+  /** Fix #59. Centres this network has in the district (0 outside it). */
+  facilities: number;
+  /** The medicines this disease drives; empty where the map has none. */
+  medicines: string[];
+  /** Days since the outbreak began; null where the report gives no date. */
+  age_days: number | null;
+  /** Began longer ago than the outbreak window, or undated. */
+  historical: boolean;
+  /** An outbreak is active in this district now. */
+  active: boolean;
 }
 
 export interface Outbreaks {
   source: string;
   source_url: string;
   columns: string[];
-  reports: { year: number; week: number; rows: number }[];
+  /** uploaded_on: the day NCDC published the report (from its file name), fix #43. */
+  reports: { year: number; week: number; rows: number; found?: number; uploaded_on?: string | null }[];
   rows: Outbreak[];
+  /** A row older than this many days is historical, not a current warning. */
+  ttl_days: number;
 }
 
-/** Demo: an outbreak turned into a stocking action. Demand rise is simulated. */
+/** An IDSP outbreak turned into a stocking action. How much demand rises is
+ *  never guessed: declaring the outbreak measures it (fix #41). */
 export interface StockingAdvice {
   unique_id: string;
   district: string;
   state_code: string;
   disease: string;
   medicines: string[];
-  demand_rise_pct: number;
   signals: string[];
   action: string;
+}
+
+/** Fix #41 (spec v3 §12.5): an active outbreak and what it does to supply. */
+export interface OutbreakMedicine {
+  sku_code: string;
+  sku_name: string;
+  observed_ratio: number | null;
+  multiplier: number | null;
+  /** "observed" from the district's readings, or the officer's "assumption". */
+  basis: "observed" | "assumption" | null;
+  detail: string;
+}
+
+export interface OutbreakWarning {
+  outbreak_id: number;
+  facility_id: string;
+  facility_name: string;
+  district: string;
+  sku_code: string;
+  sku_name: string;
+  runs_out_on: string;
+  runs_out_without: string;
+  basis: "observed" | "assumption";
+  line: string;
+}
+
+export interface ActiveOutbreak {
+  id: number;
+  state: string;
+  district: string;
+  disease: string;
+  source: string;
+  source_ref: string | null;
+  surge_pct: number | null;
+  declared_by: string | null;
+  declared_at: string | null;
+  expires_at: string | null;
+  facilities: number;
+  count_overdue: number;
+  /** Centres that run out inside the horizon; `warnings` names them only
+   *  for a reader who may read that district's rows (fix #77). */
+  warnings_count: number;
+  /** Where the district sits on the map; null if it has no anchor. */
+  lat: number | null;
+  lng: number | null;
+  medicines: OutbreakMedicine[];
+  warnings: OutbreakWarning[];
+}
+
+export interface ActiveOutbreaks {
+  ttl_days: number;
+  window_days: number;
+  min_rise_pct: number;
+  max_surge_pct: number;
+  diseases: string[];
+  outbreaks: ActiveOutbreak[];
+}
+
+/** Fix #42: one IDSP weekly report as Gemini read it, row by row, with the
+ *  regex parser's verdict on each. */
+export interface IdspRow {
+  unique_id: string;
+  year: number;
+  week: number;
+  state: string;
+  state_code: string | null;
+  district: string;
+  disease: string;
+  cases: number;
+  deaths: number;
+  start_date: string | null;
+  reported_date: string | null;
+  status: string | null;
+  row_text: string;
+  check: { verdict: "agrees" | "disagrees" | "unparsed"; fields: string[] };
+  in_network: boolean;
+  activated: boolean;
+}
+
+export interface IdspReport {
+  year: number | null;
+  week: number | null;
+  source: string | null;
+  model: string;
+  read_by: string | null;
+  read_at: string | null;
+  cached: boolean;
+  rows: IdspRow[];
+  dropped: number;
+  agrees: number;
+  disagrees: number;
+  unparsed: number;
+  activated: number;
+  trips_proposed: number;
+}
+
+/** Fix #39: one state's redistribution as an officer oversees it. */
+export interface OversightPlace {
+  facility_id: string;
+  name: string;
+  district: string;
+}
+
+export interface OversightTrip {
+  transfer_id: number;
+  sku_code: string;
+  sku_name: string;
+  qty: number;
+  from: OversightPlace;
+  to: OversightPlace;
+  created_at: string;
+}
+
+export interface OversightShort extends OversightPlace {
+  sku_code: string;
+  sku_name: string;
+  days: number | null;
+}
+
+export interface Oversight {
+  state: string;
+  /** Set when the named lists are withheld and only the counts are shown (fix #77). */
+  rows_withheld?: string | null;
+  /** Fix #38: open trips whose donor and receiver are in different districts. */
+  cross_district_open?: number;
+  /** Fix #49: what happened to the trips that were accepted, from the ledger. */
+  outcomes?: {
+    received: number;
+    in_full: number;
+    short: number;
+    over: number;
+    units_short: number;
+    /** Recommendation to receipt; null when nothing has been received. */
+    median_hours: number | null;
+    /** Centres critical when their trip was recommended, and how many of
+     *  those are above the critical line now. */
+    were_critical: number;
+    lifted: number;
+  };
+  /** Deliveries that arrived short: what was sent against what was counted. */
+  short_deliveries?: {
+    movement_id: number;
+    transfer_id: number;
+    batch: string | null;
+    sku_name: string;
+    to: OversightPlace;
+    sent: number;
+    received: number;
+  }[];
+  window_days: number;
+  recommended_open: number;
+  requests_open: number;
+  computed_at: string | null;
+  reports_since: number;
+  would_lift: number;
+  critical_days: number;
+  pipeline: {
+    recommended: number;
+    awaiting_donor: number;
+    accepted: number;
+    declined: number;
+    withdrawn: number;
+    in_transit: number;
+    received: number;
+    verified: number;
+  };
+  no_reply: OversightTrip[];
+  no_reply_total: number;
+  reply_window_hours: number;
+  not_received: {
+    movement_id: number;
+    transfer_id: number;
+    batch: string;
+    sku_name: string;
+    qty: number;
+    to: OversightPlace;
+    expected_by: string;
+  }[];
+  not_received_total: number;
+  declined: OversightTrip[];
+  controlled: OversightShort[];
+  controlled_total: number;
+  unreached: OversightShort[];
+  unreached_total: number;
+}
+
+/** Fix #84: one medicine's last 28 days of use, burn rate and forecast. */
+export interface Usage {
+  facility_id: string;
+  sku_code: string;
+  sku_name: string;
+  unit: string;
+  days: { day: string; used: number | null; spread: boolean }[];
+  burn_rate: number | null;
+  forecast_daily: number | null;
+  forecast_version: string | null;
+  forecast_published_at: string | null;
+  forecast_fresh: boolean;
+  in_model: boolean;
+  note: string;
+}
+
+/** Fix #57: what the last check of NCDC's listing found. */
+export interface NcdcResult {
+  status: "up_to_date" | "read" | "found_unread" | "unreachable" | "no_reports";
+  year?: number;
+  week?: number;
+  uploaded_on?: string;
+  detail?: string;
+  rows?: number;
+  activated?: number;
+}
+
+export interface NcdcStatus {
+  checked_at: string | null;
+  result: NcdcResult | null;
+  checking: boolean;
+}
+
+export interface DeclaredOutbreak {
+  outbreak: ActiveOutbreak;
+  trips_proposed: number;
+  pre_positioning_trips: number;
 }

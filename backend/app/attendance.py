@@ -55,6 +55,9 @@ class Attendance:
     footfall_today: int | None
     # Set when people are recorded present and no patients were logged.
     contradiction: str | None
+    # The latest check-in at this centre inside the roster window, so an empty
+    # "today" reads as "last seen on <date>" rather than as a dead card.
+    last_checkin_at: datetime | None = None
 
 
 def resolve_location(
@@ -194,7 +197,10 @@ async def summarise(session: AsyncSession, facility_id: str) -> Attendance:
     present: set[str] = set()
     by_method: dict[str, int] = {}
     geofence_pass = geofence_checked = 0
+    last_checkin_at: datetime | None = None
     for staff_ref, at, method, ok in rows:
+        if last_checkin_at is None or at > last_checkin_at:
+            last_checkin_at = at
         if not staff_ref:
             continue
         roster.add(staff_ref)
@@ -223,6 +229,7 @@ async def summarise(session: AsyncSession, facility_id: str) -> Attendance:
         geofence_checked=geofence_checked,
         footfall_today=footfall,
         contradiction=contradiction,
+        last_checkin_at=last_checkin_at,
     )
 
 
@@ -325,7 +332,7 @@ async def own_record(
     """This person's own attendance and re-verification history.
 
     Both queries are bounded by facility, staff reference and a date floor —
-    never an open scan (see the size guard in CLAUDE.md).
+    never an open scan: the deployed database is a 1 GB volume.
     """
     at = now or datetime.now(timezone.utc)
     today = at.date()

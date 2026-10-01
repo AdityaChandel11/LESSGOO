@@ -21,7 +21,7 @@ from decimal import Decimal
 from sqlalchemy import Select, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import events, services
+from . import events, services, stockphoto
 from .config import settings
 from .models import Facility, MedicineMovement, Sku, StockReading
 
@@ -281,6 +281,37 @@ async def confirm_receipt(
 
 
 # ===================================================================== reads ===
+
+
+async def deliveries_to(
+    session: AsyncSession, facility_id: str, *, since: datetime
+) -> tuple[dict[str, list[stockphoto.OpenDelivery]], dict[str, list[stockphoto.SettledDelivery]]]:
+    """This centre's dispatches, per medicine, for matching a photographed
+    delivery slip: every one still open, and those settled since `since`.
+    Bounded by the facility (and, for settled ones, by time)."""
+    rows = await session.execute(
+        select(
+            MedicineMovement.id, MedicineMovement.sku_code, MedicineMovement.batch_id,
+            MedicineMovement.qty_dispatched, MedicineMovement.status, MedicineMovement.received_at,
+        ).where(
+            MedicineMovement.to_facility == facility_id,
+            or_(
+                MedicineMovement.status == OPEN,
+                (MedicineMovement.status.in_((RECEIVED, SHORT, OVER)))
+                & (MedicineMovement.received_at >= since),
+            ),
+        )
+    )
+    open_: dict[str, list[stockphoto.OpenDelivery]] = {}
+    settled: dict[str, list[stockphoto.SettledDelivery]] = {}
+    for mid, sku, batch, qty, status, received_at in rows.all():
+        if status == OPEN:
+            open_.setdefault(sku, []).append(stockphoto.OpenDelivery(mid, batch, float(qty)))
+        else:
+            settled.setdefault(sku, []).append(
+                stockphoto.SettledDelivery(batch, float(qty), received_at)
+            )
+    return open_, settled
 
 
 def _scope(

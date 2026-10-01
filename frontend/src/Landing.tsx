@@ -49,23 +49,103 @@ const STEPS = [
   },
   {
     n: "02",
-    title: "A shared model forecasts",
-    hindi: "साझा मॉडल पूर्वानुमान लगाता है",
+    title: "Four states train a shared forecasting model today",
+    hindi: "आज चार राज्य मिलकर एक पूर्वानुमान मॉडल प्रशिक्षित करते हैं",
     body:
-      "Each state trains on its own rows and sends back model weights only — never a facility " +
-      "record, never a row of stock. The national model those weights build predicts when each " +
-      "shelf runs out, and the warning fires while there is still time to act on it.",
+      "Each of the four states trains on its own rows and sends back " +
+      "model weights only — never a facility record, never a row of stock. Where no fresh " +
+      "forecast exists, days of stock come from the last 28 days of readings instead, and the " +
+      "screen says which of the two it used.",
   },
   {
     n: "03",
-    title: "A human approves the transfer",
-    hindi: "मंज़ूरी इंसान देता है",
+    title: "The donor centre accepts; an officer handles exceptions",
+    hindi: "दाता केंद्र स्वीकार करता है; अपवाद अधिकारी सँभालते हैं",
     body:
-      "The optimiser proposes a route from a district holding surplus to one running short, " +
-      "with the reasoning and the distance attached. An officer approves or rejects it. " +
+      "The optimiser proposes a route from a centre holding surplus to one running short, with " +
+      "the reasoning and the distance attached. The centre that would give the stock accepts " +
+      "or declines; officers see the whole picture and step in where something is stuck. " +
       "Nothing moves on its own, and no proposal takes a donor below its own safety stock.",
   },
 ] as const;
+
+/**
+ * What runs live, what is recorded, what is next — answered before a judge
+ * has to ask. The deployed database is a small free instance: anything that
+ * writes a handful of rows per action runs live; anything heavy (training,
+ * a reseed) was run once and its proof is stored; the rest is roadmap and is
+ * called that. Update a row when the thing it describes moves.
+ */
+const RUNS = [
+  {
+    key: "live",
+    title: "Live on this site",
+    hindi: "इस साइट पर लाइव",
+    items: [
+      "Stock counts, bill photos read by Gemini, requests between centres, dispatches and confirmed receipts",
+      "Days-of-stock warnings, the redistribution solver and trust scores, computed from the database each time you look",
+      "Ward bed reports read by Gemini, staff check-ins and the daily briefing",
+    ],
+    why: "Each action writes a handful of small rows.",
+  },
+  {
+    key: "recorded",
+    title: "Recorded, with proof",
+    hindi: "रिकॉर्ड किया गया, प्रमाण सहित",
+    items: [
+      "Federated training: four state processes on a laptop. Every round's bytes and weights hash are stored and shown on the Federation tab",
+      "The forecasts published from that run — used while fresh, otherwise the 28-day burn rate",
+      "The synthetic dataset, and outbreak rows parsed from NCDC's weekly IDSP reports",
+    ],
+    why: "Heavy compute or bulk writes, run once and kept.",
+  },
+  {
+    key: "next",
+    title: "Next, said plainly",
+    hindi: "आगे का काम",
+    items: [
+      "A real SMS, WhatsApp and voice carrier (needs DLT registration) — the demo uses a built-in handset simulator",
+      "One database per state, instead of one database separated by state",
+      "District warehouse stock and indents; differential privacy and secure aggregation",
+    ],
+    why: "Not built. Named here so nobody mistakes it for a feature.",
+  },
+] as const;
+
+/**
+ * The demo, for a judge alone on the site (fix list #36): five steps, two
+ * centres in two windows, every step through the real endpoints. The first
+ * step is the cold start — a free server that sleeps is the first thing a
+ * visitor meets, so it is said before it is suffered.
+ */
+const DEMO_SCRIPT = [
+  "Open this link a minute before you start: the free server sleeps when idle, and the first load can take up to a minute.",
+  "Continue as the Pharmacist. On Medicines, open a medicine running short, press Find supply and request stock (pick the neighbouring demo centre if it is offered).",
+  "In a private window, continue as the neighbouring centre's Pharmacist, if that card is offered. Orders → Requests for your stock: accept and send, or decline. No request waiting? Demo: have a nearby centre ask you for stock raises a real one.",
+  "Back as the first pharmacist: the medicine card shows the reply, and Orders confirms the delivery when it arrives, counting what came.",
+  "Continue as the State NHM Officer: Redistribution, Movements and Data trust show the same rows — who asked, who sent, what arrived.",
+] as const;
+
+function DemoScript() {
+  return (
+    <div className="mt-5 rounded-lg border border-line bg-canvas px-3.5 py-3">
+      <h3 className="text-[12.5px] font-semibold text-ink">
+        Try it in five steps <span lang="hi" className="font-normal text-ink-3">· पाँच चरणों में आज़माएँ</span>
+      </h3>
+      <ol className="mt-2 list-decimal space-y-1.5 pl-4 text-[12px] leading-snug text-ink-2">
+        {DEMO_SCRIPT.map((step) => (
+          <li key={step}>{step}</li>
+        ))}
+      </ol>
+      <a
+        href="#live-recorded-next"
+        className="mt-2.5 inline-block rounded-sm text-[12px] font-medium text-brand underline-offset-4 hover:underline focus:ring-2 focus:ring-brand/25 focus:outline-none"
+      >
+        What runs live, what's recorded, what's next ↓
+      </a>
+    </div>
+  );
+}
 
 const fmt = (n: number) => n.toLocaleString("en-IN");
 
@@ -98,6 +178,12 @@ export default function Landing({
 
   return (
     <div className="min-h-full bg-canvas font-sans text-ink">
+      <a
+        href="#landing-main"
+        className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-[2000] focus:rounded focus:bg-panel focus:px-3 focus:py-2 focus:text-[13px] focus:text-ink"
+      >
+        Skip to main content
+      </a>
       {/* ------------------------------------------------------- the fold --- */}
       <section className="flex min-h-screen flex-col lg:flex-row">
         <div className="relative flex flex-col justify-between overflow-hidden bg-brand px-6 py-10 text-white sm:px-10 lg:w-[46%] lg:shrink-0">
@@ -147,16 +233,20 @@ export default function Landing({
                     <span className="font-semibold text-white">
                       {fmt(summary.critical)} centres
                     </span>{" "}
-                    are below their reorder floor right now. Every figure on this page is read
-                    from the live database as it loads.
+                    are below their reorder floor, as of each centre's last report. Figures are
+                    read from the live database as this page loads.
+                    <span lang="hi" className="mt-1 block text-white/60">
+                      आँकड़े लाइव डेटाबेस से; स्टॉक की स्थिति हर केंद्र की पिछली रिपोर्ट के अनुसार।
+                    </span>
                   </span>
                 </p>
               </div>
             )}
           </div>
 
-          <p className="relative z-10 text-[11.5px] text-white/50">
-            Authorised health department staff only. Activity is recorded.
+          <p className="relative z-10 text-[11.5px] text-white/60">
+            Prototype — not an official government system.{" "}
+            <span lang="hi">प्रोटोटाइप — यह कोई आधिकारिक सरकारी प्रणाली नहीं है।</span>
           </p>
 
           <svg
@@ -172,7 +262,7 @@ export default function Landing({
           </svg>
         </div>
 
-        <main className="flex flex-1 flex-col items-center justify-center px-5 py-12 sm:px-8">
+        <main id="landing-main" tabIndex={-1} className="flex flex-1 flex-col items-center justify-center px-5 py-12 sm:px-8">
           {/* Only when a session is already open. The front door is the front
               door even for somebody who has been here before, but it must not
               become a wall they have to sign in through twice. */}
@@ -192,7 +282,7 @@ export default function Landing({
             </div>
           )}
 
-          <SignInPanel onSignedIn={onSignedIn} showNotice={false} />
+          <SignInPanel onSignedIn={onSignedIn} showNotice={false} demoGuide={<DemoScript />} />
 
           <a
             href="#how-it-works"
@@ -214,7 +304,8 @@ export default function Landing({
           </h2>
           <p className="mt-3 max-w-2xl text-[16px] leading-relaxed text-ink-2">
             Three steps, and a person at the end of them. The forecast is shared across states
-            without the rows ever leaving one; the decision stays with an officer.
+            without the rows ever leaving one; the decision stays with people — the centre that
+            gives the stock, and an officer for the exceptions.
           </p>
 
           <ol className="mt-10 grid gap-px overflow-hidden rounded-lg border border-line bg-line sm:grid-cols-3">
@@ -234,6 +325,43 @@ export default function Landing({
               </li>
             ))}
           </ol>
+        </div>
+      </section>
+
+      {/* ------------------------------------------ live, recorded, next --- */}
+      <section aria-labelledby="live-recorded-next" className="border-t border-line">
+        <div className="mx-auto max-w-6xl px-5 py-14 sm:px-8 lg:py-16">
+          <h2
+            id="live-recorded-next"
+            className="scroll-mt-6 text-[12px] font-semibold tracking-[0.14em] text-ink-3 uppercase"
+          >
+            What runs live, what's recorded, what's next
+          </h2>
+          <p lang="hi" className="mt-1 text-[13px] text-ink-3">
+            क्या लाइव चलता है, क्या रिकॉर्ड है, आगे क्या है
+          </p>
+          <p className="mt-3 max-w-2xl text-[16px] leading-relaxed text-ink-2">
+            The demo runs on a small free database. What costs a few rows per action runs live;
+            what needs heavy compute ran once and its proof is kept; the rest is roadmap.
+          </p>
+          <div className="mt-8 grid gap-px overflow-hidden rounded-lg border border-line bg-line md:grid-cols-3">
+            {RUNS.map((col) => (
+              <div key={col.key} className="flex flex-col bg-panel p-6">
+                <h3 className="text-[16px] leading-snug font-semibold tracking-tight">
+                  {col.title}
+                </h3>
+                <span lang="hi" className="mt-0.5 block text-[13px] text-ink-3">
+                  {col.hindi}
+                </span>
+                <ul className="mt-3.5 list-disc space-y-2 pl-4 text-[13.5px] leading-relaxed text-ink-2">
+                  {col.items.map((item) => (
+                    <li key={item}>{item}</li>
+                  ))}
+                </ul>
+                <p className="mt-auto pt-4 text-[12.5px] text-ink-3">{col.why}</p>
+              </div>
+            ))}
+          </div>
         </div>
       </section>
 

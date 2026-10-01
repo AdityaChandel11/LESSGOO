@@ -21,11 +21,6 @@ dist-ssr/
 .vite/
 *.tsbuildinfo
 
-# --- agent tooling: machine-specific state stays local ---
-.claude/ecc/
-.claude/settings.local.json
-.claude/worktrees/
-
 # --- editors / os ---
 .vscode/
 .idea/

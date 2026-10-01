@@ -31,31 +31,44 @@ from __future__ import annotations
 import hashlib
 import math
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Literal
 
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from . import services
 from .config import settings
 from .models import FacilityBriefing
-from .redistribution import EARTH_RADIUS_KM, PlanRules, StockNode, split_roles
-
-# The one string this module uses to mark a transfer as a pharmacist's own
-# request. It is written on insert and read by both caps and by the sandbox
-# cleanup, so it lives here once rather than being spelled out three times.
-FACILITY_REQUEST = "facility_request"
+from .redistribution import (
+    EARTH_RADIUS_KM,
+    FACILITY_REQUEST,  # re-exported: api, checks and scripts read it from here
+    INDIA,
+    PlanRules,
+    StockNode,
+    request_lapsed,
+    request_window,
+    split_roles,
+)
 
 # What every distance in this module is. Named rather than described, so a
 # screen cannot accidentally imply a road route (spec: route_source).
 STRAIGHT_LINE = "straight_line_x1.3"
 
-# Reading sources, grouped by what they actually prove about a number.
-_IN_APP = frozenset({"form", "voice", "photo"})
+# Reading sources, grouped by what they actually prove about a number. A photo
+# is not a count: it is a document a model read, and what it proves depends on
+# which document it was (fix list #11).
+_IN_APP = frozenset({"form", "voice"})
 _PHONE = frozenset({"sms", "ivr", "whatsapp"})
 _SYSTEM = frozenset({"seed", "transfer"})
 
-ProvenanceKind = Literal["counted", "delivery", "phone", "system", "none"]
+ProvenanceKind = Literal["counted", "photo", "delivery", "phone", "system", "none"]
+
+_DOCUMENT_LABEL = {
+    "stock_count": "Stock count",
+    "issue_record": "Issue record",
+    "delivery_slip": "Delivery slip",
+}
 
 
 # =============================================================== values ===
@@ -140,6 +153,10 @@ class DeliveryEstimate:
     basis: str
     label: str
     assumptions: dict[str, float | int]
+    # The approval the estimate depends on: the dispatch cutoff on the day
+    # the batch would leave. "If approved by 14:00 today, about 1 Oct" —
+    # never a flat date, because nothing moves until the donor says yes.
+    approve_by: datetime
 
 
 class RequestRefused(Exception):
@@ -150,16 +167,32 @@ class RequestRefused(Exception):
 # ========================================================== provenance ===
 
 
-def _describe(source: str | None, receipt: LastReceipt | None) -> tuple[ProvenanceKind, str]:
+def _photo_detail(document: dict | None) -> str:
+    """Which document a photo reading came from, and who read it. Readings
+    from before fix #11 carry no document type and say so."""
+    doc = document or {}
+    kind = _DOCUMENT_LABEL.get(doc.get("document_type"))
+    if kind is None:
+        return "Read from a photo; the kind of document was not recorded"
+    reader = (
+        "the test reader (no model was called)" if doc.get("read_by") == "mock" else "Gemini"
+    )
+    return "{0} read by {1}".format(kind, reader)
+
+
+def _describe(
+    source: str | None, receipt: LastReceipt | None, document: dict | None = None
+) -> tuple[ProvenanceKind, str]:
     if receipt is not None:
         return "delivery", "Batch {0}, {1:,.0f} received".format(
             receipt.batch_id, receipt.qty_received
         )
+    if source == "photo":
+        return "photo", _photo_detail(document)
     if source in _IN_APP:
         detail = {
             "form": "Entered on the stock form",
             "voice": "Spoken into the app and transcribed",
-            "photo": "Read from a photographed register",
         }[source]
         return "counted", detail
     if source in _PHONE:
@@ -181,6 +214,7 @@ def provenance(
     last_reported_at: datetime | None,
     last_receipt: LastReceipt | None,
     now: datetime,
+    document: dict | None = None,
 ) -> Provenance:
     """How this facility's figure for one medicine was last checked, and when.
 
@@ -210,7 +244,7 @@ def provenance(
     if receipt_wins:
         at, kind_detail = receipt_at, _describe(None, last_receipt)
     else:
-        at, kind_detail = reading_at, _describe(last_source, None)
+        at, kind_detail = reading_at, _describe(last_source, None, document)
 
     kind, detail = kind_detail
     return Provenance(
@@ -237,6 +271,115 @@ def stockout_date(
     if days_of_stock is None or last_reported_at is None:
         return None
     return (last_reported_at + timedelta(days=days_of_stock)).date()
+
+
+# ================================================== cover, as of now ===
+# Stored cover is measured at the last count; the clock never moved it, so a
+# card could say "5.4 days, at risk, runs out today" (fix #26). The countdown
+# is applied where the card is built, never written back to stored rows.
+
+COUNT_OVERDUE = "count_overdue"
+
+
+@dataclass(frozen=True)
+class Cover:
+    days_of_stock: float | None
+    status: str
+    count_overdue: bool
+
+
+def cover_now(
+    days_of_stock: float | None,
+    last_reported_at: datetime | None,
+    status: str,
+    now: datetime,
+    warning_multiplier: float = 1.0,
+) -> Cover:
+    """Stored cover minus the days since the count (floor 0), reclassified.
+
+    Past the projected run-out the shelf is "count overdue": its real level is
+    unknown and probably empty, and the honest instruction is to count it.
+    """
+    if days_of_stock is None or last_reported_at is None:
+        return Cover(days_of_stock, status, False)
+    elapsed = max(0.0, (now - last_reported_at).total_seconds() / 86400.0)
+    left = days_of_stock - elapsed
+    if left <= 0:
+        return Cover(0.0, COUNT_OVERDUE, True)
+    return Cover(left, services.classify(left, warning_multiplier), False)
+
+
+MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "June", "July", "Aug", "Sept", "Oct", "Nov", "Dec")
+
+
+def day_words(d: date) -> str:
+    """24 Sept — the way the cards and the fix list write a date."""
+    return "{0} {1}".format(d.day, MONTHS[d.month - 1])
+
+
+# ===================================================== use and forecast ===
+# Fix #84: the forecast made visible. A medicine's last 28 days of use, the
+# burn rate, and the shared model's next-7-day forecast where the model
+# covers that state and medicine. The web service carries no torch, so the
+# model's coverage is mirrored in services.py; tests/test_forecast_visible.py
+# keeps it in step with federation/pytorchexample.
+
+MODEL_STATES = services.MODEL_STATES
+MODEL_SKUS = services.MODEL_SKUS
+
+
+@dataclass(frozen=True)
+class DayUse:
+    day: date
+    # None when no count covers that day: use is never invented.
+    used: float | None
+    # True when the figure is a decline spread evenly over the days between
+    # two counts more than a day apart, rather than one day's own count.
+    spread: bool = False
+
+
+def daily_use(
+    series: list[tuple[datetime, float, str | None]], now: datetime, window: int = 28
+) -> list[DayUse]:
+    """Each decline between two counts, spread evenly over the days it covers —
+    the same arithmetic as the burn rate, which divides by elapsed days. A
+    restock is not negative use, and stock that left on a transfer was not
+    used."""
+    days = [(now - timedelta(days=window - 1 - i)).date() for i in range(window)]
+    used: dict[date, float] = {}
+    spread: set[date] = set()
+    for (prev_at, prev_qty, _), (at, qty, source) in zip(series, series[1:]):
+        if source == "transfer":
+            continue
+        start, end = prev_at.date(), at.date()
+        covered = [end - timedelta(days=k) for k in range((end - start).days)] or [end]
+        share = max(0.0, prev_qty - qty) / len(covered)
+        for d in covered:
+            used[d] = used.get(d, 0.0) + share
+            if len(covered) > 1:
+                spread.add(d)
+    return [DayUse(d, used.get(d), d in spread) for d in days]
+
+
+def forecast_note(
+    *, in_model: bool, fresh: bool, published: datetime | None, version: str | None
+) -> str:
+    if not in_model:
+        return "Burn rate — this state or medicine is not in the shared model yet."
+    if fresh and published is not None:
+        return (
+            "Next 7 days from the shared model, trained across {0} states ({1}) without "
+            "moving their rows · {2}, published {3}"
+        ).format(len(MODEL_STATES), ", ".join(MODEL_STATES), version, day_words(published.date()))
+    if published is not None:
+        return (
+            "This state and medicine are in the shared model, but its latest forecast here "
+            "(published {0}) is older than {1:g} days, so the burn rate is used."
+        ).format(day_words(published.date()), settings.forecast_max_age_days)
+    return (
+        "This state and medicine are in the shared model, but no forecast has been published "
+        "for this centre yet, so the burn rate is used."
+    )
 
 
 # ========================================================= find supply ===
@@ -346,17 +489,17 @@ def check_caps(open_here: int, open_overall: int, limits: CapLimits) -> CapVerdi
     if open_here >= limits.per_facility:
         return CapVerdict(
             False,
-            "This centre already has {0} open requests, which is the limit of {1}. "
-            "Confirm or cancel one before raising another.".format(
-                open_here, limits.per_facility
-            ),
+            "This centre already has {0} requests waiting for a reply, which is the "
+            "limit of {1}. Cancel one from its medicine card, or wait: a request with "
+            "no reply lapses on its own.".format(open_here, limits.per_facility),
         )
     if open_overall >= limits.overall:
         return CapVerdict(
             False,
-            "Limit reached: {0} requests are open across the platform, which is the "
-            "demonstration cap of {1}. Existing requests must be settled before new "
-            "ones can be raised.".format(open_overall, limits.overall),
+            "Limit reached: {0} requests were raised across the platform in the last 24 "
+            "hours, which is the demonstration cap of {1}. Try again later.".format(
+                open_overall, limits.overall
+            ),
         )
     return CapVerdict(True)
 
@@ -428,7 +571,8 @@ def delivery_estimate(*, km: float, raised_at: datetime) -> DeliveryEstimate:
     travel_hours = km / settings.avg_speed_kmh + settings.handling_hours
 
     # A request raised after the cutoff leaves the next morning; district
-    # stores do not load vehicles at night.
+    # stores do not load vehicles at night. `raised_at` must be local time
+    # (in_india): the cutoff is a local hour.
     start = raised_at.date()
     if raised_at.hour >= settings.dispatch_cutoff_hour:
         start += timedelta(days=1)
@@ -440,7 +584,30 @@ def delivery_estimate(*, km: float, raised_at: datetime) -> DeliveryEstimate:
         basis=STRAIGHT_LINE,
         label="estimate",
         assumptions=assumptions,
+        approve_by=datetime.combine(
+            start, time(settings.dispatch_cutoff_hour), tzinfo=raised_at.tzinfo
+        ),
     )
+
+
+def in_india(moment: datetime) -> datetime:
+    """A stored UTC time as the clock on a centre's wall reads it."""
+    return moment.astimezone(INDIA)
+
+
+def request_words(status: str, lapsed: bool, donor: str) -> str:
+    """A request's state as a pharmacist says it — never `proposed` or
+    `donor_facility` (fix list #31)."""
+    if status == "proposed":
+        return "No reply from {0}".format(donor) if lapsed else (
+            "Awaiting reply from {0} (pharmacist)".format(donor)
+        )
+    return {
+        "approved": "Accepted and sent by {0}".format(donor),
+        "rejected": "Declined by {0}".format(donor),
+        "cancelled": "Cancelled by this centre",
+        "completed": "Delivered from {0}".format(donor),
+    }.get(status, "Closed")
 
 
 # =========================================================== briefing ===
@@ -465,6 +632,10 @@ class BriefingRow:
     qty: float
     days_of_stock: float | None
     status: str
+    # Set when the count is overdue (fix #26): the count's date, and the day
+    # the shelf would have run out at the usual use.
+    last_counted_on: date | None = None
+    ran_out_on: date | None = None
 
 
 def _worst(rows: list[BriefingRow]) -> BriefingRow | None:
@@ -494,6 +665,31 @@ def rules_briefing(rows: list[BriefingRow]) -> dict[str, str]:
                   "nothing to act on. Report today's counts to start.",
             "hi": "इस केंद्र के लिए अभी तक कोई स्टॉक दर्ज नहीं हुआ है। आज की "
                   "गिनती दर्ज करें।",
+        }
+
+    overdue = [r for r in rows if r.status == COUNT_OVERDUE]
+    if overdue:
+        first = min(overdue, key=lambda r: r.ran_out_on or date.max)
+        others = len(overdue) - 1
+        counted = day_words(first.last_counted_on) if first.last_counted_on else "an earlier day"
+        ran_out = day_words(first.ran_out_on) if first.ran_out_on else "before today"
+        tail_en = (
+            " {0} other medicine{1} also overdue for a count.".format(
+                others, " is" if others == 1 else "s are"
+            )
+            if others > 0
+            else ""
+        )
+        tail_hi = " {0} और दवाओं की गिनती भी बाकी है।".format(others) if others > 0 else ""
+        return {
+            "en": "Count the {0} shelf today — last counted {1:,.0f} {2} on {3}; at your "
+                  "usual use it would have run out around {4}.{5}".format(
+                      first.sku_name, first.qty, first.unit, counted, ran_out, tail_en
+                  ),
+            "hi": "{0} की अलमारी आज गिनें — आखिरी गिनती {3} को {1:,.0f} {2} थी; सामान्य "
+                  "खपत पर यह लगभग {4} तक खत्म हो गई होगी।{5}".format(
+                      first.sku_name, first.qty, first.unit, counted, ran_out, tail_hi
+                  ),
         }
 
     worst = _worst(rows)
@@ -567,6 +763,241 @@ def briefing_hash(rows: list[BriefingRow]) -> str:
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
 
 
+# ============================================================== to-do ===
+# Fix #85: the Today card as a prioritised list, not one sentence about one
+# medicine. Every line is computed from this centre's own rows, in an order a
+# rule decides, so it needs no key and reads the same whoever opens it. The
+# model's job (vision.write_briefing) is to say the same list in plainer
+# words and in the state's language; it may not add a line or a figure.
+
+
+@dataclass(frozen=True)
+class TodoDelivery:
+    """One consignment on its way to this centre."""
+
+    sku_name: str
+    unit: str
+    qty: float
+    from_name: str
+    expected_on: date
+    overdue: bool
+
+
+@dataclass(frozen=True)
+class TodoRequest:
+    """A request this centre raised that nobody has answered yet."""
+
+    sku_name: str
+    unit: str
+    qty: float
+    donor: str
+
+
+@dataclass(frozen=True)
+class TodoItem:
+    kind: str
+    en: str
+    hi: str
+    # The workspace tab where the thing is done.
+    tab: str
+
+
+@dataclass(frozen=True)
+class StateLanguage:
+    code: str
+    name: str
+    native: str
+
+
+# The principal official language of a state, where it is not Hindi. A centre
+# in any other state gets English and Hindi only.
+STATE_LANGUAGES: dict[str, StateLanguage] = {
+    "MH": StateLanguage("mr", "Marathi", "मराठी"),
+    "KL": StateLanguage("ml", "Malayalam", "മലയാളം"),
+    "TN": StateLanguage("ta", "Tamil", "தமிழ்"),
+    "KA": StateLanguage("kn", "Kannada", "ಕನ್ನಡ"),
+    "AP": StateLanguage("te", "Telugu", "తెలుగు"),
+    "TG": StateLanguage("te", "Telugu", "తెలుగు"),
+    "WB": StateLanguage("bn", "Bengali", "বাংলা"),
+    "GJ": StateLanguage("gu", "Gujarati", "ગુજરાતી"),
+    "PB": StateLanguage("pa", "Punjabi", "ਪੰਜਾਬੀ"),
+    "OD": StateLanguage("or", "Odia", "ଓଡ଼ିଆ"),
+    "AS": StateLanguage("as", "Assamese", "অসমীয়া"),
+}
+
+MAX_TODO = 7
+
+
+def state_language(state_code: str) -> StateLanguage | None:
+    return STATE_LANGUAGES.get(state_code)
+
+
+def _qty(value: float) -> str:
+    return "{0:,.0f}".format(value)
+
+
+def todo_items(
+    *,
+    rows: list[BriefingRow],
+    deliveries: list[TodoDelivery],
+    awaiting_your_reply: int,
+    own_waiting: list[TodoRequest],
+    outbreaks: list[str],
+    bed_report_today: bool | None,
+    checked_in_today: int | None,
+) -> list[TodoItem]:
+    """Today's list, most urgent first, capped at MAX_TODO.
+
+    The order is the rule: a shelf nobody has counted, then a shelf about to
+    empty, then stock that should have arrived, then a neighbour waiting on
+    this centre, then an outbreak, then everything that can wait a day.
+    `None` for the ward report or the check-in means "not known", and nothing
+    is asked for on the strength of not knowing.
+    """
+    requested = {r.sku_name for r in own_waiting}
+    items: list[TodoItem] = []
+
+    overdue = sorted(
+        (r for r in rows if r.status == COUNT_OVERDUE),
+        key=lambda r: r.ran_out_on or date.max,
+    )
+    for r in overdue:
+        counted = day_words(r.last_counted_on) if r.last_counted_on else "an earlier day"
+        ran_out = day_words(r.ran_out_on) if r.ran_out_on else "before today"
+        items.append(TodoItem(
+            "recount",
+            "Recount {0}: last counted {1} {2} on {3}; at your usual use it would have "
+            "run out around {4}.".format(r.sku_name, _qty(r.qty), r.unit, counted, ran_out),
+            "{0} दोबारा गिनें: आखिरी गिनती {3} को {1} {2} थी; सामान्य खपत पर यह लगभग {4} "
+            "तक खत्म हो गई होगी।".format(r.sku_name, _qty(r.qty), r.unit, counted, ran_out),
+            "medicines",
+        ))
+
+    def by_cover(status: str) -> list[BriefingRow]:
+        return sorted(
+            (r for r in rows if r.status == status and r.sku_name not in requested),
+            key=lambda r: r.days_of_stock if r.days_of_stock is not None else 1e9,
+        )
+
+    for r in by_cover("critical"):
+        cover_en = (
+            ", about {0} days of cover".format(_days(r.days_of_stock))
+            if r.days_of_stock is not None else ""
+        )
+        cover_hi = (
+            ", लगभग {0} दिन का स्टॉक".format(_days(r.days_of_stock))
+            if r.days_of_stock is not None else ""
+        )
+        items.append(TodoItem(
+            "order",
+            "Order {0} today: {1} {2} left{3}.".format(r.sku_name, _qty(r.qty), r.unit, cover_en),
+            "{0} का ऑर्डर आज ही दें: {1} {2} बचा है{3}।".format(
+                r.sku_name, _qty(r.qty), r.unit, cover_hi
+            ),
+            "medicines",
+        ))
+
+    late = sorted((d for d in deliveries if d.overdue), key=lambda d: d.expected_on)
+    for d in late:
+        when = day_words(d.expected_on)
+        items.append(TodoItem(
+            "delivery_overdue",
+            "Delivery overdue: {0} {1} of {2} from {3}, expected {4}. If it has arrived, "
+            "count it and confirm it on Orders.".format(
+                _qty(d.qty), d.unit, d.sku_name, d.from_name, when
+            ),
+            "डिलीवरी में देरी: {3} से {2} की {0} {1}, {4} तक आनी थी। आ चुकी हो तो गिनकर "
+            "ऑर्डर टैब पर पुष्टि करें।".format(_qty(d.qty), d.unit, d.sku_name, d.from_name, when),
+            "orders",
+        ))
+
+    if awaiting_your_reply > 0:
+        one = awaiting_your_reply == 1
+        items.append(TodoItem(
+            "reply_needed",
+            "{0} request{1} for your stock {2} waiting for your answer on Orders.".format(
+                awaiting_your_reply, "" if one else "s", "is" if one else "are"
+            ),
+            "आपके स्टॉक के लिए {0} अनुरोध आपके उत्तर की प्रतीक्षा में {1} — ऑर्डर टैब "
+            "देखें।".format(awaiting_your_reply, "है" if one else "हैं"),
+            "orders",
+        ))
+
+    for headline in outbreaks:
+        items.append(TodoItem(
+            "outbreak",
+            "{0}. Check your cover for its medicines.".format(headline),
+            "ज़िले में प्रकोप की सूचना: {0}। इसकी दवाओं का स्टॉक जाँचें।".format(headline),
+            "medicines",
+        ))
+
+    for r in by_cover("at_risk"):
+        if r.days_of_stock is None:
+            continue
+        items.append(TodoItem(
+            "order_soon",
+            "Request {0} this week: about {1} days of cover left.".format(
+                r.sku_name, _days(r.days_of_stock)
+            ),
+            "{0} के लिए इस सप्ताह अनुरोध करें: लगभग {1} दिन का स्टॉक बचा है।".format(
+                r.sku_name, _days(r.days_of_stock)
+            ),
+            "medicines",
+        ))
+
+    for d in sorted((d for d in deliveries if not d.overdue), key=lambda d: d.expected_on):
+        when = day_words(d.expected_on)
+        items.append(TodoItem(
+            "delivery_arriving",
+            "Expect {0} {1} of {2} from {3} by {4}. Count it before you confirm.".format(
+                _qty(d.qty), d.unit, d.sku_name, d.from_name, when
+            ),
+            "{3} से {2} की {0} {1} {4} तक आने वाली है। पुष्टि से पहले गिन लें।".format(
+                _qty(d.qty), d.unit, d.sku_name, d.from_name, when
+            ),
+            "orders",
+        ))
+
+    for q in own_waiting:
+        items.append(TodoItem(
+            "request_waiting",
+            "Your request for {0} {1} of {2} from {3} is awaiting a reply.".format(
+                _qty(q.qty), q.unit, q.sku_name, q.donor
+            ),
+            "{3} से {2} की {0} {1} का आपका अनुरोध उत्तर की प्रतीक्षा में है।".format(
+                _qty(q.qty), q.unit, q.sku_name, q.donor
+            ),
+            "orders",
+        ))
+
+    if bed_report_today is False:
+        items.append(TodoItem(
+            "bed_report",
+            "No ward bed report has been sent today. Today's code is on the Beds tab.",
+            "आज वार्ड की बेड रिपोर्ट नहीं भेजी गई है। आज का कोड बेड टैब पर है।",
+            "beds",
+        ))
+
+    if checked_in_today == 0:
+        items.append(TodoItem(
+            "check_in",
+            "No staff check-in has been recorded at this centre today.",
+            "आज इस केंद्र पर किसी कर्मचारी की उपस्थिति दर्ज नहीं हुई है।",
+            "attendance",
+        ))
+
+    if not items:
+        line = rules_briefing(rows)
+        return [TodoItem("all_clear", line["en"], line["hi"], "medicines")]
+    return items[:MAX_TODO]
+
+
+def todo_hash(items: list[TodoItem]) -> str:
+    """A fingerprint of the list a briefing describes: the cached wording
+    expires when the list changes, not only when the clock says so."""
+    return hashlib.sha256("\n".join(i.en for i in items).encode("utf-8")).hexdigest()
+
+
 # ====================================================== bounded reads ===
 # Everything below touches the database. Each query is bounded by one facility
 # or by one (state, sku) pair; none of them may grow into a national scan.
@@ -578,7 +1009,7 @@ async def last_receipts(session: AsyncSession, facility_id: str) -> dict[str, La
     DISTINCT ON keeps this to a single index scan over
     ix_movements_facility_time rather than a query per medicine. Bounded by one
     facility on purpose: the national equivalent of this read is the one
-    measured at over 300 seconds and ~70 MB of temp in docs/STORAGE_NOTES.md.
+    measured at over 300 seconds and ~70 MB of temp files on the deployed database.
     """
     rows = await session.execute(
         text(
@@ -600,27 +1031,148 @@ async def last_receipts(session: AsyncSession, facility_id: str) -> dict[str, La
     }
 
 
-async def open_request_counts(session: AsyncSession, facility_id: str) -> tuple[int, int]:
-    """(open requests for this facility, open requests everywhere).
+async def last_count_times(
+    session: AsyncSession, facility_id: str, *, since: datetime
+) -> dict[str, datetime]:
+    """When each medicine's shelf level was last stated here, per medicine.
 
-    Counts only `triggered_by = 'facility_request'`. The solver's own proposals
-    are not a pharmacist's queue and must not consume their allowance.
+    Any reading but a delivery's own ledger row (`transfer`) states a level; a
+    superseded reading states nothing. Bounded by one facility and a window,
+    over ix_readings_facility_sku_time. Used to refuse a photographed document
+    dated before the latest count, which that count already includes (fix #11).
     """
+    rows = await session.execute(
+        text(
+            """
+            SELECT sku_code, MAX(reported_at)
+            FROM stock_readings
+            WHERE facility_id = :fid AND reported_at >= :since
+              AND source <> 'transfer' AND superseded_by IS NULL
+            GROUP BY sku_code
+            """
+        ),
+        {"fid": facility_id, "since": since},
+    )
+    return {r[0]: r[1] for r in rows.all()}
+
+
+async def photo_documents(
+    session: AsyncSession, facility_id: str, latest: dict[str, datetime]
+) -> dict[str, dict]:
+    """The document behind each medicine's latest reading, where that reading
+    was a photo: `latest` maps medicine to that reading's time. Only this
+    facility's photo rows at those times are read, so the card can say "Issue
+    record read by Gemini" instead of guessing what the photo was."""
+    if not latest:
+        return {}
+    rows = await session.execute(
+        text(
+            """
+            SELECT sku_code, reported_at, raw_payload
+            FROM stock_readings
+            WHERE facility_id = :fid AND source = 'photo'
+              AND reported_at >= :since AND sku_code = ANY(:skus)
+            """
+        ),
+        {"fid": facility_id, "since": min(latest.values()), "skus": list(latest)},
+    )
+    return {
+        sku: payload or {}
+        for sku, at, payload in rows.all()
+        if at == latest.get(sku)
+    }
+
+
+async def open_request_counts(
+    session: AsyncSession, facility_id: str, *, now: datetime | None = None
+) -> tuple[int, int]:
+    """(requests this facility is still waiting on, requests raised anywhere in
+    the last 24 hours).
+
+    The first is the per-centre cap, and counts only live requests: one that
+    lapsed without a reply stops counting, which is what locked Nashik PHC 1
+    out when nothing ever expired (fix list #31). The second is the database
+    size guard, and counts every request raised in a rolling day whatever
+    became of it, so growth stays bounded at the cap a day and the guard frees
+    itself without anything having to write. Both count only
+    `triggered_by = 'facility_request'`: the solver's own proposals are not a
+    pharmacist's queue.
+    """
+    now = now or datetime.now(timezone.utc)
+    live_since = now - request_window()
+    day_ago = now - timedelta(hours=24)
     row = (
         await session.execute(
             text(
                 """
                 SELECT
-                    count(*) FILTER (WHERE to_facility = :fid) AS here,
-                    count(*)                                   AS overall
+                    count(*) FILTER (
+                        WHERE to_facility = :fid AND status = 'proposed'
+                          AND created_at > :live_since
+                    ) AS here,
+                    count(*) FILTER (WHERE created_at > :day_ago) AS overall
                 FROM transfers
-                WHERE status = 'proposed' AND triggered_by = :tag
+                WHERE triggered_by = :tag AND created_at > :oldest
                 """
             ),
-            {"fid": facility_id, "tag": FACILITY_REQUEST},
+            {
+                "fid": facility_id,
+                "tag": FACILITY_REQUEST,
+                "live_since": live_since,
+                "day_ago": day_ago,
+                "oldest": min(live_since, day_ago),
+            },
         )
     ).first()
     return (int(row[0]), int(row[1])) if row else (0, 0)
+
+
+@dataclass(frozen=True)
+class OwnRequest:
+    """A request this centre raised, as its medicine card shows it."""
+
+    transfer_id: int
+    sku_code: str
+    qty: float
+    from_facility: str
+    from_name: str
+    status: str
+    lapsed: bool
+    words: str
+    created_at: datetime
+    lapses_at: datetime
+
+
+async def own_requests(
+    session: AsyncSession, facility_id: str, *, now: datetime | None = None
+) -> list[OwnRequest]:
+    """What this centre asked for in the last day, newest first. Bounded by the
+    centre, the request tag and the day."""
+    now = now or datetime.now(timezone.utc)
+    window = request_window()
+    rows = await session.execute(
+        text(
+            """
+            SELECT t.id, t.sku_code, t.qty, t.from_facility, f.name, t.status, t.created_at
+            FROM transfers t JOIN facilities f ON f.id = t.from_facility
+            WHERE t.to_facility = :fid AND t.triggered_by = :tag AND t.created_at > :since
+            ORDER BY t.created_at DESC
+            """
+        ),
+        {"fid": facility_id, "tag": FACILITY_REQUEST, "since": now - timedelta(hours=24)},
+    )
+    out: list[OwnRequest] = []
+    for tid, sku, qty, src, name, status, created in rows.all():
+        lapsed = status == "proposed" and request_lapsed(created, now, window)
+        out.append(
+            OwnRequest(
+                transfer_id=tid, sku_code=sku, qty=float(qty or 0), from_facility=src,
+                from_name=name, status=status, lapsed=lapsed,
+                words=request_words(status, lapsed, name), created_at=created,
+                lapses_at=created + window,
+            )
+        )
+    return out
 
 
 def briefing_rows_from_skus(skus: list[BriefingRow]) -> list[str]:
@@ -640,6 +1192,16 @@ def briefing_rows_from_skus(skus: list[BriefingRow]) -> list[str]:
     )
     lines = []
     for r in ranked[:BRIEFING_MAX_ROWS]:
+        if r.status == COUNT_OVERDUE:
+            lines.append(
+                "- {0}: last counted {1:,.0f} {2} on {3}, count overdue (would have run "
+                "out around {4} at usual use)".format(
+                    r.sku_name, r.qty, r.unit,
+                    day_words(r.last_counted_on) if r.last_counted_on else "an earlier day",
+                    day_words(r.ran_out_on) if r.ran_out_on else "before today",
+                )
+            )
+            continue
         cover = (
             "no cover estimate yet"
             if r.days_of_stock is None
@@ -653,7 +1215,7 @@ def briefing_rows_from_skus(skus: list[BriefingRow]) -> list[str]:
     return lines
 
 
-STATUS_ORDER_FOR_BRIEFING = {"critical": 0, "at_risk": 1, "healthy": 2}
+STATUS_ORDER_FOR_BRIEFING = {COUNT_OVERDUE: -1, "critical": 0, "at_risk": 1, "healthy": 2}
 BRIEFING_MAX_ROWS = 6
 
 
@@ -690,7 +1252,7 @@ async def store_briefing(
     expire together — a screen that showed a fresh English line beside a stale
     Hindi one would be worse than showing neither.
 
-    The composite primary key already caps a facility at two rows; this evicts
+    The composite primary key already caps a facility at one row per language; this evicts
     across facilities once `max_briefing_rows` is reached, oldest first,
     because this is a cache and the oldest line is the one nobody is reading.
     """

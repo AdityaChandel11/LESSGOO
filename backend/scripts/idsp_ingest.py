@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 
 from app import geo, idsp
@@ -28,11 +29,13 @@ def main() -> None:
         raise SystemExit("pypdf is needed to read the PDFs: pip install pypdf")
 
     names = {s.name: s.code for s in geo.INDIA_STATES}
-    aliases = {"Jammu and Kashmir": "Jammu & Kashmir", "Orissa": "Odisha"}
-    state_names = list(names) + list(aliases)
+    aliases = idsp.STATE_ALIASES
+    state_names = idsp.state_names()
 
     rows, reports = [], []
-    for path in args.pdfs:
+    # Oldest week first, so the reports list reads in order.
+    for path in sorted(args.pdfs, key=lambda x: int(re.search(r"week(\d+)", x).group(1))
+                       if re.search(r"week(\d+)", x) else 0):
         text = "\n".join(page.extract_text() or "" for page in PdfReader(path).pages)
         parsed = idsp.parse_report(text, state_names)
         for r in parsed:
@@ -42,9 +45,16 @@ def main() -> None:
         rows.extend(parsed)
         found = len(idsp.UNIQUE_ID.findall(text))
         if parsed:
-            reports.append({"year": parsed[0]["year"], "week": parsed[0]["week"], "rows": len(parsed)})
+            uploaded = idsp.uploaded_on(str(path))
+            reports.append({
+                "year": parsed[0]["year"], "week": parsed[0]["week"], "rows": len(parsed),
+                "found": found,
+                "uploaded_on": uploaded.isoformat() if uploaded else None,
+            })
         print(f"{path}: {len(parsed)} of {found} outbreak rows parsed", file=sys.stderr)
 
+    if not rows:
+        raise SystemExit("no rows parsed: the committed file was left as it was")
     idsp.DATA_FILE.write_text(
         json.dumps(
             {"source": idsp.SOURCE, "source_url": idsp.SOURCE_URL, "columns": list(idsp.COLUMNS),

@@ -21,7 +21,52 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-import { ApiError, type Handset, type SimulateResult, api } from "./api";
+import {
+  ApiError,
+  type Handset,
+  type SimulateResult,
+  type SimulatedReading,
+  api,
+  formatDays,
+} from "./api";
+import { both } from "./workspace/labels";
+
+const STATUS_WORD: Record<string, string> = {
+  critical: "Critical",
+  at_risk: "At risk",
+  healthy: "Healthy",
+};
+
+/**
+ * One medicine's effect, in the order it happened (fix list #24): the row the
+ * message wrote, then what the district map showed before and after. "Before"
+ * is the stored row the map was drawing, so a first-ever report says so rather
+ * than inventing a starting point.
+ */
+function ReadingEffect({ r }: { r: SimulatedReading }) {
+  const fresh = r.status_before == null;
+  return (
+    <li className="text-[11.5px] leading-snug text-ink-3">
+      <span className="font-mono text-ink-2">{r.sku_code}</span> ={" "}
+      {r.qty.toLocaleString("en-IN")}
+      {r.reading_id != null && (
+        <span className="font-mono"> · {both("rowWritten")} #{r.reading_id}</span>
+      )}
+      <span className="block">
+        {both("daysOfCover")}:{" "}
+        {fresh ? "no earlier report" : formatDays(r.days_before)} →{" "}
+        <span className="font-medium text-ink">{formatDays(r.days_of_stock)}</span>
+      </span>
+      <span className="block">
+        {both("statusWas")}:{" "}
+        {fresh ? "none" : STATUS_WORD[r.status_before ?? ""] ?? r.status_before} →{" "}
+        <span className="font-medium text-ink">
+          {STATUS_WORD[r.status ?? ""] ?? r.status ?? "—"}
+        </span>
+      </span>
+    </li>
+  );
+}
 
 type Channel = "sms" | "whatsapp" | "ivr";
 
@@ -53,7 +98,17 @@ function Pill({ ok, children }: { ok: boolean; children: React.ReactNode }) {
   );
 }
 
-export function FieldSimulator({ facilityId }: { facilityId: string | null }) {
+export function FieldSimulator({
+  facilityId,
+  blockedNote,
+  ownCentre = false,
+}: {
+  facilityId: string | null;
+  /** Why no centre is offered, when one is selected but may not be written for. */
+  blockedNote?: string;
+  /** Inside a centre's own workspace: the handsets are the reader's own. */
+  ownCentre?: boolean;
+}) {
   const [handsets, setHandsets] = useState<Handset[]>([]);
   const [sender, setSender] = useState("");
   const [channel, setChannel] = useState<Channel>("sms");
@@ -102,8 +157,8 @@ export function FieldSimulator({ facilityId }: { facilityId: string | null }) {
   if (!facilityId) {
     return (
       <p className="px-4 py-6 text-[12.5px] leading-relaxed text-ink-2">
-        Choose a health centre on the map to send a message as one of its
-        registered handsets.
+        {blockedNote ??
+          "Choose a health centre on the map to send a message as one of its registered handsets."}
       </p>
     );
   }
@@ -115,7 +170,9 @@ export function FieldSimulator({ facilityId }: { facilityId: string | null }) {
         would. Only the carrier is simulated.
       </p>
 
-      <label className="mt-3 block text-[12px] font-medium text-ink">From</label>
+      <label className="mt-3 block text-[12px] font-medium text-ink">
+        {ownCentre ? "From — this centre's registered handsets" : "From"}
+      </label>
       <select
         value={sender}
         onChange={(e) => setSender(e.target.value)}
@@ -230,17 +287,22 @@ export function FieldSimulator({ facilityId }: { facilityId: string | null }) {
               {entry.result.reply}
             </p>
             {entry.result.readings.length > 0 && (
-              <ul className="mt-1.5 flex flex-col gap-0.5">
+              <ul className="mt-1.5 flex flex-col gap-1.5">
                 {entry.result.readings.map((r) => (
-                  <li key={r.sku_code} className="text-[11.5px] text-ink-3">
-                    <span className="font-mono text-ink-2">{r.sku_code}</span> ={" "}
-                    {r.qty.toLocaleString("en-IN")}
-                    {r.days_of_stock != null && (
-                      <> · {r.days_of_stock.toFixed(1)} days · {r.status}</>
-                    )}
-                  </li>
+                  <ReadingEffect key={r.sku_code} r={r} />
                 ))}
               </ul>
+            )}
+            {(entry.result.written ?? []).length > 0 && (
+              <p className="mt-1 font-mono text-[11px] text-ink-2">
+                {both("rowWritten")}: {entry.result.written.join(" · ")}
+              </p>
+            )}
+            {entry.result.event_id != null && (
+              <p className="mt-1 text-[11.5px] text-ink-2">
+                {both("sentToMap")} ·{" "}
+                <span className="font-mono">event #{entry.result.event_id}</span>
+              </p>
             )}
             {entry.result.actions.length > 0 && (
               <p className="mt-1 font-mono text-[10.5px] text-ink-3">

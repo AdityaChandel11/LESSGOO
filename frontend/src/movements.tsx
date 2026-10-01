@@ -19,6 +19,7 @@ import {
   type User,
   can,
 } from "./api";
+import { ChaseButton } from "./chase";
 
 const VIEWS: { key: MovementView; label: string; countKey: string }[] = [
   { key: "attention", label: "Needs attention", countKey: "attention" },
@@ -139,10 +140,15 @@ function ReceiptForm({
 function MovementRow({
   m,
   canConfirm,
+  actingForCentre,
+  canChase,
   onConfirm,
 }: {
   m: Movement;
   canConfirm: boolean;
+  /** A demo account confirming for the centre — the labelled sandbox exception. */
+  actingForCentre: boolean;
+  canChase: boolean;
   onConfirm: (qty: number, note: string) => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
@@ -182,23 +188,46 @@ function MovementRow({
       {reason && <p className="mt-1 text-[12px] text-ink-2">{reason}</p>}
       {m.note && <p className="mt-0.5 text-[11.5px] italic text-ink-3">“{m.note}”</p>}
 
-      {!settled &&
-        (canConfirm ? (
-          open ? (
-            <ReceiptForm movement={m} onConfirm={onConfirm} />
+      {!settled && (
+        <>
+          {canConfirm && !actingForCentre ? (
+            open ? (
+              <ReceiptForm movement={m} onConfirm={onConfirm} />
+            ) : (
+              <button
+                onClick={() => setOpen(true)}
+                className="mt-2 rounded border border-line px-2.5 py-1 text-[12px] font-medium text-ink-2 hover:border-brand hover:text-ink"
+              >
+                Confirm what arrived
+              </button>
+            )
           ) : (
-            <button
-              onClick={() => setOpen(true)}
-              className="mt-2 rounded border border-line px-2.5 py-1 text-[12px] font-medium text-ink-2 hover:border-brand hover:text-ink"
-            >
-              Confirm what arrived
-            </button>
-          )
-        ) : (
-          <p className="mt-1.5 text-[11.5px] text-ink-3">
-            Waiting on {m.facility_name} to confirm what arrived.
-          </p>
-        ))}
+            <p className="mt-1.5 text-[11.5px] text-ink-3">
+              Waiting on {m.facility_name} to confirm what arrived. Only the centre can.
+            </p>
+          )}
+          {canChase && (
+            <ChaseButton
+              facilityId={m.to_facility}
+              topic="receipt"
+              movementId={m.id}
+              label="Chase the centre · केंद्र को याद दिलाएँ"
+            />
+          )}
+          {canConfirm &&
+            actingForCentre &&
+            (open ? (
+              <ReceiptForm movement={m} onConfirm={onConfirm} />
+            ) : (
+              <button
+                onClick={() => setOpen(true)}
+                className="mt-1.5 rounded border border-dashed border-line px-2.5 py-1 text-[11.5px] text-ink-3 hover:border-brand hover:text-ink"
+              >
+                Demo, sandbox only: confirm for the centre
+              </button>
+            ))}
+        </>
+      )}
     </div>
   );
 }
@@ -251,6 +280,8 @@ export function MovementsPanel({
 
   const counts = data?.counts ?? {};
   const rows = data?.movements ?? [];
+  // Fix #77: the totals above are an aggregate; the rows are each state's own.
+  const withheld = data?.rows_withheld ?? null;
 
   const confirm = useMemo(
     () => (m: Movement) => async (qty: number, note: string) => {
@@ -269,6 +300,8 @@ export function MovementsPanel({
     <div className="flex h-full min-h-0 flex-col">
       <div className="border-b border-line px-3 py-2.5">
         <h2 className="text-[13px] font-semibold text-ink">Medicine movements — {stateLabel}</h2>
+        {/* Fix #92: the main channel this prototype does not model. */}
+        <p className="mt-0.5 text-[11px] leading-snug text-ink-3">Most replenishment in practice is by indent to the district drug warehouse; this prototype models centre-to-centre transfers and the warehouse dispatch ledger.</p>
         <p className="mt-0.5 text-[12px] text-ink-2">
           Every batch has two records: what the warehouse dispatched, and what the facility
           confirms arrived. Gaps between them show up here without anyone auditing.
@@ -318,6 +351,10 @@ export function MovementsPanel({
           <p className="p-3 text-[12.5px] text-crit">{error}</p>
         ) : loading && rows.length === 0 ? (
           <p className="p-3 text-[12.5px] text-ink-3">Loading the ledger…</p>
+        ) : withheld ? (
+          <p role="note" className="m-3 rounded border border-line bg-canvas px-3 py-2 text-[12.5px] leading-snug text-ink-2">
+            {withheld} The totals above are shown; each consignment is a row about one centre.
+          </p>
         ) : rows.length === 0 ? (
           <p className="p-3 text-[12.5px] text-ink-2">
             {view === "attention"
@@ -334,6 +371,8 @@ export function MovementsPanel({
                 state_silo: m.state_silo,
                 district: m.district,
               })}
+              actingForCentre={user.role !== "facility_user"}
+              canChase={can.chase(user, m)}
               onConfirm={confirm(m)}
             />
           ))

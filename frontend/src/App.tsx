@@ -5,6 +5,7 @@ import NationalMap, {
   DISTRICT_ZOOM,
   FACILITY_ZOOM,
   type FlyTarget,
+  type OutbreakMark,
   type RouteLine,
   type ViewInfo,
 } from "./NationalMap";
@@ -13,6 +14,7 @@ import {
   type Bucket,
   type FacilityDetail,
   type LiveEvent,
+  type NextPair,
   type Pin,
   type Plan,
   ROLE_LABEL,
@@ -22,6 +24,11 @@ import {
   type Transfer,
   type User,
   can,
+  heldNote,
+  HELD_HINDI,
+  inDemoSandbox,
+  readsRows,
+  rowsScope,
   STATUS_COLOR,
   STATUS_LABEL,
   STATUS_RULE,
@@ -32,14 +39,16 @@ import {
   POLL_VISIBLE_MS,
   useLiveUpdates,
 } from "./api";
-import { LiveLoopPanel, SANDBOX, pickSku } from "./liveloop";
+import { LiveLoopPanel, SANDBOX, inSandbox, pickSku } from "./liveloop";
 import { ActivityFeed, FacilityPanel, NationalPanel, StatePanel } from "./panels";
 import { FederationPanel } from "./federation";
 import { FieldSimulator } from "./field";
 import { MovementsPanel } from "./movements";
 import { AuditQueuePanel } from "./trustpanel";
 import { OutbreakWarnings } from "./outbreaks";
+import { NextWarnings } from "./nextwarnings";
 import { RedistributionPanel, TransfersPrompt, type Trip, groupTrips } from "./transfers";
+import { SEED_RULES } from "./seedRules";
 
 type Mode = "stock" | "transfers" | "movements" | "trust" | "federation" | "field";
 
@@ -84,6 +93,15 @@ function readUrl(): UrlState {
     facility: q.get("facility"),
     at: validAt ? { lat: at[0], lng: at[1], zoom: at[2] } : null,
   };
+}
+
+function sinceWords(at: number, now: number): string {
+  const s = Math.max(0, Math.round((now - at) / 1000));
+  if (s < 60) return "just now";
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60);
+  return h < 24 ? `${h} h ago` : `${Math.round(h / 24)} d ago`;
 }
 
 function pinFromDetail(d: FacilityDetail): Pin {
@@ -198,11 +216,36 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
   const [loopFor, setLoopFor] = useState<FacilityDetail | null>(null);
   // Set when the loop was opened by "Simulate emergency", which starts it too.
   const [loopAuto, setLoopAuto] = useState(false);
+  // "Simulate emergency" runs the outbreak chain (fix #44); a facility's own
+  // button runs the stock-out drill.
+  const [loopKind, setLoopKind] = useState<"stockout" | "outbreak">("stockout");
   const [emergencyBusy, setEmergencyBusy] = useState(false);
+  const [feedOpen, setFeedOpen] = useState(false);
   const [emergencyError, setEmergencyError] = useState<string | null>(null);
   // Which states train the shared model, reported by the federation panel so
   // the map can ring them while that tab is open.
   const [siloStates, setSiloStates] = useState<string[]>([]);
+  // Fix #59: districts with an active outbreak, marked on the map in every tab.
+  const [outbreakMarks, setOutbreakMarks] = useState<OutbreakMark[]>([]);
+  useEffect(() => {
+    let alive = true;
+    api
+      .activeOutbreaks(null)
+      .then((a) => {
+        if (!alive) return;
+        setOutbreakMarks(
+          a.outbreaks.flatMap((o) =>
+            o.lat != null && o.lng != null
+              ? [{ id: o.id, lat: o.lat, lng: o.lng, label: `${o.disease} · ${o.district}` }]
+              : [],
+          ),
+        );
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [refreshKey]);
   // Holds why Google's basemap was refused or dropped, so the banner can say
   // it rather than leaving the map quietly different from what was configured.
   const [basemapFallback, setBasemapFallback] = useState<string | null>(null);
@@ -216,6 +259,14 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
   const [highlightTrip, setHighlightTrip] = useState<string | null>(null);
 
   const { connected, events, resyncs, pollNow } = useLiveUpdates();
+  // When the newest change this browser has seen happened, and a clock that
+  // ticks every 30 s so "2 min ago" stays true without a re-poll.
+  const lastChange = events.length ? Math.max(...events.map((e) => e.receivedAt - e.latencyMs)) : null;
+  const [clockNow, setClockNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setClockNow(Date.now()), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   // The server said this browser missed too much to replay; reload everything.
   useEffect(() => {
@@ -299,9 +350,12 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
     lastSeq.current = fresh[0].seq;
     // An approved transfer produces its own readings; describe it as a
     // transfer, not as two unrelated field reports.
-    const decided = fresh.find((e) => e.kind === "transfer.decided");
-    const received = fresh.find((e) => e.kind === "movement.received");
-    const reading = fresh.find((e) => e.kind === "reading.committed" && e.source !== "transfer");
+    // An event about a centre this reader may not read (fix #77) still
+    // refreshes the totals below, but has nothing to show or to pulse.
+    const named = fresh.filter((e) => !e.withheld);
+    const decided = named.find((e) => e.kind === "transfer.decided");
+    const received = named.find((e) => e.kind === "movement.received");
+    const reading = named.find((e) => e.kind === "reading.committed" && e.source !== "transfer");
     const shown = decided ?? received ?? reading;
     if (shown) {
       setPulse({ id: shown.facility_id, nonce: shown.seq });
@@ -397,11 +451,14 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
   const routes: RouteLine[] = useMemo(() => {
     if (mode !== "transfers") return [];
     const scoped = sku ? transfers.filter((t) => t.sku_code === sku) : transfers;
-    return groupTrips(scoped.filter((t) => t.status !== "rejected")).map((trip) => ({
+    // Nothing moves on a declined or withdrawn request, so neither is a route.
+    const moving = scoped.filter((t) => t.status !== "rejected" && t.status !== "cancelled");
+    return groupTrips(moving).map((trip) => ({
       id: trip.id,
       from: [trip.from.lat, trip.from.lng],
       to: [trip.to.lat, trip.to.lng],
-      status: trip.status === "rejected" ? "proposed" : trip.status,
+      status:
+        trip.status === "rejected" || trip.status === "cancelled" ? "proposed" : trip.status,
       urgent: trip.urgent,
       label: `${trip.from.name} → ${trip.to.name} · ${trip.items.length} medicine${trip.items.length > 1 ? "s" : ""}`,
     }));
@@ -432,11 +489,20 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
     if (b) fly(b.lat, b.lng, Math.max(b.zoom, DISTRICT_ZOOM + 0.5));
   };
 
+  // Fix #45: a warning opens its own recommendations — the Redistribution
+  // tab, on that state and that medicine.
+  const openRecommendations = (p: NextPair) => {
+    setSku(p.sku_code);
+    goState(p.state);
+    setMode("transfers");
+  };
+
   // Demo-only: the whole emergency chain in one click, confined to the
   // sandbox district and offered only to someone who may write there.
   const canRunEmergency =
     session.demo_mode &&
-    can.report(user, { id: "", state_silo: SANDBOX.state, district: SANDBOX.district });
+    can.report(user, { id: "", state_silo: SANDBOX.state, district: SANDBOX.district }) &&
+    can.planState(user, SANDBOX.state);
 
   const startEmergency = async () => {
     setEmergencyBusy(true);
@@ -451,6 +517,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
         const detail = await api.facility(pin.id);
         if (pickSku(detail.skus)) {
           setSelected(null);
+          setLoopKind("outbreak");
           setLoopAuto(true);
           setLoopFor(detail);
           return;
@@ -464,29 +531,29 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
     }
   };
 
-  // Demo-only: sends an SMS-shaped report through the real pipeline. Offered
-  // only when the server is in demo mode, and only for a facility this
-  // person is allowed to report for.
+  // Demo-only: sends an SMS-shaped report through the real pipeline, always
+  // for a centre inside the sandbox district. It used to pick a healthy centre
+  // anywhere the account could reach — for the administrator, anywhere in
+  // India — and paint it red for real (fix list #79).
   const canSendTestReports =
-    session.demo_mode && (user.role !== "facility_user" || !!user.facility_id);
+    session.demo_mode &&
+    can.report(user, { id: "", state_silo: SANDBOX.state, district: SANDBOX.district });
 
   const sendTestReport = async () => {
     let target: Pin | undefined;
-    if (user.role === "facility_user" && user.facility_id) {
-      target = pinFromDetail(await api.facility(user.facility_id));
-    } else if (selected && can.report(user, selected)) {
+    if (selected && inSandbox(selected) && can.report(user, selected)) {
       target = selected;
     } else {
-      const stateCode =
-        user.role === "admin" ? (activeState ?? states[0]?.key) : user.state_silo;
-      if (!stateCode) return;
-      const pins = (await api.pinsInState(stateCode, "ORS", 400)).filter((p) =>
-        can.report(user, p),
+      const pins = (await api.pinsInState(SANDBOX.state, "ORS", 400)).filter(
+        (p) => inSandbox(p) && can.report(user, p),
       );
       // A facility that is currently fine, so the report visibly changes it.
       target = [...pins].reverse().find((p) => p.status === "healthy") ?? pins[0];
     }
-    if (!target) return;
+    if (!target) {
+      setLoadError(`No centre in ${SANDBOX.label} can take a test report right now.`);
+      return;
+    }
     setSelected(target);
     fly(target.lat, target.lng, Math.max(view.zoom, FACILITY_ZOOM + 2));
     try {
@@ -504,7 +571,11 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
     }
   };
 
-  // Keep the address bar in step with the settled view.
+  // Keep the address bar in step with the settled view. Moving to another
+  // place — tab, state, facility or medicine — adds a history entry, so the
+  // browser's Back returns to it (fix #47); panning only replaces the entry.
+  const lastPlace = useRef<string | null>(null);
+  const restoringUntil = useRef(0);
   useEffect(() => {
     const q = new URLSearchParams();
     if (mode !== "stock") q.set("view", mode);
@@ -512,10 +583,38 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
     if (selected) q.set("facility", selected.id);
     q.set("at", `${view.lat.toFixed(4)},${view.lng.toFixed(4)},${Number(view.zoom.toFixed(1))}`);
     const next = `${window.location.pathname}?${q.toString().replace(/%2C/g, ",")}`;
-    if (next !== `${window.location.pathname}${window.location.search}`) {
+    const place = [mode, activeState ?? "", selected?.id ?? "", sku ?? ""].join("|");
+    const moved = lastPlace.current !== null && place !== lastPlace.current;
+    lastPlace.current = place;
+    if (next === `${window.location.pathname}${window.location.search}`) return;
+    if (moved && Date.now() > restoringUntil.current) {
+      window.history.pushState(null, "", next);
+    } else {
       window.history.replaceState(null, "", next);
     }
-  }, [mode, sku, selected, view.lat, view.lng, view.zoom]);
+  }, [mode, sku, selected, activeState, view.lat, view.lng, view.zoom]);
+
+  // Back and Forward: put the screen where that entry says. While the map
+  // flies there, its intermediate views replace the entry rather than add.
+  useEffect(() => {
+    const onPop = () => {
+      const u = readUrl();
+      restoringUntil.current = Date.now() + 2500;
+      setMode(u.mode);
+      setSku(u.sku);
+      if (u.facility) {
+        api
+          .facility(u.facility)
+          .then((d) => setSelected(pinFromDetail(d)))
+          .catch(() => setSelected(null));
+      } else {
+        setSelected(null);
+      }
+      if (u.at) fly(u.at.lat, u.at.lng, u.at.zoom);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [fly]);
 
   const medicineName = useMemo(
     () => (sku ? (skus.find((s) => s.code === sku)?.name ?? sku) : "All medicines"),
@@ -533,15 +632,25 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
           : "Showing every state. Scroll to zoom, or click a state."
         : view.tier === "district"
           ? `Showing districts${activeState ? ` around ${stateName(activeState)}` : ""}. Zoom in further for individual facilities.`
-          : `${view.pinsInView.toLocaleString("en-IN")} health centres in view. Click one for its medicine stock.`;
+          : activeState && !readsRows(user, activeState)
+            ? `${heldNote(user, stateName(activeState))} Districts are shown instead of centres.`
+            : `${view.pinsInView.toLocaleString("en-IN")} health centres in view. Click one for its medicine stock.`;
 
   return (
-    <div className="flex h-full flex-col bg-canvas font-sans text-ink">
+    <div className="flex min-h-full flex-col bg-canvas font-sans text-ink md:h-full">
+      <a
+        href="#console-panel"
+        className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-[2000] focus:rounded focus:bg-panel focus:px-3 focus:py-2 focus:text-[13px] focus:text-ink"
+      >
+        Skip to main content
+      </a>
       {/* ------------------------------------------------------ top bar --- */}
-      <header className="z-[1100] flex h-14 shrink-0 items-center gap-3 border-b-2 border-brand bg-panel pr-4 min-[1360px]:gap-5">
+      {/* Below 1360px (a laptop at 125-150% zoom) the controls take a second
+          row instead of running off the right edge. */}
+      <header className="z-[1100] flex shrink-0 flex-wrap items-center gap-x-3 border-b-2 border-brand bg-panel min-[1360px]:h-14 min-[1360px]:flex-nowrap min-[1360px]:pr-4 min-[1360px]:gap-5">
         {/* The mark sits on a solid brand block — flat, no gradient — so the
             product reads as one identity before any data does. */}
-        <div className="flex h-full shrink-0 items-center gap-2.5 bg-brand pr-4 pl-4 whitespace-nowrap text-white">
+        <div className="flex h-12 shrink-0 items-center gap-2.5 bg-brand pr-4 pl-4 whitespace-nowrap text-white min-[1360px]:h-full">
           <svg width="28" height="28" viewBox="0 0 26 26" aria-hidden="true">
             <rect width="26" height="26" rx="6" fill="#fff" />
             <path d="M13 6v14M6 13h14" stroke="#0b3d5c" strokeWidth="3" strokeLinecap="round" />
@@ -552,11 +661,11 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               SwasthSetu{" "}
               <span className="ml-0.5 text-[13px] font-medium text-white/85">स्वस्थसेतु</span>
             </div>
-            <div className="text-[10.5px] text-white/80">National Health Supply Command</div>
+            <div className="hidden text-[10.5px] text-white/80 min-[1500px]:block">National Health Supply Command</div>
           </div>
         </div>
 
-        <nav aria-label="Location" className="flex min-w-0 items-center gap-1.5 text-[13px]">
+        <nav aria-label="Location" className="hidden min-w-0 items-center gap-1.5 overflow-hidden text-[13px] whitespace-nowrap md:flex">
           <button
             onClick={goNational}
             className={`rounded px-1.5 py-0.5 hover:bg-canvas ${activeState ? "text-brand" : "font-medium text-ink"}`}
@@ -568,7 +677,9 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               <span className="text-ink-3">›</span>
               <button
                 onClick={() => goState(activeState)}
-                className={`truncate rounded px-1.5 py-0.5 hover:bg-canvas ${selected ? "text-brand" : "font-medium text-ink"}`}
+                // The current level is never cut short (fix #47); a long
+                // facility name after it truncates instead.
+                className={`rounded px-1.5 py-0.5 whitespace-nowrap hover:bg-canvas ${selected ? "text-brand" : "font-medium text-ink"}`}
               >
                 {stateName(activeState)}
               </button>
@@ -577,13 +688,28 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
           {selected && (
             <>
               <span className="text-ink-3">›</span>
-              <span className="truncate px-1.5 font-medium text-ink">{selected.name}</span>
+              <span className="min-w-0 truncate px-1.5 font-medium text-ink" title={selected.name}>{selected.name}</span>
             </>
           )}
         </nav>
 
-        <div className="ml-auto flex items-center gap-2 min-[1360px]:gap-3">
-          <div role="tablist" aria-label="View" className="flex rounded-md border border-line bg-canvas p-0.5">
+        <div className="order-last flex w-full flex-wrap items-center gap-2 border-t border-line px-3 py-2 min-[1360px]:order-none min-[1360px]:ml-auto min-[1360px]:w-auto min-[1360px]:flex-nowrap min-[1360px]:border-t-0 min-[1360px]:p-0 min-[1500px]:gap-3">
+          <label className="md:hidden">
+            <span className="sr-only">View</span>
+            <select
+              value={mode}
+              onChange={(e) => setMode(e.target.value as Mode)}
+              className="h-8 rounded-md border border-line bg-panel px-2 text-[12.5px] font-medium text-ink"
+            >
+              <option value="stock">Stock levels</option>
+              <option value="transfers">Redistribution</option>
+              <option value="movements">Movements</option>
+              <option value="trust">Data trust</option>
+              <option value="federation">Federation</option>
+              <option value="field">Field reports</option>
+            </select>
+          </label>
+          <div role="tablist" aria-label="View" className="hidden rounded-md border border-line bg-canvas p-0.5 md:flex">
             {(
               [
                 ["stock", "Stock levels"],
@@ -613,7 +739,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
             <select
               value={sku ?? ""}
               onChange={(e) => setSku(e.target.value || null)}
-              className="h-8 min-w-[150px] rounded-md min-[1360px]:min-w-[190px] 2xl:min-w-[210px] border border-line bg-panel px-2 text-[12.5px] font-medium text-ink focus:border-brand focus:outline-none"
+              className="h-8 w-[150px] rounded-md min-[1500px]:w-[190px] 2xl:w-[210px] border border-line bg-panel px-2 text-[12.5px] font-medium text-ink focus:border-brand focus:outline-none"
             >
               <option value="">All medicines (lowest stocked)</option>
               {skus.map((s) => (
@@ -625,24 +751,57 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
           </label>
 
           <span
-            className="rounded-md border border-line px-2 py-1 text-[11px] whitespace-nowrap text-ink-2"
-            title="District locations are real. Facility positions and stock levels are simulated, covering roughly 12% of the national PHC network."
+            className="hidden rounded-md border border-line px-2 py-1 text-[11px] whitespace-nowrap text-ink-2 min-[1360px]:inline"
+            title={`District locations are real. Facility positions and stock levels are simulated: ${SEED_RULES.seededCentres.toLocaleString("en-IN")} synthetic centres, a sample for the demo, not India's real network.`}
           >
             Simulated data
           </span>
+
+          {/* Field reports moved off the bottom of the panel into a badge
+              and drawer, so the panel's list keeps its height (fix #52). */}
+          <div className="relative">
+            <button
+              onClick={() => setFeedOpen((o) => !o)}
+              aria-expanded={feedOpen}
+              className="flex items-center gap-1 rounded-md border border-line px-2 py-1 text-[12px] font-medium whitespace-nowrap text-ink-2 hover:bg-canvas"
+              title="Field reports this session"
+            >
+              Reports
+              <span className="font-mono text-[11px] text-ink-3">
+                {events.filter((e) => e.kind === "reading.committed").length}
+              </span>
+            </button>
+            {feedOpen && (
+              <div className="absolute right-0 top-full z-[1100] mt-1 w-[360px] max-w-[90vw] overflow-hidden rounded-lg border border-line bg-panel shadow-sm">
+                <ActivityFeed
+                  events={events}
+                  onSimulate={sendTestReport}
+                  canSimulate={canSendTestReports}
+                  sandboxDistrict={SANDBOX.district}
+                />
+              </div>
+            )}
+          </div>
 
           <span
             className="flex items-center gap-1.5 text-[12px] font-medium"
             style={{ color: connected ? STATUS_COLOR.healthy : "#7d858f" }}
             title={
               connected
-                ? `Checking for updates every ${POLL_VISIBLE_MS / 1000} seconds`
+                ? `Checking for updates every ${POLL_VISIBLE_MS / 1000} seconds · ${lastChange === null ? "no change since you opened this page" : `last change ${sinceWords(lastChange, clockNow)}`}`
                 : "Cannot reach the server; retrying"
             }
           >
             <span className={`h-2 w-2 rounded-full ${connected ? "live-dot" : ""}`}
               style={{ background: connected ? STATUS_COLOR.healthy : "#b3b9c0" }} />
             {connected ? "Live" : "Reconnecting"}
+            {/* Fix #62: "Live" says how recent, not just that polling works. */}
+            {connected && (
+              <span className="hidden font-normal text-ink-3 min-[1500px]:inline">
+                {" · "}
+                {lastChange === null ? "no change since you opened this" : `last change ${sinceWords(lastChange, clockNow)}`}
+              </span>
+            )}
           </span>
 
           <span className="h-6 w-px bg-line" aria-hidden="true" />
@@ -650,13 +809,25 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
         </div>
       </header>
 
-      <main className="flex min-h-0 flex-1">
+      {user.demo_sandbox && (
+        // Anyone can enter a demo account, so it looks everywhere but changes
+        // only one district (auth.demo_may_write). Said once, up front, rather
+        // than discovered as a refusal.
+        <p className="shrink-0 border-b border-line bg-canvas px-4 py-1 text-[11.5px] text-ink-2">
+          Public demo: you can view every state. Changes are limited to the sandbox,{" "}
+          <span className="font-medium text-ink">{user.demo_sandbox.label}</span>.{" "}
+          <span lang="hi">सार्वजनिक डेमो: बदलाव केवल {user.demo_sandbox.district} सैंडबॉक्स में किए जा सकते हैं।</span>
+        </p>
+      )}
+
+      <main className="flex min-h-0 flex-1 flex-col md:flex-row">
         {/* ---------------------------------------------------- panel --- */}
-        <aside className="z-[1000] flex w-[400px] shrink-0 flex-col border-r border-line bg-panel">
+        <aside id="console-panel" tabIndex={-1} className={`panel-scroll z-[1000] order-2 flex w-full flex-1 flex-col border-r md:min-h-0 md:overflow-y-auto border-line bg-panel md:order-1 md:flex-none md:shrink-0 ${mode === "federation" && !loopFor ? "md:w-[560px]" : "md:w-[400px]"}`}>
           {loopFor ? (
             <LiveLoopPanel
-              key={`${loopFor.id}:${loopAuto}`}
+              key={`${loopFor.id}:${loopAuto}:${loopKind}`}
               facility={loopFor}
+              kind={loopKind}
               autoStart={loopAuto}
               user={user}
               events={events}
@@ -680,7 +851,20 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
             // Ahead of the facility panel on purpose: choosing the tab is a
             // decision to look at the channels, and it still reads whichever
             // centre is selected on the map so the two stay in step.
-            <FieldSimulator facilityId={selected ? selected.id : null} />
+            // A handset states its centre's facts, so it is offered only to
+            // whoever may state them (can.report, fix list #24 on #74's rule).
+            <FieldSimulator
+              facilityId={selected && can.report(user, selected) ? selected.id : null}
+              blockedNote={
+                !selected
+                  ? undefined
+                  : user.demo_sandbox && !inDemoSandbox(user, selected.state_silo, selected.district)
+                    ? `Public demo: messages can be sent only as handsets of centres in ${user.demo_sandbox.label}. Choose one of those on the map.`
+                    : !can.report(user, selected)
+                      ? "Only a centre's own staff send as its registered handsets. Officers can chase the centre for a report from its panel."
+                      : undefined
+              }
+            />
           ) : selected && mode === "stock" ? (
             // Gated on the tab, not just on `selected`. Without the mode
             // check this branch shadows every panel below it, so once a
@@ -696,7 +880,10 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               user={user}
               demoMode={session.demo_mode}
               llmMode={llmMode}
-              onSimulateStockOut={setLoopFor}
+              onSimulateStockOut={(d) => {
+                setLoopKind("stockout");
+                setLoopFor(d);
+              }}
               onOpenEvidence={(e, facility) => {
                 if (e.tab !== "movements") return;
                 setEvidenceFor(facility);
@@ -706,12 +893,42 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               onBack={() => setSelected(null)}
             />
           ) : mode === "federation" ? (
+            <>
+            {/* Fix #45 (absorbs #2): the same strip, only the dates that rest
+                on the shared model's fresh forecast. */}
+            <NextWarnings
+              state={null}
+              stateLabel="India"
+              refreshKey={refreshKey}
+              forecastOnly
+              onOpen={openRecommendations}
+            />
             <FederationPanel
               refreshKey={refreshKey}
               onSilos={setSiloStates}
               stateName={stateName}
               canTrain={user.role === "admin"}
+              onOpenLedger={(code) => {
+                // The rows the weighting is computed from: that state's ledger.
+                goState(code);
+                setMode("movements");
+              }}
             />
+            </>
+          ) : mode === "trust" && user.role === "admin" && !readsRows(user, activeState) ? (
+            // Fix #77: the queue is a list of named centres with their
+            // evidence, so it belongs to that state's and district's officers.
+            <div className="p-4">
+              <div className="text-[11px] font-semibold tracking-[0.09em] text-ink-3 uppercase">Data trust</div>
+              <h2 className="mt-1 text-[18px] font-semibold tracking-tight text-ink">
+                {activeState ? stateName(activeState) : "India"}
+              </h2>
+              <p role="note" className="mt-3 rounded border border-line bg-canvas px-3 py-2 text-[12.5px] leading-snug text-ink-2">
+                {heldNote(user, activeState ? stateName(activeState) : null)} The audit queue names
+                centres and shows their evidence; sign in as that state's officer to open it.
+                <span lang="hi" className="mt-1 block text-ink-3">{HELD_HINDI}</span>
+              </p>
+            </div>
           ) : mode === "trust" ? (
             <AuditQueuePanel
               // One value decides both the request and the heading. An
@@ -772,6 +989,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
             activeState ? (
               <RedistributionPanel
                 key={activeState}
+                stateCode={activeState}
                 stateLabel={stateName(activeState)}
                 sku={sku}
                 skus={skus}
@@ -783,8 +1001,18 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
                 highlightTripId={highlightTrip}
                 onPlan={runPlan}
                 canPlan={can.planState(user, activeState)}
+                viewOnlyNote={
+                  user.demo_sandbox && user.demo_sandbox.state !== activeState
+                    ? `View only in the public demo. Plans can be recomputed for ${stateName(user.demo_sandbox.state)} only, where the sandbox is.`
+                    : undefined
+                }
                 canDecide={(trip) =>
-can.decideTransfer(user, trip.from.id)
+                  can.decideTransfer(user, {
+                    fromId: trip.from.id,
+                    state: activeState,
+                    fromDistrict: trip.from.district,
+                    toDistrict: trip.to.district,
+                  })
                 }
                 onDecideTrip={decideTrip}
                 onHoverTrip={setHighlightTrip}
@@ -798,11 +1026,24 @@ can.decideTransfer(user, trip.from.id)
             )
           ) : activeState ? (
             <>
-            <OutbreakWarnings state={activeState} stateLabel={stateName(activeState)} />
+            <NextWarnings
+              state={activeState}
+              stateLabel={stateName(activeState)}
+              refreshKey={refreshKey}
+              onOpen={openRecommendations}
+            />
+            <OutbreakWarnings
+              state={activeState}
+              stateLabel={stateName(activeState)}
+              user={user}
+              refreshKey={refreshKey}
+              onOpenTransfers={() => setMode("transfers")}
+            />
             <StatePanel
               key={`${activeState}:${sku ?? "all"}`}
               stateCode={activeState}
               stateLabel={stateName(activeState)}
+              heldRows={readsRows(user, activeState) ? null : heldNote(user, stateName(activeState))}
               sku={sku}
               skus={skus}
               refreshKey={refreshKey}
@@ -813,7 +1054,19 @@ can.decideTransfer(user, trip.from.id)
             </>
           ) : (
             <>
-            <OutbreakWarnings state={null} stateLabel="India" />
+            <NextWarnings
+              state={null}
+              stateLabel="India"
+              refreshKey={refreshKey}
+              onOpen={openRecommendations}
+            />
+            <OutbreakWarnings
+              state={null}
+              stateLabel="India"
+              user={user}
+              refreshKey={refreshKey}
+              onOpenTransfers={() => setMode("transfers")}
+            />
             <NationalPanel
               summary={summary}
               states={states}
@@ -823,19 +1076,16 @@ can.decideTransfer(user, trip.from.id)
             />
             </>
           )}
-          <ActivityFeed
-            events={events}
-            onSimulate={sendTestReport}
-            canSimulate={canSendTestReports && states.length > 0}
-          />
         </aside>
 
         {/* ------------------------------------------------------ map --- */}
-        <section className="relative min-w-0 flex-1">
+        <section className="relative order-1 h-[40vh] min-w-0 shrink-0 md:order-2 md:h-auto md:flex-1 md:shrink">
           <NationalMap
             sku={sku}
             refreshKey={refreshKey}
             siloStates={siloStates}
+            outbreakDistricts={outbreakMarks}
+            rowsScope={rowsScope(user)}
             selectedFacilityId={selected?.id ?? null}
             pulse={pulse}
             flyTarget={flyTarget}
@@ -862,7 +1112,7 @@ can.decideTransfer(user, trip.from.id)
                 <button
                   onClick={startEmergency}
                   disabled={emergencyBusy}
-                  title={`Drops one medicine at a ${SANDBOX.label} facility below the critical line and carries it through detection, Gemini, the optimiser, approval and receipt. Writes stay in the sandbox.`}
+                  title={`Declares a scripted acute diarrhoeal outbreak in ${SANDBOX.label} and carries it through the surge, early warnings, pre-positioning, Gemini, the donor's yes, dispatch and receipt. Writes stay in the sandbox; the plans it runs cover the outbreak's medicines across the state.`}
                   className="rounded-lg bg-crit px-3 py-1.5 text-[12px] font-semibold text-white shadow-sm hover:bg-crit/90 focus:ring-2 focus:ring-crit/30 focus:outline-none disabled:opacity-60"
                 >
                   {emergencyBusy ? "Choosing a facility…" : "Simulate emergency"}

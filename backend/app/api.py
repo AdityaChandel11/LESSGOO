@@ -10,18 +10,22 @@ straight from settings in this file, breaks that guarantee — those belong in
 the adapter, where the fallback and the tests live.
 """
 
+import asyncio
 import base64
 import binascii
+import hashlib
+import math
 from uuid import uuid4
 from dataclasses import asdict
 from decimal import Decimal
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from typing import Literal
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,13 +34,18 @@ from . import (
     aggregates,
     attendance,
     beds,
+    earlywarning,
     events,
     federation_live,
+    geo,
     idsp,
     movements,
+    ncdc,
+    outbreak,
     redistribution,
     services,
     comms,
+    stockphoto,
     trust,
     vision,
     workspace,
@@ -45,19 +54,35 @@ from .auth import (
     Principal,
     can_decide_transfer,
     can_plan_state,
+    can_read_facility_rows,
     can_submit_reading,
+    can_report_facts,
     can_view_facility,
     current_user,
+    held_message,
+    demo_may_plan,
+    demo_may_write,
+    demo_sandbox_refusal,
+    in_demo_sandbox,
+    is_public_demo,
+    next_full_plan_at,
 )
 from .config import settings
-from .db import get_session, ping
+from .db import SessionLocal, get_session, ping
 from .models import (
     CALL_OUTCOMES,
     LOC_METHODS,
+    Approval,
     CallLog,
+    Event,
     Facility,
+    FacilityContact,
+    FacilitySkuState,
     FederationRound,
+    Forecast,
+    IdspReport,
     MedicineMovement,
+    OutbreakEvent,
     Sku,
     StockReading,
     Transfer,
@@ -173,6 +198,7 @@ class SkuStockOut(BaseModel):
     last_reported_at: datetime | None
     last_source: str | None
     last_confidence: float | None
+    forecast_published_at: datetime | None = None
 
 
 class FacilityOut(BaseModel):
@@ -189,6 +215,8 @@ class FacilityOut(BaseModel):
     escalation_reasons: list[str]
     beds_total: int
     beds_occupied: int | None
+    beds_verified_at: datetime | None
+    beds_stale: bool
     bed_occupancy_pct: float | None
     staff_checkin_pct: float | None
     trust_score: float | None
@@ -242,6 +270,8 @@ def _to_out(snap: services.FacilitySnapshot) -> FacilityOut:
         escalation_reasons=snap.escalation_reasons,
         beds_total=snap.beds_total,
         beds_occupied=snap.beds_occupied,
+        beds_verified_at=snap.beds_verified_at,
+        beds_stale=snap.beds_stale,
         bed_occupancy_pct=snap.bed_occupancy_pct,
         staff_checkin_pct=snap.staff_checkin_pct,
         trust_score=snap.trust_score,
@@ -335,6 +365,49 @@ async def map_states(
     return [_bucket_out(b) for b in await aggregates.state_rollup(session, sku)]
 
 
+def _narrow_to_rows_scope(
+    user: Principal, state: str | None, district: str | None
+) -> tuple[str, str | None] | None:
+    """The (state, district) filter a facility-level list is read with, or
+    None when the caller may read no rows there (fix #77).
+
+    A state officer is narrowed to their state, a district officer to their
+    district; asking for somewhere else yields nothing rather than an error,
+    because a map viewport crosses borders all the time. The national role
+    and a centre's own account have no list of centres to read here.
+    """
+    if user.role == "state_officer" and user.state_silo:
+        if state and state != user.state_silo:
+            return None
+        return user.state_silo, district
+    if user.role == "block_mo" and user.state_silo and user.district:
+        if (state and state != user.state_silo) or (district and district != user.district):
+            return None
+        return user.state_silo, user.district
+    if user.role == "admin" and is_public_demo(user):
+        # The labelled exception (auth.can_read_facility_rows): the sandbox
+        # district, and nothing else.
+        box = (settings.demo_sandbox_state, settings.demo_sandbox_district)
+        if (state and state != box[0]) or (district and district != box[1]):
+            return None
+        return box
+    return None
+
+
+async def _readable_facility(session: AsyncSession, facility_id: str, user: Principal) -> Facility:
+    """One centre, for a reader who may read its rows (fix #77). Anyone else
+    is told where the rows are held; the centre's own name is not in the
+    refusal."""
+    facility = await session.get(Facility, facility_id)
+    if facility is None:
+        raise HTTPException(status_code=404, detail="Facility not found")
+    if not can_read_facility_rows(
+        user, state=facility.state_silo, district=facility.district, facility_id=facility.id
+    ):
+        raise HTTPException(status_code=403, detail=held_message(user, facility.state_silo))
+    return facility
+
+
 @router.get("/map/districts", response_model=list[BucketOut], tags=["map"])
 async def map_districts(
     state: str | None = Query(default=None),
@@ -356,13 +429,21 @@ async def map_facilities(
     status: str | None = Query(default=None),
     limit: int = Query(default=1500, ge=1, le=4000),
     session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
 ) -> list[PinOut]:
+    """Pins inside the caller's scope and nowhere else (fix #77): a viewport
+    is narrowed to the state or district whose rows the caller may read, and
+    the national role gets none — it reads /map/districts instead."""
     corners = (south, west, north, east)
     if any(c is not None for c in corners) and not all(c is not None for c in corners):
         raise HTTPException(status_code=422, detail="bbox needs south, west, north and east")
     bbox = corners if all(c is not None for c in corners) else None
     if bbox is None and state is None:
         raise HTTPException(status_code=422, detail="Provide a bbox or a state")
+    narrowed = _narrow_to_rows_scope(user, state, district)
+    if narrowed is None:
+        return []
+    state, district = narrowed
     pins = await aggregates.find_facilities(
         session,
         bbox=bbox,  # type: ignore[arg-type]
@@ -433,6 +514,54 @@ class PlanOut(BaseModel):
     manual_review: list[ShortfallOut]
 
 
+async def _last_full_plan_at(
+    session: AsyncSession, state: str, since: datetime
+) -> datetime | None:
+    """When the latest all-medicine plan for a state was computed, if that was
+    after `since`. Every plan run writes one transfer.proposed event carrying
+    its sku (null for all medicines), and events.created_at is indexed, so the
+    time bound keeps this a short index range, never a scan."""
+    return await session.scalar(
+        select(func.max(Event.created_at)).where(
+            Event.created_at >= since,
+            Event.kind == events.TRANSFER_PROPOSED,
+            Event.state_silo == state,
+            Event.payload["sku"].astext.is_(None),
+        )
+    )
+
+
+def _minutes(n: int) -> str:
+    return "1 minute" if n == 1 else "{0} minutes".format(n)
+
+
+async def _refuse_early_full_plan(session: AsyncSession, state: str) -> None:
+    """429 when a public demo account asks for a second all-medicine plan of a
+    state within settings.demo_plan_interval_minutes. A full plan deletes and
+    rewrites the state's proposals and holds the free instance's CPU for
+    seconds; a stranger pressing it in a loop is the whole site slowing down."""
+    now = datetime.now(timezone.utc)
+    interval = settings.demo_plan_interval_minutes
+    last = await _last_full_plan_at(session, state, since=now - timedelta(minutes=interval))
+    allowed_at = next_full_plan_at(last, now, interval)
+    if allowed_at is None:
+        return
+    wait_s = (allowed_at - now).total_seconds()
+    ago = int((now - last).total_seconds() // 60)
+    raise HTTPException(
+        status_code=429,
+        detail=(
+            "This state's full plan was recomputed {0} ago. The public demo allows one "
+            "every {1}; try again in {2}. A single medicine can be planned any time."
+        ).format(
+            "less than a minute" if ago < 1 else _minutes(ago),
+            _minutes(int(interval)),
+            _minutes(math.ceil(wait_s / 60)),
+        ),
+        headers={"Retry-After": str(math.ceil(wait_s))},
+    )
+
+
 @router.post("/transfers/plan", response_model=PlanOut, tags=["transfers"])
 async def plan_transfers(
     payload: PlanIn,
@@ -443,6 +572,10 @@ async def plan_transfers(
         raise HTTPException(
             status_code=403, detail="Only this state's officers can generate its transfer plan"
         )
+    if not demo_may_plan(user, payload.state):
+        raise HTTPException(status_code=403, detail=demo_sandbox_refusal())
+    if payload.sku is None and is_public_demo(user):
+        await _refuse_early_full_plan(session, payload.state)
     if await session.scalar(
         select(Facility.id).where(Facility.state_silo == payload.state).limit(1)
     ) is None:
@@ -465,7 +598,9 @@ async def plan_transfers(
     await events.record(
         session,
         events.TRANSFER_PROPOSED,
-        {"state": payload.state, "sku": payload.sku, **totals},
+        # `replaced` lets a donor acting on a removed proposal be told when the
+        # plan replaced it (_replaced_at), instead of "not found".
+        {"state": payload.state, "sku": payload.sku, **totals, "replaced": result.replaced_ids},
         state_silo=payload.state,
     )
     return PlanOut(
@@ -480,17 +615,54 @@ async def plan_transfers(
     )
 
 
+@router.get("/transfers/oversight", tags=["transfers"])
+async def transfers_oversight(
+    state: str = Query(..., min_length=2, max_length=4),
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> dict:
+    """Fix #39: one state's redistribution as an officer oversees it — the
+    pipeline, what is stuck, and the exceptions that are theirs to act on.
+    Bounded by the state's facilities and the last 30 days."""
+    if await session.scalar(select(Facility.id).where(Facility.state_silo == state).limit(1)) is None:
+        raise HTTPException(status_code=404, detail="Unknown state")
+    out = await redistribution.oversight(session, state, datetime.now(timezone.utc))
+    # Fix #77: the pipeline's counts are an aggregate anyone signed in may see;
+    # the lists beneath it name centres, and are the state's officer's.
+    if user.role == "state_officer" and user.state_silo == state:
+        return {**out, "rows_withheld": None}
+    # Every list in the reply names centres (stuck trips, unconfirmed
+    # deliveries, declined, controlled, unreached); every count beside it stays.
+    return {
+        **{k: ([] if isinstance(v, list) else v) for k, v in out.items()},
+        "rows_withheld": held_message(user, state),
+    }
+
+
 @router.get("/transfers", response_model=list[TransferOut], tags=["transfers"])
 async def get_transfers(
     state: str | None = Query(default=None),
     status: str | None = Query(default=None, description="comma-separated"),
     limit: int = Query(default=300, ge=1, le=1000),
     session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
 ) -> list[TransferOut]:
+    """Trips inside the caller's scope (fix #77): a state officer's own state,
+    the trips that touch a district officer's district or a centre's own
+    shelf. A trip names two centres, so the national role gets none here and
+    reads the pipeline's counts from /transfers/oversight."""
+    narrowed = _narrow_to_rows_scope(user, state, None)
+    if narrowed is None and user.role != "facility_user":
+        return []
     statuses = [s.strip() for s in status.split(",")] if status else None
     rows = await redistribution.list_transfers(
-        session, state=state, statuses=statuses, limit=limit
+        session, state=narrowed[0] if narrowed else user.state_silo,
+        statuses=statuses, limit=limit,
     )
+    if user.role == "facility_user":
+        rows = [r for r in rows if user.facility_id in (r["from"]["id"], r["to"]["id"])]
+    elif narrowed[1]:
+        rows = [r for r in rows if narrowed[1] in (r["from"]["district"], r["to"]["district"])]
     return [TransferOut.model_validate(r) for r in rows]
 
 
@@ -509,6 +681,12 @@ class ExplanationOut(BaseModel):
     latency_ms: int | None
     cached: bool
     note: str | None = None
+    # Fix #46: the same explanation in Hindi when the model wrote it, and the
+    # facts it was written from — shown as they are when no model answers.
+    text_hi: str | None = None
+    facts: list[str] = Field(default_factory=list)
+    # Who decided the trip: the solver that actually ran, or a centre's request.
+    planned_by: str | None = None
 
 
 def _rules_explanation(text: str, note: str | None = None) -> ExplanationOut:
@@ -529,7 +707,7 @@ async def _explain_or_rules(make, fallback: str) -> ExplanationOut:
         return _rules_explanation(fallback, "Showing the computed line — {0}.".format(exc))
     return ExplanationOut(
         text=answer.text, source="gemini", ai=True, model=answer.model,
-        latency_ms=answer.latency_ms, cached=answer.cached,
+        latency_ms=answer.latency_ms, cached=answer.cached, text_hi=answer.hi,
     )
 
 
@@ -541,6 +719,7 @@ class TripExplainIn(BaseModel):
 async def explain_trip(
     body: TripExplainIn,
     session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
 ) -> ExplanationOut:
     """Why this trip, worded from the solver's own figures. The solver decided;
     this only says it in a sentence (spec 1.7)."""
@@ -548,13 +727,116 @@ async def explain_trip(
     items = await redistribution.list_transfers(session, ids=list(wanted))
     if len(items) != len(wanted):
         raise HTTPException(status_code=404, detail="Transfer not found")
+    # A trip's figures are two centres' rows (fix #77).
+    for t in items:
+        state = t["state"]
+        ends = (t["from"], t["to"])
+        if not any(
+            can_read_facility_rows(user, state=state, district=e["district"], facility_id=e["id"])
+            for e in ends
+        ):
+            raise HTTPException(status_code=403, detail=held_message(user, state))
     if len({(t["from"]["id"], t["to"]["id"]) for t in items}) != 1:
         raise HTTPException(
             status_code=422, detail="Transfers on one trip share a donor and a receiver"
         )
     rows = redistribution.why_rows(items, settings.critical_days)
-    return await _explain_or_rules(
-        lambda: vision.explain_transfer(rows=rows), redistribution.rules_why(items)
+    facts = await _trip_facts(session, items)
+    out = await _explain_or_rules(
+        lambda: vision.explain_transfer(rows=rows, facts=facts), redistribution.rules_why(items)
+    )
+    out.facts = facts
+    out.planned_by = redistribution.planned_by(items)
+    return out
+
+
+async def _trip_facts(session: AsyncSession, items: list[dict]) -> list[str]:
+    """What the trip card cannot show (fix #46), for the trip's most urgent
+    medicine: the nearer centre that was not used and why, the receiver's
+    run-out date without the trip, how fresh the donor's figure is, the
+    receiver's data confidence, and whether the distance is an estimate.
+    Every read is bounded by one state and one medicine, or by the trip's two
+    centres."""
+    worst = min(items, key=lambda t: t["rationale"].get("recipient_days_before", 1e9))
+    state, sku = worst["state"], worst["sku_code"]
+    donor_id, receiver_id = worst["from"]["id"], worst["to"]["id"]
+    rules = redistribution.PlanRules.from_settings()
+
+    nodes = (await redistribution.load_state_nodes(session, state, sku)).get(sku, [])
+    by_id = {n.facility_id: n for n in nodes}
+    donor, receiver = by_id.get(donor_id), by_id.get(receiver_id)
+    if donor is None or receiver is None:
+        return []
+
+    in_state = select(Facility.id).where(Facility.state_silo == state)
+    committed = {
+        fid: float(qty or 0)
+        for fid, qty in (
+            await session.execute(
+                select(Transfer.from_facility, func.sum(Transfer.qty))
+                .where(
+                    Transfer.status == "proposed",
+                    Transfer.sku_code == sku,
+                    Transfer.to_facility.in_(in_state),
+                    Transfer.id.notin_([t["id"] for t in items]),
+                )
+                .group_by(Transfer.from_facility)
+            )
+        ).all()
+    }
+    counted = {
+        fid: (at, source, days)
+        for fid, at, source, days in (
+            await session.execute(
+                select(
+                    FacilitySkuState.facility_id, FacilitySkuState.last_reported_at,
+                    FacilitySkuState.last_source, FacilitySkuState.days_of_stock,
+                ).where(
+                    FacilitySkuState.facility_id.in_([donor_id, receiver_id]),
+                    FacilitySkuState.sku_code == sku,
+                )
+            )
+        ).all()
+    }
+    donor_at, donor_source, _ = counted.get(donor_id, (None, None, None))
+    recv_at, _, recv_days = counted.get(receiver_id, (None, None, None))
+    score = await trust.for_facility(session, receiver_id)
+    now = datetime.now(timezone.utc)
+    return redistribution.trip_facts(
+        sku_name=worst["sku_name"],
+        receiver=receiver,
+        donor=donor,
+        alternative=redistribution.alternative_donor(receiver, donor, nodes, rules, committed),
+        receiver_runs_out_on=workspace.stockout_date(recv_days, recv_at),
+        today=workspace.in_india(now).date(),
+        donor_counted_on=workspace.in_india(donor_at).date() if donor_at else None,
+        donor_source=donor_source,
+        receiver_trust=(round(score.score * 100), score.band) if score else None,
+        route_source=worst.get("route_source"),
+        road_factor=rules.road_factor,
+        requested=worst.get("triggered_by") == workspace.FACILITY_REQUEST,
+    )
+
+
+async def _replaced_at(session: AsyncSession, transfer_id: int) -> datetime | None:
+    """When a re-plan removed this solver proposal, if one did in the last
+    week. Each plan run's event lists the ids it replaced; the time bound and
+    the kind keep this to a short index range over events.created_at."""
+    return await session.scalar(
+        text(
+            """
+            SELECT created_at FROM events
+            WHERE created_at >= :since AND kind = :kind
+              AND payload->'replaced' @> jsonb_build_array(CAST(:tid AS bigint))
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ),
+        {
+            "since": datetime.now(timezone.utc) - timedelta(days=7),
+            "kind": events.TRANSFER_PROPOSED,
+            "tid": transfer_id,
+        },
     )
 
 
@@ -563,6 +845,11 @@ async def _decide(
 ) -> TransferOut:
     existing = await redistribution.list_transfers(session, ids=[transfer_id])
     if not existing:
+        # A donor can be looking at a recommendation a re-plan has just
+        # replaced (fix list #37). Say so, with the time, rather than "not found".
+        replaced_at = await _replaced_at(session, transfer_id)
+        if replaced_at is not None:
+            raise HTTPException(status_code=409, detail=redistribution.replaced_message(replaced_at))
         raise HTTPException(status_code=404, detail="Transfer not found")
     before = existing[0]
     ends = [before["from"]["id"], before["to"]["id"]]
@@ -584,8 +871,14 @@ async def _decide(
     )
     # The emergency drill runs in the Nashik sandbox in demo mode; an officer
     # running it acts for the donor there, and the drill says so on screen.
-    in_sandbox = all(f.state_silo == "MH" and f.district == "Nashik" for f in (src, dst))
-    if not allowed and settings.demo_mode and in_sandbox and user.role in ("state_officer", "block_mo"):
+    in_sandbox = all(in_demo_sandbox(f.state_silo, f.district) for f in (src, dst))
+    # A public demo account outside the sandbox is told that, not a vaguer
+    # "outside your area".
+    if not in_sandbox and is_public_demo(user):
+        raise HTTPException(status_code=403, detail=demo_sandbox_refusal())
+    if not allowed and settings.demo_mode and in_sandbox and user.role in (
+        "admin", "state_officer", "block_mo"
+    ):
         allowed = can_submit_reading(
             user, facility_id=src.id, facility_state=src.state_silo, facility_district=src.district
         )
@@ -594,6 +887,10 @@ async def _decide(
             status_code=403,
             detail="This transfer is outside the area you are responsible for",
         )
+    # A decision moves stock at both ends, so a public demo account needs both
+    # inside the sandbox.
+    if not in_sandbox and is_public_demo(user):
+        raise HTTPException(status_code=403, detail=demo_sandbox_refusal())
 
     status_before = {s.id: s.status for s in await services.get_snapshots(session, ends)}
 
@@ -707,8 +1004,11 @@ async def list_facilities(
     state_silo: str | None = Query(default=None),
     status: str | None = Query(default=None),
     limit: int = Query(default=FACILITY_PAGE_DEFAULT, ge=1, le=FACILITY_PAGE_MAX),
+    user: Principal = Depends(current_user),
 ) -> list[FacilityOut]:
-    """Facilities matching the filter, worst first.
+    """Facilities matching the filter, worst first, inside the caller's scope
+    (fix #77): outside it the list is empty, and the districts roll-up is what
+    the caller reads instead.
 
     The filter is resolved to a bounded set of facility ids in SQL *before*
     anything reads a stock reading. It used to be the other way round: every
@@ -724,6 +1024,10 @@ async def list_facilities(
     ordering and the same status rule the map uses. Reusing it keeps the two
     from drifting apart.
     """
+    narrowed = _narrow_to_rows_scope(user, state_silo, district)
+    if narrowed is None:
+        return []
+    state_silo, district = narrowed
     pins = await aggregates.find_facilities(
         session, state=state_silo, district=district, status=status, limit=limit
     )
@@ -745,8 +1049,10 @@ async def list_facilities(
 async def get_facility(
     facility_id: str,
     session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
 ) -> FacilityDetailOut:
-    snaps = await services.get_snapshots(session, facility_ids=[facility_id])
+    await _readable_facility(session, facility_id, user)
+    snaps = await services.get_snapshots(session, facility_ids=[facility_id], live_trust=True)
     if not snaps:
         raise HTTPException(status_code=404, detail="Facility not found")
     snap = snaps[0]
@@ -792,16 +1098,111 @@ class WorkspaceSkuOut(SkuStockOut):
     last_receipt: LastReceiptOut | None
     provenance: ProvenanceOut
     stockout_on: date | None
+    # days_of_stock and status above are as of now, not as of the count
+    # (fix #26); past the run-out date the shelf is overdue for a count.
+    count_overdue: bool = False
+
+
+class OwnRequestOut(BaseModel):
+    """A request this centre raised in the last day, for its medicine card."""
+
+    transfer_id: int
+    sku_code: str
+    qty: float
+    from_facility: str
+    from_name: str
+    status: str
+    lapsed: bool
+    words: str
+    created_at: datetime
+    lapses_at: datetime
+
+
+class TodoOut(BaseModel):
+    """One line of today's list (fix #85), computed, in both languages."""
+
+    kind: str
+    en: str
+    hi: str
+    tab: str
+
+
+class LanguageOut(BaseModel):
+    code: str
+    name: str
+    native: str
 
 
 class WorkspaceOut(BaseModel):
     facility: FacilityOut
     skus: list[WorkspaceSkuOut]
+    # Requests still waiting for a reply; one that lapsed does not count.
     open_requests: int
     max_open_requests: int
+    # What this centre asked for in the last day, so each medicine card can
+    # show its own request instead of offering to ask again (fix list #31).
+    requests: list[OwnRequestOut]
     # Both languages of the computed line, always present and needing no key.
     # The screen renders this on load; the model is an overlay on top of it.
     briefing: dict[str, str]
+    # Today's prioritised list, computed from this centre's rows (fix #85).
+    todo: list[TodoOut] = []
+    # The state's own language, where Gemini can write the list in it.
+    local_language: LanguageOut | None = None
+    # Active outbreaks in this centre's district, with its own cover at the
+    # outbreak rate (fix #58). Empty when there is none: nothing is shown.
+    outbreaks: list[dict] = []
+
+
+def _require_demo_write(user: Principal, facility: Facility) -> None:
+    """A public demo account changes nothing outside the sandbox district
+    (auth.demo_may_write). Checked after the ordinary permission, so this
+    refusal never tells a stranger more than that one would."""
+    if not demo_may_write(user, state=facility.state_silo, district=facility.district):
+        raise HTTPException(status_code=403, detail=demo_sandbox_refusal())
+
+
+def _require_facts(user: Principal, facility: Facility) -> None:
+    """Facts about a centre come from the centre itself (auth.can_report_facts).
+    The sandbox rule is checked first, so a demo account outside the sandbox
+    is told the rule that actually stopped it."""
+    _require_demo_write(user, facility)
+    if not can_report_facts(
+        user,
+        facility_id=facility.id,
+        facility_state=facility.state_silo,
+        facility_district=facility.district,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Stock, deliveries, staff check-ins and beds are reported by the centre "
+                "itself — only the centre can state them. Officers can view them and "
+                "chase the centre for a report."
+            ),
+        )
+
+
+def _require_own_handset(user: Principal, owner: Facility) -> None:
+    """Sending as a registered handset is stating its centre's facts, so the
+    same rule decides it (auth.can_report_facts; fix list #24). The refusal
+    never names the centre that owns the number: a 403 must not become a way
+    to look up whose number something is."""
+    _require_demo_write(user, owner)
+    if not can_report_facts(
+        user,
+        facility_id=owner.id,
+        facility_state=owner.state_silo,
+        facility_district=owner.district,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Messages can be sent only as a handset registered to your own centre: "
+                "a handset reports its centre's stock, deliveries, check-ins and beds, "
+                "and only the centre can state them."
+            ),
+        )
 
 
 async def _facility_in_scope(
@@ -822,10 +1223,13 @@ async def _facility_in_scope(
         facility_state=facility.state_silo,
         facility_district=facility.district,
     ):
-        raise HTTPException(
-            status_code=403,
-            detail="You can only open the workspace for your own facility",
-        )
+        if is_public_demo(user) and not in_demo_sandbox(facility.state_silo, facility.district):
+            detail = demo_sandbox_refusal()
+        elif user.role == "facility_user":
+            detail = "You can only open the workspace for your own facility"
+        else:
+            detail = held_message(user, facility.state_silo)
+        raise HTTPException(status_code=403, detail=detail)
     return facility
 
 
@@ -842,12 +1246,21 @@ async def facility_workspace(
     """Everything one centre's staff need on one screen: what they hold, when
     it runs out, and how each figure was last checked."""
     facility = await _facility_in_scope(session, facility_id, user)
-    snaps = await services.get_snapshots(session, facility_ids=[facility.id])
+    snaps = await services.get_snapshots(session, facility_ids=[facility.id], live_trust=True)
     if not snaps:
         raise HTTPException(status_code=404, detail="Facility not found")
     snap = snaps[0]
 
     receipts = await workspace.last_receipts(session, facility.id)
+    documents = await workspace.photo_documents(
+        session,
+        facility.id,
+        {
+            s.sku_code: s.last_reported_at
+            for s in snap.skus
+            if s.last_source == "photo" and s.last_reported_at is not None
+        },
+    )
     open_here, _ = await workspace.open_request_counts(session, facility.id)
     units = {
         row.code: row.unit
@@ -858,35 +1271,137 @@ async def facility_workspace(
     rows: list[WorkspaceSkuOut] = []
     for s in snap.skus:
         receipt = receipts.get(s.sku_code)
-        prov = workspace.provenance(s.last_source, s.last_reported_at, receipt, now)
+        prov = workspace.provenance(
+            s.last_source, s.last_reported_at, receipt, now, document=documents.get(s.sku_code)
+        )
+        cover = workspace.cover_now(
+            s.days_of_stock, s.last_reported_at, s.status, now, snap.warning_multiplier
+        )
         rows.append(
             WorkspaceSkuOut(
-                **vars(s),
+                **{**vars(s), "days_of_stock": cover.days_of_stock, "status": cover.status},
                 unit=units.get(s.sku_code, "unit"),
                 last_receipt=LastReceiptOut(**vars(receipt)) if receipt else None,
                 provenance=ProvenanceOut(**vars(prov)),
+                # The run-out day is fixed by the count, so it comes from the
+                # stored cover, not the countdown.
                 stockout_on=workspace.stockout_date(s.days_of_stock, s.last_reported_at),
+                count_overdue=cover.count_overdue,
             )
         )
 
+    alerts = await _centre_alerts(
+        session, facility, {r.sku_code: r.days_of_stock for r in rows}, now
+    )
+    brief_rows = _briefing_rows(snap.skus, units, now, snap.warning_multiplier)
+    todo = await _todo_for(session, facility, snap.skus, brief_rows, alerts, units, now)
+    local = workspace.state_language(facility.state_silo)
+
     return WorkspaceOut(
         facility=_to_out(snap),
+        outbreaks=alerts,
+        todo=[TodoOut(**vars(i)) for i in todo],
+        local_language=LanguageOut(**vars(local)) if local else None,
         skus=rows,
         open_requests=open_here,
         max_open_requests=settings.max_open_requests_per_facility,
-        briefing=workspace.rules_briefing(_briefing_rows(snap.skus, units)),
+        requests=[
+            OwnRequestOut(**vars(r)) for r in await workspace.own_requests(session, facility.id)
+        ],
+        briefing=workspace.rules_briefing(brief_rows),
+    )
+
+
+class DayUseOut(BaseModel):
+    day: date
+    used: float | None
+    spread: bool = False
+
+
+class UsageOut(BaseModel):
+    """Fix #84: one medicine's use, burn rate and forecast, for its chart."""
+
+    facility_id: str
+    sku_code: str
+    sku_name: str
+    unit: str
+    days: list[DayUseOut]
+    burn_rate: float | None
+    forecast_daily: float | None
+    forecast_version: str | None
+    forecast_published_at: datetime | None
+    forecast_fresh: bool
+    in_model: bool
+    note: str
+
+
+@router.get("/facilities/{facility_id}/usage", response_model=UsageOut, tags=["workspace"])
+async def facility_usage(
+    facility_id: str,
+    sku: str = Query(..., min_length=1, max_length=16),
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> UsageOut:
+    """Bounded by one facility, one medicine and the burn window."""
+    facility = await _readable_facility(session, facility_id, user)
+    meta = await session.get(Sku, sku)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Unknown SKU")
+    now = datetime.now(timezone.utc)
+    window = settings.burn_rate_window_days
+    rows = await session.execute(
+        select(StockReading.reported_at, StockReading.qty_on_hand, StockReading.source)
+        .where(
+            StockReading.facility_id == facility.id,
+            StockReading.sku_code == sku,
+            StockReading.reported_at >= now - timedelta(days=window + 1),
+            StockReading.superseded_by.is_(None),
+        )
+        .order_by(StockReading.reported_at)
+    )
+    series = [(at, float(qty), source) for at, qty, source in rows.all()]
+    forecast = await session.get(Forecast, (facility.id, sku))
+    fresh = bool(
+        forecast is not None
+        and settings.forecast_mode == "federated"
+        and forecast.computed_at >= now - timedelta(days=settings.forecast_max_age_days)
+    )
+    in_model = facility.state_silo in workspace.MODEL_STATES and sku in workspace.MODEL_SKUS
+    return UsageOut(
+        facility_id=facility.id,
+        sku_code=sku,
+        sku_name=meta.name,
+        unit=meta.unit,
+        days=[
+            DayUseOut(day=d.day, used=d.used, spread=d.spread)
+            for d in workspace.daily_use(series, now, window)
+        ],
+        burn_rate=services._burn_rate(series),
+        forecast_daily=forecast.predicted_daily_use if forecast is not None else None,
+        forecast_version=forecast.model_version if forecast is not None else None,
+        forecast_published_at=forecast.computed_at if forecast is not None else None,
+        forecast_fresh=fresh,
+        in_model=in_model,
+        note=workspace.forecast_note(
+            in_model=in_model,
+            fresh=fresh,
+            published=forecast.computed_at if forecast is not None else None,
+            version=forecast.model_version if forecast is not None else None,
+        ),
     )
 
 
 class BriefingOut(BaseModel):
-    """One line of "what to do today".
+    """Today's list, in one language.
 
     `ai` is the only thing the screen may use to decide whether to put a model's
     name on it. When the model is unavailable, out of quota or switched off,
-    this comes back with the deterministic line, `source="rules"` and
+    this comes back with the computed list, `source="rules"` and
     `ai=False` — the app never presents computed text as a model's work.
     """
 
+    # The list, most urgent first. `body` is the same lines joined.
+    lines: list[str] = []
     body: str
     lang: str
     source: str            # "rules" | "gemini"
@@ -900,17 +1415,152 @@ class BriefingOut(BaseModel):
     note: str | None = None
 
 
-def _briefing_rows(skus: list[services.SkuStock], units: dict[str, str]) -> list[workspace.BriefingRow]:
-    return [
-        workspace.BriefingRow(
-            sku_name=s.sku_name,
-            unit=units.get(s.sku_code, "unit"),
-            qty=s.qty_on_hand,
-            days_of_stock=s.days_of_stock,
-            status=s.status,
+def _briefing_rows(
+    skus: list[services.SkuStock],
+    units: dict[str, str],
+    now: datetime,
+    warning_multiplier: float,
+) -> list[workspace.BriefingRow]:
+    """The Today card's rows, on the same as-of-now cover as the medicine
+    cards beside it (fix #26)."""
+    rows = []
+    for s in skus:
+        cover = workspace.cover_now(
+            s.days_of_stock, s.last_reported_at, s.status, now, warning_multiplier
         )
-        for s in skus
+        rows.append(
+            workspace.BriefingRow(
+                sku_name=s.sku_name,
+                unit=units.get(s.sku_code, "unit"),
+                qty=s.qty_on_hand,
+                days_of_stock=cover.days_of_stock,
+                status=cover.status,
+                last_counted_on=(
+                    s.last_reported_at.date()
+                    if cover.count_overdue and s.last_reported_at
+                    else None
+                ),
+                ran_out_on=(
+                    workspace.stockout_date(s.days_of_stock, s.last_reported_at)
+                    if cover.count_overdue
+                    else None
+                ),
+            )
+        )
+    return rows
+
+
+async def _centre_alerts(
+    session: AsyncSession, facility: Facility, cover: dict[str, float | None], now: datetime
+) -> list[dict]:
+    """Active outbreaks in this centre's district, with its own cover at the
+    outbreak rate (fix #58). `cover` is its as-of-now cover per medicine."""
+    return [
+        outbreak.centre_alert(await outbreak.evaluate(session, row, now), cover)
+        for row in await outbreak.active(session, now, facility.state_silo)
+        if row.district == facility.district
     ]
+
+
+async def _waiting_on(session: AsyncSession, facility_id: str, now: datetime) -> list[dict]:
+    """Requests waiting for this centre, as the donor, to accept or decline.
+    A request that lapsed without a reply is no longer waiting, and could not
+    be accepted anyway (fix list #31), so it is not listed."""
+    rows = await redistribution.list_transfers(
+        session, from_facility=facility_id, statuses=["proposed"], limit=50
+    )
+    window = redistribution.request_window()
+    return [
+        r for r in rows
+        if not (
+            r["triggered_by"] == workspace.FACILITY_REQUEST
+            and redistribution.request_lapsed(r["created_at"], now, window)
+        )
+    ]
+
+
+async def _todo_for(
+    session: AsyncSession,
+    facility: Facility,
+    skus: list[services.SkuStock],
+    rows: list[workspace.BriefingRow],
+    alerts: list[dict],
+    units: dict[str, str],
+    now: datetime,
+) -> list[workspace.TodoItem]:
+    """Today's list for one centre (fix #85). Every read is bounded by the
+    centre: its open consignments, its requests, its last ward report and its
+    check-ins."""
+    open_rows = [
+        *await movements.list_movements(
+            session, facility_id=facility.id, view=movements.OVERDUE, limit=10
+        ),
+        *await movements.list_movements(
+            session, facility_id=facility.id, view=movements.OPEN, limit=10
+        ),
+    ]
+    senders: dict[str, str] = {}
+    for m in open_rows:
+        if m.from_ref in senders:
+            continue
+        donor = await session.get(Facility, m.from_ref) if m.dispatch_source == "transfer" else None
+        senders[m.from_ref] = donor.name if donor else "warehouse {0}".format(m.from_ref)
+    deliveries = [
+        workspace.TodoDelivery(
+            sku_name=m.sku_name, unit=m.unit, qty=m.qty_dispatched,
+            from_name=senders[m.from_ref],
+            expected_on=workspace.in_india(m.expected_by).date(),
+            overdue=m.status == movements.OVERDUE,
+        )
+        for m in open_rows
+    ]
+
+    names = {s.sku_code: s.sku_name for s in skus}
+    own_waiting = [
+        workspace.TodoRequest(
+            sku_name=names.get(r.sku_code, r.sku_code), unit=units.get(r.sku_code, "unit"),
+            qty=r.qty, donor=r.from_name,
+        )
+        for r in await workspace.own_requests(session, facility.id, now=now)
+        if r.status == "proposed" and not r.lapsed
+    ]
+
+    bed_today: bool | None = None
+    if facility.beds_total:
+        latest = await beds.recent_reports(session, facility.id, limit=1)
+        bed_today = bool(latest) and (
+            workspace.in_india(latest[0].reported_at).date() == workspace.in_india(now).date()
+        )
+
+    return workspace.todo_items(
+        rows=rows,
+        deliveries=deliveries,
+        awaiting_your_reply=len(await _waiting_on(session, facility.id, now)),
+        own_waiting=own_waiting,
+        outbreaks=[a["headline"] for a in alerts],
+        bed_report_today=bed_today,
+        checked_in_today=(await attendance.summarise(session, facility.id)).present,
+    )
+
+
+def _rules_reply(
+    items: list[workspace.TodoItem],
+    lang: str,
+    local: workspace.StateLanguage | None,
+    note: str | None,
+) -> BriefingOut:
+    """The computed list as the answer. The state's language has no computed
+    wording — only the model writes it — so it falls back to English and says
+    so rather than passing a translation off as checked."""
+    lines = [i.hi if lang == "hi" else i.en for i in items]
+    if local and lang == local.code:
+        note = "The {0} list is written by Gemini; showing the computed list in English.{1}".format(
+            local.name, " " + note if note else ""
+        )
+    return BriefingOut(
+        lines=lines, body="\n".join(lines), lang=lang, source="rules", ai=False,
+        model=None, generated_at=None, cached=False, note=note,
+    )
 
 
 @router.post(
@@ -920,66 +1570,80 @@ def _briefing_rows(skus: list[services.SkuStock], units: dict[str, str]) -> list
 )
 async def facility_briefing(
     facility_id: str,
-    lang: str = Query(default="en", pattern="^(en|hi)$"),
+    lang: str = Query(default="en", pattern="^[a-z]{2}$"),
     session: AsyncSession = Depends(get_session),
     user: Principal = Depends(current_user),
 ) -> BriefingOut:
-    """Ask the model for today's line. POST, and only ever from a click.
+    """Ask the model to write today's list. POST, and only ever from a click.
 
     Never called on page load: the free tier allows 20 generate requests a day
     per model, and a screen that spent one on every render would be out of
-    quota before the first demo finished. The deterministic line already
-    travels with the workspace payload, so this endpoint is an overlay on
-    something that is already on screen, not the thing that fills it.
+    quota before the first demo finished. The computed list already travels
+    with the workspace payload, so this endpoint is an overlay on something
+    that is already on screen, not the thing that fills it. One call writes
+    every language, and all of them are cached together.
     """
     facility = await _facility_in_scope(session, facility_id, user)
-    snaps = await services.get_snapshots(session, facility_ids=[facility.id])
+    snaps = await services.get_snapshots(session, facility_ids=[facility.id], live_trust=True)
     if not snaps:
         raise HTTPException(status_code=404, detail="Facility not found")
+    snap = snaps[0]
+
+    local = workspace.state_language(facility.state_silo)
+    if lang not in {"en", "hi"} | ({local.code} if local else set()):
+        raise HTTPException(
+            status_code=422, detail="This centre's list is not written in that language"
+        )
 
     units = {
         row.code: row.unit for row in (await session.execute(select(Sku))).scalars().all()
     }
-    rows = _briefing_rows(snaps[0].skus, units)
-    fallback = workspace.rules_briefing(rows)
-    inputs_hash = workspace.briefing_hash(rows)
-
-    def rules_answer(note: str | None) -> BriefingOut:
-        return BriefingOut(
-            body=fallback[lang], lang=lang, source="rules", ai=False,
-            model=None, generated_at=None, cached=False, note=note,
-        )
+    now = datetime.now(timezone.utc)
+    rows = _briefing_rows(snap.skus, units, now, snap.warning_multiplier)
+    alerts = await _centre_alerts(
+        session, facility,
+        {
+            s.sku_code: workspace.cover_now(
+                s.days_of_stock, s.last_reported_at, s.status, now, snap.warning_multiplier
+            ).days_of_stock
+            for s in snap.skus
+        },
+        now,
+    )
+    items = await _todo_for(session, facility, snap.skus, rows, alerts, units, now)
+    inputs_hash = workspace.todo_hash(items)
 
     if not vision.briefing_available():
-        return rules_answer(None)
+        return _rules_reply(items, lang, local, None)
 
     cached = await workspace.cached_briefing(session, facility.id, lang, inputs_hash)
     if cached is not None:
         return BriefingOut(
-            body=cached.body, lang=lang, source="gemini", ai=True,
-            model=cached.model, generated_at=cached.generated_at, cached=True,
+            lines=cached.body.split("\n"), body=cached.body, lang=lang, source="gemini",
+            ai=True, model=cached.model, generated_at=cached.generated_at, cached=True,
         )
 
     try:
         written = await vision.write_briefing(
             facility_name=facility.name,
-            rows=workspace.briefing_rows_from_skus(rows),
+            rows=[i.en for i in items],
+            local=(local.code, local.name) if local else None,
         )
     except vision.VisionError as exc:
-        # One attempt, then the computed line. No retry loop: the caller is a
+        # One attempt, then the computed list. No retry loop: the caller is a
         # person clicking a button, and a spent quota does not recover in the
         # time it takes to try again.
-        return rules_answer("Showing the computed line — {0}.".format(exc))
+        return _rules_reply(items, lang, local, "Showing the computed list — {0}.".format(exc))
 
     await workspace.store_briefing(
         session, facility.id,
-        {"en": written.en, "hi": written.hi},
+        {code: "\n".join(lines) for code, lines in written.lines.items()},
         inputs_hash=inputs_hash, model=written.model,
     )
     await session.commit()
 
     return BriefingOut(
-        body=written.en if lang == "en" else written.hi,
+        lines=written.lines[lang], body="\n".join(written.lines[lang]),
         lang=lang, source="gemini", ai=True, model=written.model,
         generated_at=datetime.now(timezone.utc), cached=False,
     )
@@ -990,14 +1654,23 @@ class StockPhotoLineOut(BaseModel):
 
     medicine: str
     quantity: float
+    # As printed on the document, or None when it does not say.
+    unit: str | None = None
+    batch: str | None = None
     sku_code: str | None
     sku_name: str | None
     match_score: int
     committed: bool
-    # The shelf figure before this photo, so the screen can show the ledger
-    # change (before -> after) rather than only "recorded".
+    # "added" (a delivery, through the ledger), "subtracted" (an issue), "set"
+    # (a count) or "not_applied" — never a bare "recorded".
+    action: str
+    # The shelf figure before and after this line, so the screen shows the
+    # ledger change rather than only that something happened.
     qty_before: float | None = None
-    # Why a line was not committed, when it was not. Shown to the pharmacist,
+    qty_after: float | None = None
+    # The dispatch a delivery slip settled, when it settled one.
+    movement_id: int | None = None
+    # Why a line was not applied, when it was not. Shown to the pharmacist,
     # because "three of four lines went in" without saying which is worse than
     # refusing the lot.
     reason: str | None = None
@@ -1010,12 +1683,17 @@ class StockPhotoOut(BaseModel):
     # real extraction with the model's name and this one as a mock; computed
     # output is never presented as the model's work.
     ai: bool
+    # The model's own estimate of how well it read the page. Not a check:
+    # nothing here verifies it, and the screen says so.
     confidence: float
+    # delivery_slip | issue_record | stock_count | unknown — what decided
+    # whether each number was added, subtracted or set.
+    document_type: str
     document_date: date | None
+    document_age_days: int | None
     notes: str | None
     lines: list[StockPhotoLineOut]
     committed: int
-    verification: str
 
 
 class StockPhotoIn(BaseModel):
@@ -1034,33 +1712,26 @@ async def submit_stock_photo(
     session: AsyncSession = Depends(get_session),
     user: Principal = Depends(current_user),
 ) -> StockPhotoOut:
-    """Read a medicine bill or delivery slip and update the shelf from it.
+    """Read a photographed stock document and change the shelf the way that
+    document means it (spec 26.3–26.4, fix list #11).
 
-    The consumption half of spec 26.3, and the same bargain the ward photo
-    makes: the model turns an unstructured photograph into rows that the
-    reorder threshold, the forecast and the redistribution solver all read
-    next. That is exactly why it refuses more than it accepts.
+    The model says which document it is looking at, and that decides what each
+    number does (app/stockphoto.py): a delivery slip is added through the
+    delivery ledger, settling its own dispatch, so it cannot be counted twice;
+    an issue record is subtracted; a stock count is set. Reading every line as
+    the new shelf level is how a slip for 10 tablets once emptied a shelf of
+    500 on the map.
 
-    A line is committed only when its medicine resolves to a SKU this facility
-    actually stocks, above the same fuzzy-match floor the SMS grammar uses. A
-    line that does not resolve is returned unchanged, uncommitted, with the
-    reason — inventing a quantity on a stock ledger is worse than reading
-    nothing, because nothing downstream can tell an invented row from a real
-    one.
+    It refuses more than it accepts, because the model turns a photograph into
+    rows the reorder threshold, the forecast and the solver all read next. A
+    line is applied only when its medicine resolves to this centre's list and
+    nothing about it is doubtful; otherwise it comes back "not applied" with
+    the reason, and nothing about it is stored.
 
     The photograph itself is never stored. Only what was read from it is.
     """
     facility = await _facility_in_scope(session, facility_id, user)
-    if not can_submit_reading(
-        user,
-        facility_id=facility.id,
-        facility_state=facility.state_silo,
-        facility_district=facility.district,
-    ):
-        raise HTTPException(
-            status_code=403,
-            detail="You can only report stock for facilities you are responsible for",
-        )
+    _require_facts(user, facility)
 
     try:
         image = base64.b64decode(payload.image_base64, validate=True)
@@ -1075,24 +1746,93 @@ async def submit_stock_photo(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     lookup = await ingest.sku_lookup(session)
-    names = {
-        s.code: s.name for s in (await session.execute(select(Sku))).scalars().all()
-    }
+    skus = {s.code: s for s in (await session.execute(select(Sku))).scalars().all()}
     now = datetime.now(timezone.utc)
+    today = now.date()
     rows: list[StockPhotoLineOut] = []
     committed = 0
+    readings_written = 0
     snaps = await services.get_snapshots(session, facility_ids=[facility.id])
-    before = {s.sku_code: float(s.qty_on_hand) for s in (snaps[0].skus if snaps else [])}
+    on_hand = {s.sku_code: float(s.qty_on_hand) for s in (snaps[0].skus if snaps else [])}
+    last_count = await workspace.last_count_times(
+        session, facility.id, since=now - timedelta(days=settings.stock_photo_max_age_days + 30)
+    )
+    open_by_sku, settled_by_sku = await movements.deliveries_to(
+        session, facility.id, since=now - timedelta(days=30)
+    )
+    settled_ids: set[int] = set()
 
-    for line in extraction.lines:
+    for i, line in enumerate(extraction.lines):
         code, score = ingest.resolve_sku(line.medicine, lookup)
+        common = dict(
+            medicine=line.medicine, quantity=line.quantity, unit=line.unit,
+            batch=line.batch, match_score=score,
+        )
         if code is None:
             rows.append(
                 StockPhotoLineOut(
-                    medicine=line.medicine, quantity=line.quantity,
-                    sku_code=None, sku_name=None, match_score=score,
-                    committed=False,
+                    **common, sku_code=None, sku_name=None, committed=False,
+                    action="not_applied",
                     reason="No medicine in this centre's list matches that name.",
+                )
+            )
+            continue
+
+        sku = skus[code]
+        before = on_hand.get(code)
+        decision = stockphoto.decide_line(
+            document_type=extraction.document_type,
+            qty=line.quantity,
+            printed_unit=line.unit,
+            printed_batch=line.batch,
+            sku_name=sku.name,
+            sku_unit=sku.unit,
+            on_hand=before or 0.0,
+            last_count_at=last_count.get(code),
+            document_date=extraction.document_date,
+            today=today,
+            confidence=extraction.confidence,
+            open_deliveries=[
+                d for d in open_by_sku.get(code, []) if d.movement_id not in settled_ids
+            ],
+            settled_deliveries=settled_by_sku.get(code, []),
+            confidence_floor=settings.channel_confidence_floor,
+            max_age_days=settings.stock_photo_max_age_days,
+        )
+        line_out = dict(common, sku_code=code, sku_name=sku.name, qty_before=before)
+
+        if decision.action == "hold":
+            rows.append(
+                StockPhotoLineOut(
+                    **line_out, committed=False, action="not_applied", reason=decision.reason
+                )
+            )
+            continue
+
+        if decision.action == "receive":
+            # A delivery goes through the ledger, never around it: the receipt
+            # settles the dispatch and writes the stock itself, so the same
+            # slip photographed twice finds its batch already settled.
+            try:
+                _, effect = await movements.confirm_receipt(
+                    session, decision.movement_id,
+                    qty_received=line.quantity, via="photo", by_ref=f"user:{user.id}",
+                    note=f"Read from a photographed delivery slip by {extraction.model}",
+                )
+            except movements.ReceiptError as exc:
+                rows.append(
+                    StockPhotoLineOut(
+                        **line_out, committed=False, action="not_applied", reason=str(exc)
+                    )
+                )
+                continue
+            settled_ids.add(decision.movement_id)
+            on_hand[code] = effect["qty_on_hand"]
+            committed += 1
+            rows.append(
+                StockPhotoLineOut(
+                    **line_out, committed=True, action="added",
+                    qty_after=effect["qty_on_hand"], movement_id=decision.movement_id,
                 )
             )
             continue
@@ -1101,17 +1841,21 @@ async def submit_stock_photo(
             StockReading(
                 facility_id=facility.id,
                 sku_code=code,
-                qty_on_hand=Decimal(str(line.quantity)),
-                reported_at=now,
+                qty_on_hand=Decimal(str(decision.qty_after)),
+                # Two lines of one medicine on one page keep their order.
+                reported_at=now + timedelta(microseconds=i),
                 source="photo",
                 reporter_ref=f"user:{user.id}",
                 # The model's own confidence, carried through rather than
-                # replaced: a blurred bill must read as a doubtful row, and the
+                # replaced: a blurred page must read as a doubtful row, and the
                 # trust layer widens this facility's warning thresholds for it.
                 confidence=Decimal(str(round(extraction.confidence, 2))),
                 raw_payload={
                     "read_by": extraction.model,
+                    "document_type": extraction.document_type,
                     "as_printed": line.medicine,
+                    "qty_as_printed": line.quantity,
+                    "unit_as_printed": line.unit,
                     "match_score": score,
                     "document_date": (
                         extraction.document_date.isoformat()
@@ -1121,19 +1865,22 @@ async def submit_stock_photo(
                 },
             )
         )
+        on_hand[code] = decision.qty_after
         committed += 1
+        readings_written += 1
         rows.append(
             StockPhotoLineOut(
-                medicine=line.medicine, quantity=line.quantity,
-                sku_code=code, sku_name=names.get(code, code),
-                match_score=score, committed=True, qty_before=before.get(code),
+                **line_out, committed=True,
+                action="subtracted" if decision.action == "subtract" else "set",
+                qty_after=decision.qty_after,
             )
         )
 
     if committed:
         await session.commit()
-        await services.refresh_facility_state(session, facility.id)
-        await session.commit()
+        if readings_written:
+            await services.refresh_facility_state(session, facility.id)
+            await session.commit()
         await events.record(
             session,
             events.READING_COMMITTED,
@@ -1141,25 +1888,26 @@ async def submit_stock_photo(
                 "facility_id": facility.id,
                 "facility_name": facility.name,
                 "source": "photo",
+                "document_type": extraction.document_type,
                 "lines": committed,
                 "read_by": extraction.model,
             },
             state_silo=facility.state_silo,
         )
 
-    live = extraction.model != "mock"
     return StockPhotoOut(
         facility_id=facility.id,
         model=extraction.model,
-        ai=live,
+        ai=extraction.model != "mock",
         confidence=extraction.confidence,
+        document_type=extraction.document_type,
         document_date=extraction.document_date,
+        document_age_days=(
+            (today - extraction.document_date).days if extraction.document_date else None
+        ),
         notes=extraction.notes,
         lines=rows,
         committed=committed,
-        # The same three words the bed report uses, and the same rule: a check
-        # that could not run is never reported as one that passed.
-        verification="verified" if live and committed else "unverified",
     )
 
 
@@ -1255,6 +2003,14 @@ class RequestOut(BaseModel):
     estimated_delivery: date
     estimate_label: str
     assumptions: dict[str, float]
+    # The request's state in words, e.g. "Awaiting reply from Nashik PHC 13
+    # (pharmacist)" — the screen never shows `status` or `approver_role` raw.
+    status_words: str
+    # The approval the estimate depends on (the dispatch cutoff, India time):
+    # "If approved by 14:00 today, about 1 Oct".
+    approve_by: datetime
+    # When the request lapses if nobody replies (fix list #31).
+    lapses_at: datetime
 
 
 @router.get(
@@ -1265,12 +2021,67 @@ async def incoming_requests(
     session: AsyncSession = Depends(get_session),
     user: Principal = Depends(current_user),
 ) -> list[TransferOut]:
-    """Requests waiting for this centre, as the donor, to accept or decline."""
+    """Requests waiting for this centre, as the donor, to accept or decline.
+    A request that lapsed without a reply is no longer waiting, and could not
+    be accepted anyway (fix list #31), so it is not listed."""
     facility = await _facility_in_scope(session, facility_id, user)
-    rows = await redistribution.list_transfers(
-        session, from_facility=facility.id, statuses=["proposed"], limit=50
+    return [
+        TransferOut.model_validate(r)
+        for r in await _waiting_on(session, facility.id, datetime.now(timezone.utc))
+    ]
+
+
+@router.post("/transfers/{transfer_id}/cancel", response_model=TransferOut, tags=["workspace"])
+async def cancel_request(
+    transfer_id: int,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> TransferOut:
+    """Withdraw a request this centre raised, before the donor replies.
+
+    Only the centre that raised it, and only while it is still a request: the
+    plan's own recommendations are changed by re-running the plan, and a
+    decided transfer is history. Taken under the same row lock the donor's
+    decision takes, so a cancel and an accept cannot both win.
+    """
+    transfer = await session.get(Transfer, transfer_id)
+    if transfer is None:
+        raise HTTPException(status_code=404, detail="Request not found")
+    facility = await session.get(Facility, transfer.to_facility)
+    if user.role != "facility_user" or user.facility_id != transfer.to_facility:
+        raise HTTPException(
+            status_code=403, detail="Only the centre that raised a request can cancel it"
+        )
+    _require_demo_write(user, facility)
+    if transfer.triggered_by != workspace.FACILITY_REQUEST:
+        raise HTTPException(
+            status_code=409,
+            detail="This is the plan's recommendation, not a request; it changes when the plan is re-run.",
+        )
+    locked = await session.get(Transfer, transfer_id, with_for_update=True, populate_existing=True)
+    if locked.status != "proposed":
+        raise HTTPException(
+            status_code=409,
+            detail="This request is already closed: {0}.".format(
+                workspace.request_words(locked.status, False, "the donor centre").lower()
+            ),
+        )
+    locked.status = "cancelled"
+    session.add(
+        Approval(
+            transfer_id=locked.id, actor_ref=f"user:{user.id}", actor_role=user.role,
+            decision="cancelled", channel="web",
+        )
     )
-    return [TransferOut.model_validate(r) for r in rows]
+    await session.commit()
+    await events.record(
+        session,
+        events.TRANSFER_CANCELLED,
+        {"transfer_id": locked.id, "sku_code": locked.sku_code, "facility_id": facility.id,
+         "facility_name": facility.name},
+        state_silo=facility.state_silo,
+    )
+    return TransferOut.model_validate((await redistribution.list_transfers(session, ids=[locked.id]))[0])
 
 
 @router.post(
@@ -1291,6 +2102,7 @@ async def demo_neighbour_request(
     if not settings.demo_mode:
         raise HTTPException(status_code=404, detail="Not found")
     facility = await _facility_in_scope(session, facility_id, user)
+    _require_demo_write(user, facility)
     controlled = set(
         (await session.execute(select(Sku.code).where(Sku.is_controlled.is_(True)))).scalars()
     )
@@ -1361,6 +2173,7 @@ async def create_request(
     nothing else: no stock moves until the donor centre accepts it (spec 12.3 —
     nothing auto-executes)."""
     facility = await _facility_in_scope(session, facility_id, user)
+    _require_demo_write(user, facility)
     sku_row = await session.get(Sku, payload.sku_code)
     if sku_row is None:
         raise HTTPException(status_code=404, detail="Unknown medicine")
@@ -1378,6 +2191,27 @@ async def create_request(
     )
     if not verdict.allowed:
         raise HTTPException(status_code=409, detail=verdict.reason)
+    # One live request per medicine: a second would ask two donors for the
+    # same shortfall, and the medicine card shows the first instead of a
+    # "Find supply" button while it waits (fix list #31).
+    waiting = next(
+        (
+            r for r in await workspace.own_requests(session, facility.id)
+            if r.sku_code == payload.sku_code and r.status == "proposed" and not r.lapsed
+        ),
+        None,
+    )
+    if waiting is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This centre already has a request for {0} waiting on {1}, sent at {2}. "
+                "Cancel it first, or wait for the reply."
+            ).format(
+                sku_row.name, waiting.from_name,
+                workspace.in_india(waiting.created_at).strftime("%H:%M"),
+            ),
+        )
 
     rule = workspace.SkuRule(
         code=sku_row.code, name=sku_row.name, unit=sku_row.unit,
@@ -1406,7 +2240,9 @@ async def create_request(
         else 0.0
     )
     now = datetime.now(timezone.utc)
-    estimate = workspace.delivery_estimate(km=km, raised_at=now)
+    # The dispatch cutoff is a local hour, so the estimate reads India time;
+    # reading the UTC hour put every request raised 14:00–19:30 on the wrong day.
+    estimate = workspace.delivery_estimate(km=km, raised_at=workspace.in_india(now))
     eta_hours = round(km / rules.avg_speed_kmh + rules.handling_hours, 2)
     # The donor centre's staff accept or decline (auth.can_decide_transfer).
     approver_role = "donor_facility"
@@ -1469,6 +2305,9 @@ async def create_request(
         estimated_delivery=estimate.expected_on,
         estimate_label=estimate.label,
         assumptions={k: float(v) for k, v in estimate.assumptions.items()},
+        status_words=workspace.request_words("proposed", False, donor_facility.name),
+        approve_by=estimate.approve_by,
+        lapses_at=transfer.created_at + redistribution.request_window(),
     )
 
 
@@ -1486,15 +2325,7 @@ async def submit_reading(
     facility = await session.get(Facility, payload.facility_id)
     if facility is None:
         raise HTTPException(status_code=404, detail="Unknown facility")
-    if not can_submit_reading(
-        user,
-        facility_id=facility.id,
-        facility_state=facility.state_silo,
-        facility_district=facility.district,
-    ):
-        raise HTTPException(
-            status_code=403, detail="You can only report stock for facilities you are responsible for"
-        )
+    _require_facts(user, facility)
     # "seed" and "transfer" are written only by the server itself. A browser
     # able to claim "transfer" could hide real consumption, because transfer
     # readings are excluded from usage rates. Phone-channel sources come from
@@ -1627,12 +2458,44 @@ class EventsOut(BaseModel):
     events: list[EventOut]
 
 
+def scope_events(
+    feed: list[dict], where: dict[str, tuple[str, str]], user: Principal
+) -> list[dict]:
+    """The event feed as this reader may see it (fix #77). Every event still
+    arrives — the screen needs to know something changed — but a payload about
+    a centre whose rows the reader may not read is withheld. `where` maps each
+    facility id in the batch to its (state, district)."""
+    out = []
+    for e in feed:
+        fid = (e.get("data") or {}).get("facility_id")
+        place = where.get(fid) if fid else None
+        if fid and not (
+            place
+            and can_read_facility_rows(user, state=place[0], district=place[1], facility_id=fid)
+        ):
+            e = {**e, "data": {"withheld": True}}
+        out.append(e)
+    return out
+
+
 @router.get("/events", response_model=EventsOut, tags=["realtime"])
 async def poll_events(
     after: int | None = Query(default=None, ge=0),
     session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
 ) -> EventsOut:
-    return EventsOut.model_validate(await events.since(session, after))
+    out = await events.since(session, after)
+    ids = sorted({
+        (e.get("data") or {}).get("facility_id") for e in out["events"]
+    } - {None})
+    where: dict[str, tuple[str, str]] = {}
+    if ids:
+        # Bounded by the batch (events.MAX_BATCH).
+        rows = await session.execute(
+            select(Facility.id, Facility.state_silo, Facility.district).where(Facility.id.in_(ids))
+        )
+        where = {fid: (state, district) for fid, state, district in rows.all()}
+    return EventsOut.model_validate({**out, "events": scope_events(out["events"], where, user)})
 
 
 # ======================================================= medicine movements ===
@@ -1670,6 +2533,8 @@ class MovementsOut(BaseModel):
     counts: dict
     short_units: float
     movements: list[MovementOut]
+    # Set when the totals are shown without their rows (fix #77).
+    rows_withheld: str | None = None
 
 
 @router.get("/movements", response_model=MovementsOut, tags=["movements"])
@@ -1693,18 +2558,34 @@ async def list_movements(
     elif user.role == "state_officer":
         state = user.state_silo
 
-    rows = await movements.list_movements(
-        session, state=state, district=district, facility_id=facility,
-        sku=sku, view=view, limit=limit, offset=offset,
-    )
-    totals = await movements.summary(
-        session, state=state, district=district, facility_id=facility, sku=sku
-    )
+    # Fix #77: a consignment is a row about one centre. The national role
+    # reads the ledger's totals — an aggregate — and none of its rows.
+    withheld = None
+    rows: list = []
+    totals_scope = dict(state=state, district=district, facility_id=facility, sku=sku)
+    if user.role == "admin":
+        narrowed = _narrow_to_rows_scope(user, state, district)
+        if narrowed is None:
+            withheld = held_message(user, state) if state else (
+                "Held in each state's store — the national view sees totals only."
+            )
+        else:
+            rows = await movements.list_movements(
+                session, state=narrowed[0], district=narrowed[1], facility_id=facility,
+                sku=sku, view=view, limit=limit, offset=offset,
+            )
+    else:
+        rows = await movements.list_movements(
+            session, state=state, district=district, facility_id=facility,
+            sku=sku, view=view, limit=limit, offset=offset,
+        )
+    totals = await movements.summary(session, **totals_scope)
     return MovementsOut(
         view=view,
         counts=totals["counts"],
         short_units=totals["short_units"],
         movements=[MovementOut(**asdict(r)) for r in rows],
+        rows_withheld=withheld,
     )
 
 
@@ -1738,17 +2619,9 @@ async def confirm_receipt(
     if facility is None:
         raise HTTPException(status_code=404, detail="Unknown facility")
     # Confirming a delivery is reporting a fact about your own facility, so it
-    # carries the same permission as submitting a stock reading.
-    if not can_submit_reading(
-        user,
-        facility_id=facility.id,
-        facility_state=facility.state_silo,
-        facility_district=facility.district,
-    ):
-        raise HTTPException(
-            status_code=403,
-            detail="You can only confirm deliveries for facilities you are responsible for",
-        )
+    # carries the same permission as submitting a stock reading: the receiving
+    # centre's, never the dispatching side's or an officer's (fix list #74).
+    _require_facts(user, facility)
     # Only the web form comes through this endpoint; phone channels confirm
     # through their own webhook adapters, which set their own `via`.
     if payload.via not in WEB_SOURCES and not (
@@ -1773,6 +2646,100 @@ async def confirm_receipt(
     return ReceiptOut(movement=MovementOut(**asdict(row)), **effect)
 
 
+# ===================================================================== chase ===
+# Fix list #74. Officers no longer confirm a centre's deliveries, check its
+# staff in or send its bed report; they chase the centre for them instead.
+
+
+def chase_text(
+    topic: str, facility_name: str, *, batch: str | None = None, medicine: str | None = None
+) -> str:
+    """The reminder, naming what to send back in the SMS grammar the ingestion
+    spine reads (GOT, IN/OUT, BEDS). A delivery reminder never states the
+    dispatched quantity: the centre counts first, then reports what it
+    counted."""
+    if topic == "receipt":
+        return (
+            "SwasthSetu reminder for {0}: batch {1} of {2} was sent to you. When it "
+            "arrives, count it and reply GOT {1} followed by the number you counted."
+        ).format(facility_name, batch, medicine)
+    if topic == "checkin":
+        return (
+            "SwasthSetu reminder for {0}: no staff check-in has been recorded today. "
+            "Staff on duty, reply IN when you arrive and OUT when you leave."
+        ).format(facility_name)
+    return (
+        "SwasthSetu reminder for {0}: today's bed report is due. Send a ward photo "
+        "with today's code, or reply BEDS followed by the number of occupied beds."
+    ).format(facility_name)
+
+
+class ChaseIn(BaseModel):
+    topic: Literal["receipt", "checkin", "beds"]
+    movement_id: int | None = None
+
+
+class ChaseOut(BaseModel):
+    facility_id: str
+    sent_to: str
+    channel: str
+    body: str
+    # Always "simulated". This system keeps only a salted hash of each
+    # handset's number, so it has nothing to text a real phone with; the
+    # reminder goes to the channel simulator's outbound log, and says so.
+    status: str
+
+
+@router.post("/facilities/{facility_id}/chase", response_model=ChaseOut, tags=["field"])
+async def chase_facility(
+    facility_id: str,
+    payload: ChaseIn,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> ChaseOut:
+    """Remind a centre to report what only it can report."""
+    if user.role == "facility_user":
+        raise HTTPException(
+            status_code=403,
+            detail="A centre reports for itself; chasing is for the officers who oversee it.",
+        )
+    facility = await _facility_in_scope(session, facility_id, user)
+    _require_demo_write(user, facility)
+
+    batch = medicine = None
+    if payload.topic == "receipt":
+        if payload.movement_id is None:
+            raise HTTPException(status_code=422, detail="Say which delivery to chase")
+        movement = await session.get(MedicineMovement, payload.movement_id)
+        if movement is None or movement.to_facility != facility.id:
+            raise HTTPException(status_code=404, detail="No such delivery to this centre")
+        if movement.status != movements.OPEN:
+            raise HTTPException(status_code=409, detail="That delivery has already been confirmed")
+        sku = await session.get(Sku, movement.sku_code)
+        batch, medicine = movement.batch_id, sku.name if sku else movement.sku_code
+
+    # The reporting handset first ('reporter' sorts before 'supervisor').
+    contact = await session.scalar(
+        select(FacilityContact)
+        .where(FacilityContact.facility_id == facility.id, FacilityContact.is_active.is_(True))
+        .order_by(FacilityContact.role)
+        .limit(1)
+    )
+    if contact is None:
+        raise HTTPException(status_code=409, detail="This centre has no registered handset to remind")
+
+    body = chase_text(payload.topic, facility.name, batch=batch, medicine=medicine)
+    await comms.record_outbound(
+        session, channel="sms", to_ref=contact.masked, body=body,
+        provider_sid=None, status="simulated",
+    )
+    await session.commit()
+    return ChaseOut(
+        facility_id=facility.id, sent_to=contact.masked, channel="sms", body=body,
+        status="simulated",
+    )
+
+
 # =============================================================== bed capture ===
 # Spec 26.2: a ward photo carrying the day's rotating code, read by Gemini,
 # checked against the facility's registered location and its admission
@@ -1795,7 +2762,9 @@ async def bed_code(
     session: AsyncSession = Depends(get_session),
     user: Principal = Depends(current_user),
 ) -> BedCodeOut:
-    facility = await _facility_for_report(session, facility_id, user)
+    # Reading the day's code is viewing, not reporting: an officer may see it
+    # for any centre they oversee (fix list #74 narrowed only the reports).
+    facility = await _facility_in_scope(session, facility_id, user)
     code = await beds.code_for(session, facility.id)
     await session.commit()
     return BedCodeOut(
@@ -1845,6 +2814,8 @@ class BedReportOut(BaseModel):
     register_admissions: int | None
     model_confidence: float | None
     model: str | None
+    # Who produced the numbers, in plain words: seeded, typed, or which model.
+    read_by: str
     reasons: list[str]
 
 
@@ -1867,6 +2838,9 @@ def _bed_report_out(report) -> BedReportOut:
         register_admissions=report.register_admissions,
         model_confidence=report.model_confidence,
         model=payload.get("model"),
+        read_by=beds.read_by(
+            model=payload.get("model"), notes=payload.get("notes"), source=report.source
+        ),
         reasons=payload.get("reasons", []),
     )
 
@@ -1874,19 +2848,12 @@ def _bed_report_out(report) -> BedReportOut:
 async def _facility_for_report(
     session: AsyncSession, facility_id: str, user: Principal
 ) -> Facility:
+    """The facility a bed report or check-in is being made for: by the centre
+    itself only (auth.can_report_facts)."""
     facility = await session.get(Facility, facility_id)
     if facility is None:
         raise HTTPException(status_code=404, detail="Unknown facility")
-    if not can_submit_reading(
-        user,
-        facility_id=facility.id,
-        facility_state=facility.state_silo,
-        facility_district=facility.district,
-    ):
-        raise HTTPException(
-            status_code=403,
-            detail="You can only report for facilities you are responsible for",
-        )
+    _require_facts(user, facility)
     return facility
 
 
@@ -1954,8 +2921,7 @@ async def list_bed_reports(
     session: AsyncSession = Depends(get_session),
     user: Principal = Depends(current_user),
 ) -> list[BedReportOut]:
-    if await session.get(Facility, facility_id) is None:
-        raise HTTPException(status_code=404, detail="Unknown facility")
+    await _readable_facility(session, facility_id, user)
     return [_bed_report_out(r) for r in await beds.recent_reports(session, facility_id, limit)]
 
 
@@ -1997,6 +2963,7 @@ class AttendanceOut(BaseModel):
     geofence_checked: int
     footfall_today: int | None
     contradiction: str | None
+    last_checkin_at: datetime | None = None
 
 
 @router.get(
@@ -2007,8 +2974,7 @@ async def facility_attendance(
     session: AsyncSession = Depends(get_session),
     user: Principal = Depends(current_user),
 ) -> AttendanceOut:
-    if await session.get(Facility, facility_id) is None:
-        raise HTTPException(status_code=404, detail="Unknown facility")
+    await _readable_facility(session, facility_id, user)
     return AttendanceOut(**asdict(await attendance.summarise(session, facility_id)))
 
 
@@ -2150,6 +3116,11 @@ class TrustComponentOut(BaseModel):
     # Where to open the rows this sentence came from. The movement tab reads
     # the same filter, so the link and the score are one query.
     evidence: dict | None = None
+    # Fix #60: how many observations the sentence rests on, in words, and
+    # whether there were enough to score it at all.
+    sample: int | None = None
+    basis: str | None = None
+    scored: bool = True
 
 
 class TrustOut(BaseModel):
@@ -2189,8 +3160,19 @@ async def audit_queue(
         state, district = user.state_silo, user.district
     elif user.role == "state_officer":
         state = user.state_silo
+    else:
+        # Fix #77: the queue is a list of named centres with their evidence.
+        narrowed = _narrow_to_rows_scope(user, state, district)
+        if narrowed is None:
+            raise HTTPException(
+                status_code=403,
+                detail=held_message(user, state) if state else (
+                    "Held in each state's store — the national view sees district summaries only."
+                ),
+            )
+        state, district = narrowed
     if not state and not district:
-        # Scoring the whole country live measured 46s (docs/STORAGE_NOTES.md),
+        # Scoring the whole country live measured 46s against the deployed database,
         # and the panel's live refresh piled those requests on each other.
         raise HTTPException(
             status_code=400,
@@ -2224,6 +3206,7 @@ async def facility_trust(
     # Computed here and now from the ledger, the ward photos and the
     # check-ins — never read back from a stored column, so the panel cannot
     # show a number that the rows beneath it have already moved past.
+    await _readable_facility(session, facility_id, user)
     score = await trust.for_facility(session, facility_id)
     if score is None:
         return None
@@ -2281,6 +3264,10 @@ class FederationSiloOut(BaseModel):
     trust: float
     flagged_pct: float
     train_loss: float
+    # The same score from today's ledger (fix #54), so a run recorded on an
+    # earlier dataset can be read against the one in the database now.
+    trust_now: float | None = None
+    flagged_pct_now: float | None = None
 
 
 class FederationRoundOut(BaseModel):
@@ -2310,6 +3297,108 @@ class FederationOut(BaseModel):
     raw_rows_transmitted: int = 0
     tensor_shapes: dict[str, list[int]] = Field(default_factory=dict)
     note: str | None = None
+    # Fix #1: every figure the panel prints, computed here from the recorded
+    # rounds (federation_summary) so that nothing is typed into the screen.
+    untrained_mae: float | None = None
+    final_mae: float | None = None
+    final_round: int | None = None
+    final_improvement_pct: float | None = None
+    beats_baseline_from_round: int | None = None
+    training_rounds: int = 0
+    silos: int = 0
+    upload_bytes_total: int = 0
+    total_windows: int = 0
+    # Fix #54: states whose receipt discipline in today's ledger is materially
+    # different from what the run recorded. Not empty means the run was trained
+    # on a dataset that is no longer the one in the database.
+    silos_changed_since_run: list[str] = Field(default_factory=list)
+
+
+# How far a state's score may move before the run is said to describe a
+# different dataset. Ordinary days move it a little: a consignment confirmed,
+# another falling overdue.
+SILO_DRIFT = 0.15
+RECEIPT_WINDOW_DAYS = 60
+
+
+def receipt_trust(*, total: int, overdue: int, short: int) -> tuple[float, float]:
+    """(trust, flagged %) from a state's consignments — the federation's own
+    rule (federation/pytorchexample/silo.py live_trust), mirrored because the
+    web service carries no torch. A test pins the two together."""
+    if not total:
+        return 1.0, 0.0
+    penalty = min(1.0, (overdue + 0.5 * short) / total / 0.4)
+    return round(max(0.0, 1.0 - penalty), 3), round(100 * (overdue + short) / total, 1)
+
+
+def silo_drift(recorded: dict[str, float], today: dict[str, float]) -> list[str]:
+    """States whose score today differs materially from the recorded one."""
+    return sorted(
+        state for state, was in recorded.items()
+        if state in today and abs(today[state] - was) > SILO_DRIFT
+    )
+
+
+async def _receipt_trust_now(
+    session: AsyncSession, states: list[str], now: datetime
+) -> dict[str, tuple[float, float]]:
+    """Each state's receipt discipline from the ledger as it stands. One
+    grouped read, bounded by the silo states and the 60-day window."""
+    if not states:
+        return {}
+    rows = await session.execute(
+        select(
+            MedicineMovement.state_silo,
+            func.count(),
+            func.count().filter(
+                MedicineMovement.status == movements.OPEN, MedicineMovement.expected_by < now
+            ),
+            func.count().filter(MedicineMovement.status == movements.SHORT),
+        )
+        .where(
+            MedicineMovement.state_silo.in_(states),
+            MedicineMovement.dispatched_at >= now - timedelta(days=RECEIPT_WINDOW_DAYS),
+        )
+        .group_by(MedicineMovement.state_silo)
+    )
+    return {
+        state: receipt_trust(total=total, overdue=overdue, short=short)
+        for state, total, overdue, short in rows.all()
+    }
+
+
+def federation_summary(rounds: list[dict]) -> dict:
+    """The run in the figures a reader needs (fix #1).
+
+    `rounds` are the recorded rounds in order, each
+    {round_no, mae, baseline, silos, bytes, per_silo}. Round 0 is the untrained
+    model scored by the aggregator — nobody trained or uploaded anything for
+    it — so it is "before training", never "round one", and it is left out of
+    the upload total. That total is what the states sent: every training round,
+    every reporting state, one model each.
+    """
+    scored = [r for r in rounds if r["mae"] is not None]
+    training = [r for r in rounds if r["round_no"] >= 1]
+    baseline = next((r["baseline"] for r in reversed(rounds) if r["baseline"]), None)
+    final = scored[-1] if scored else None
+    untrained = next((r["mae"] for r in scored if r["round_no"] == 0), None)
+    last_silos = (rounds[-1]["per_silo"] or {}) if rounds else {}
+    return {
+        "untrained_mae": untrained,
+        "final_mae": final["mae"] if final else None,
+        "final_round": final["round_no"] if final else None,
+        "final_improvement_pct": (
+            round((baseline - final["mae"]) / baseline * 100, 1) if baseline and final else None
+        ),
+        "beats_baseline_from_round": next(
+            (r["round_no"] for r in scored if r["round_no"] >= 1 and baseline and r["mae"] < baseline),
+            None,
+        ),
+        "training_rounds": len(training),
+        "silos": len(last_silos),
+        "upload_bytes_total": sum((r["bytes"] or 0) * (r["silos"] or 0) for r in training),
+        "total_windows": sum(int(v.get("windows", 0)) for v in last_silos.values()),
+    }
 
 
 @router.get("/federation/inspector", response_model=FederationOut, tags=["federation"])
@@ -2362,8 +3451,18 @@ async def federation_inspector(
     scored = [r.global_val_mae for r in rows if r.global_val_mae is not None]
     baseline = next((r.baseline_mae for r in reversed(rows) if r.baseline_mae), None)
     best = min(scored) if scored else None
+
+    # Today's ledger beside the recorded run (fix #54), on the last round only:
+    # that is the round whose weights became the model.
+    recorded = {s.state: s.trust for s in rounds[-1].per_silo} if rounds else {}
+    today = await _receipt_trust_now(session, sorted(recorded), datetime.now(timezone.utc))
+    if rounds:
+        for s in rounds[-1].per_silo:
+            if s.state in today:
+                s.trust_now, s.flagged_pct_now = today[s.state]
     return FederationOut(
         available=True,
+        silos_changed_since_run=silo_drift(recorded, {k: v[0] for k, v in today.items()}),
         run_id=latest,
         strategy=next((r.strategy for r in reversed(rows) if r.strategy), None),
         rounds=rounds,
@@ -2379,6 +3478,13 @@ async def federation_inspector(
         # in here: see federation/pytorchexample/inspector.py.
         raw_rows_transmitted=sum(r.raw_rows_transmitted for r in rows),
         tensor_shapes=next((r.tensor_shapes for r in reversed(rows) if r.tensor_shapes), {}),
+        **federation_summary(
+            [
+                {"round_no": r.round_no, "mae": r.global_val_mae, "baseline": r.baseline_mae,
+                 "silos": r.silos_reporting, "bytes": r.bytes_transmitted, "per_silo": r.per_silo}
+                for r in rows
+            ]
+        ),
     )
 
 
@@ -2469,6 +3575,12 @@ class OutbreakOut(BaseModel):
     reported_date: str | None
     status: str | None
     in_network: bool
+    # Fix #59: what makes a report row a warning.
+    facilities: int = 0
+    medicines: list[str] = []
+    age_days: int | None = None
+    historical: bool = True
+    active: bool = False
 
 
 class OutbreaksOut(BaseModel):
@@ -2477,21 +3589,123 @@ class OutbreaksOut(BaseModel):
     columns: list[str]
     reports: list[dict]
     rows: list[OutbreakOut]
+    # A row older than this many days is historical, not a current warning.
+    ttl_days: int = 14
+
+
+class NextOutbreakOut(BaseModel):
+    disease: str
+    basis: str
+    without_on: date
+
+
+class NextPairOut(BaseModel):
+    """One district × medicine pair projected to run short (fix #45)."""
+
+    state: str
+    state_name: str
+    district: str
+    sku_code: str
+    sku_name: str
+    centres: int
+    first_on: date
+    # None where the reader may not read that centre's rows (fix #77).
+    first_centre: str | None
+    by_forecast: int
+    # Which rule the dates rest on: forecast | mixed | burn_rate | outbreak.
+    source: str
+    outbreak: NextOutbreakOut | None
+    line: str
+
+
+class NextWarningsOut(BaseModel):
+    horizon_days: int
+    as_of: datetime
+    pairs: list[NextPairOut]
+    counts_overdue: int
+    forecast_published_at: datetime | None
+    forecast_max_age_days: float
+
+
+@router.get("/warnings/next", response_model=NextWarningsOut, tags=["warnings"])
+async def next_warnings(
+    state: str | None = Query(default=None, pattern="^[A-Z]{2}$"),
+    source: Literal["all", "forecast"] = "all",
+    limit: int = Query(default=earlywarning.DEFAULT_LIMIT, ge=1, le=20),
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> NextWarningsOut:
+    """The "Next 14 days" strip: district × medicine pairs whose centres are
+    projected to run out inside the horizon, earliest first. `source=forecast`
+    keeps only dates that rest on the shared model's fresh forecast — the same
+    data as the Federation tab shows it. District aggregates only; one capped
+    aggregate over the map's own table."""
+    out = await earlywarning.strip(
+        session, datetime.now(timezone.utc),
+        state=state, only_forecast=source == "forecast", limit=limit,
+    )
+    # The district figures are an aggregate; the first centre's name is a row.
+    named = {
+        p.key: can_read_facility_rows(user, state=p.state, district=p.district)
+        for p in out.pairs
+    }
+    return NextWarningsOut(
+        horizon_days=out.horizon_days,
+        as_of=out.as_of,
+        counts_overdue=out.counts_overdue,
+        forecast_published_at=out.forecast_published_at,
+        forecast_max_age_days=out.forecast_max_age_days,
+        pairs=[
+            NextPairOut(
+                state=p.state, state_name=earlywarning.state_name(p.state),
+                district=p.district, sku_code=p.sku_code, sku_name=p.sku_name,
+                centres=p.centres, first_on=p.first_on,
+                first_centre=p.first_centre if named[p.key] else None,
+                by_forecast=p.by_forecast, source=p.source,
+                outbreak=NextOutbreakOut(**vars(p.outbreak)) if p.outbreak else None,
+                line=earlywarning.line(p, named=named[p.key]),
+            )
+            for p in out.pairs
+        ],
+    )
+
+
+async def _district_facility_counts(session: AsyncSession) -> dict[tuple[str, str], int]:
+    """Centres per (state, district): one grouped read of the facility list."""
+    rows = await session.execute(
+        select(Facility.state_silo, Facility.district, func.count()).group_by(
+            Facility.state_silo, Facility.district
+        )
+    )
+    return {(s, d): n for s, d, n in rows.all()}
 
 
 @router.get("/outbreaks", response_model=OutbreaksOut, tags=["outbreaks"])
-async def outbreaks(state: str | None = None) -> OutbreaksOut:
+async def outbreaks(
+    state: str | None = None, session: AsyncSession = Depends(get_session)
+) -> OutbreaksOut:
     """Outbreaks from the IDSP Weekly Outbreak Report, parsed once from the
-    published PDFs into a committed file. No database read, no polling."""
+    published PDFs into a committed file — each row with its age, the network's
+    centres in its district, the medicines its disease drives and whether an
+    outbreak is active there (fix #59). Rows inside the outbreak window come
+    first; older ones are historical."""
     data = idsp.load()
-    ours = idsp.network_districts()
+    now = datetime.now(timezone.utc)
+    active = {
+        (o.state_silo, (o.district or "").lower()) for o in await outbreak.active(session, now, state)
+    }
+    rows = idsp.panel_rows(
+        idsp.outbreaks(state),
+        ours=idsp.network_districts(),
+        facility_counts=await _district_facility_counts(session),
+        today=workspace.in_india(now).date(),
+        ttl_days=settings.outbreak_ttl_days,
+        active=active,
+    )
     return OutbreaksOut(
         source=data["source"], source_url=data["source_url"], columns=data["columns"],
-        reports=data["reports"],
-        rows=[
-            OutbreakOut(**r, in_network=(r["state_code"], r["district"].lower()) in ours)
-            for r in idsp.outbreaks(state)
-        ],
+        reports=data["reports"], ttl_days=settings.outbreak_ttl_days,
+        rows=[OutbreakOut(**r) for r in rows],
     )
 
 
@@ -2501,17 +3715,552 @@ class StockingAdviceOut(BaseModel):
     state_code: str
     disease: str
     medicines: list[str]
-    demand_rise_pct: int
     signals: list[str]
     action: str
 
 
 @router.get("/outbreaks/advice", response_model=list[StockingAdviceOut], tags=["outbreaks"])
 async def outbreak_advice(state: str | None = None) -> list[StockingAdviceOut]:
-    """Demo: stocking advice from IDSP outbreaks, the monsoon calendar and a
-    simulated demand trend. Computed on request; nothing is stored."""
+    """Stocking advice from IDSP outbreaks and the monsoon calendar. How much
+    demand rises is not guessed here; declaring the outbreak measures it (#41).
+    Computed on request; nothing is stored."""
     month = datetime.now(timezone.utc).month
     return [StockingAdviceOut(**a) for a in idsp.stocking_advice(state, month)]
+
+
+
+# ================================================= active outbreaks (#41) ===
+# Spec v3 §12.5: an outbreak is a temporary multiplier into the §12.3 solver,
+# not a new subsystem. Declaring one re-plans exactly the medicines its
+# disease drives — single-medicine plans through the same solver and the same
+# approval gate — and ending it re-plans them without the surge.
+
+
+class OutbreakMedicineOut(BaseModel):
+    sku_code: str
+    sku_name: str
+    observed_ratio: float | None
+    multiplier: float | None
+    basis: str | None
+    detail: str
+
+
+class OutbreakWarningOut(BaseModel):
+    outbreak_id: int
+    facility_id: str
+    facility_name: str
+    district: str
+    sku_code: str
+    sku_name: str
+    runs_out_on: date
+    runs_out_without: date
+    basis: str
+    line: str
+
+
+class ActiveOutbreakOut(BaseModel):
+    id: int
+    state: str
+    district: str
+    disease: str
+    source: str
+    source_ref: str | None
+    surge_pct: float | None
+    declared_by: str | None
+    declared_at: datetime | None
+    expires_at: datetime | None
+    facilities: int
+    # Centres whose shelf would already be empty at the surge rate: count them.
+    count_overdue: int
+    # Where the district sits, so the map can ring it (fix #59).
+    lat: float | None = None
+    lng: float | None = None
+    # How many centres run out inside the horizon; the list below names them
+    # only for a reader who may read that district's rows (fix #77).
+    warnings_count: int = 0
+    medicines: list[OutbreakMedicineOut]
+    warnings: list[OutbreakWarningOut]
+
+
+class ActiveOutbreaksOut(BaseModel):
+    ttl_days: int
+    window_days: int
+    min_rise_pct: int
+    max_surge_pct: float
+    diseases: list[str]
+    outbreaks: list[ActiveOutbreakOut]
+
+
+class DeclareOutbreakIn(BaseModel):
+    state: str
+    district: str
+    disease: str
+    # The officer's expected surge, used only when the readings show no rise,
+    # and shown as their assumption wherever it is used.
+    surge_pct: float | None = Field(default=None, ge=0, le=settings.outbreak_max_surge_pct)
+
+
+class DeclaredOutbreakOut(BaseModel):
+    outbreak: ActiveOutbreakOut
+    trips_proposed: int
+    pre_positioning_trips: int
+
+
+def _active_out(view, warnings: list[dict], named: bool = True) -> ActiveOutbreakOut:
+    row = view.row
+    at = geo.district_anchor(row.state_silo or "", row.district or "")
+    count = len(warnings)
+    if not named:
+        warnings = []
+    return ActiveOutbreakOut(
+        warnings_count=count,
+        lat=at[0] if at else None,
+        lng=at[1] if at else None,
+        id=row.id,
+        state=row.state_silo or "",
+        district=row.district or "",
+        disease=row.disease_category or "",
+        source=row.source or "officer",
+        source_ref=row.source_ref,
+        surge_pct=float(row.surge_pct) if row.surge_pct is not None else None,
+        declared_by=row.declared_by,
+        declared_at=row.triggered_at,
+        expires_at=row.expires_at,
+        facilities=len(view.ids),
+        count_overdue=view.overdue,
+        medicines=[OutbreakMedicineOut(**m) for m in view.medicines],
+        warnings=[OutbreakWarningOut(**w) for w in warnings],
+    )
+
+
+@router.get("/outbreaks/active", response_model=ActiveOutbreaksOut, tags=["outbreaks"])
+async def active_outbreaks(
+    state: str | None = None,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> ActiveOutbreaksOut:
+    """Active outbreaks with their surge per medicine and the centres that run
+    out inside the horizon at the surge rate. Each outbreak's reads are bounded
+    by its district's facility ids."""
+    now = datetime.now(timezone.utc)
+    out: list[ActiveOutbreakOut] = []
+    for row in await outbreak.active(session, now, state):
+        view = await outbreak.evaluate(session, row, now)
+        out.append(
+            _active_out(
+                view,
+                await outbreak.warnings(session, view, now),
+                named=can_read_facility_rows(
+                    user, state=row.state_silo or "", district=row.district or ""
+                ),
+            )
+        )
+    return ActiveOutbreaksOut(
+        ttl_days=settings.outbreak_ttl_days,
+        window_days=settings.outbreak_window_days,
+        min_rise_pct=round(settings.outbreak_min_rise * 100),
+        max_surge_pct=settings.outbreak_max_surge_pct,
+        diseases=sorted(idsp.DISEASE_MEDICINES),
+        outbreaks=out,
+    )
+
+
+async def _open_outbreak(
+    session: AsyncSession, state: str, district: str, disease: str, now: datetime
+) -> OutbreakEvent | None:
+    return await session.scalar(
+        select(OutbreakEvent).where(
+            OutbreakEvent.state_silo == state,
+            OutbreakEvent.district == district,
+            OutbreakEvent.disease_category == disease,
+            OutbreakEvent.ended_at.is_(None),
+            OutbreakEvent.expires_at > now,
+        )
+    )
+
+
+async def _replan_medicines(session: AsyncSession, state: str, skus: list[str]) -> list[int]:
+    """Single-medicine plans, one per medicine, each recorded like any plan."""
+    ids: list[int] = []
+    for sku in skus:
+        result = await redistribution.generate_plan(session, state, sku)
+        ids.extend(result.transfer_ids)
+        await events.record(
+            session,
+            events.TRANSFER_PROPOSED,
+            {
+                "state": state,
+                "sku": sku,
+                "transfers": len(result.transfer_ids),
+                "replaced": result.replaced_ids,
+                "triggered_by": "outbreak",
+            },
+            state_silo=state,
+        )
+    await session.commit()
+    return ids
+
+
+@router.post("/outbreaks/declare", response_model=DeclaredOutbreakOut, tags=["outbreaks"])
+async def declare_outbreak(
+    payload: DeclareOutbreakIn,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> DeclaredOutbreakOut:
+    refusal = outbreak.may_declare(user, payload.state, payload.district)
+    if refusal:
+        raise HTTPException(status_code=403, detail=refusal)
+    skus = outbreak.medicines_for(payload.disease)
+    if not skus:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "That disease is not in the disease-to-medicine map, so nothing can be "
+                "pre-positioned for it"
+            ),
+        )
+    if not await outbreak.district_ids(session, payload.state, payload.district):
+        raise HTTPException(status_code=404, detail="No centres in that district")
+
+    now = datetime.now(timezone.utc)
+    row = await _open_outbreak(session, payload.state, payload.district, payload.disease, now)
+    if row is None:
+        row = OutbreakEvent(
+            state_silo=payload.state,
+            district=payload.district,
+            disease_category=payload.disease,
+            source="officer",
+        )
+        session.add(row)
+    # Declaring again refreshes the expectation and the clock; it never adds a
+    # second copy of the same outbreak.
+    row.surge_pct = payload.surge_pct
+    row.declared_by = user.name
+    row.expires_at = now + timedelta(days=settings.outbreak_ttl_days)
+    row.triggered_at = now
+    await session.flush()
+    await events.record(
+        session,
+        events.OUTBREAK_DECLARED,
+        {
+            "outbreak_id": row.id,
+            "state": payload.state,
+            "district": payload.district,
+            "disease": payload.disease,
+            "surge_pct": payload.surge_pct,
+            "declared_by": user.name,
+        },
+        state_silo=payload.state,
+    )
+    await session.commit()
+
+    trip_ids = await _replan_medicines(session, payload.state, skus)
+    trips = await redistribution.list_transfers(session, ids=trip_ids)
+    view = await outbreak.evaluate(session, row, now)
+    return DeclaredOutbreakOut(
+        outbreak=_active_out(view, await outbreak.warnings(session, view, now)),
+        trips_proposed=len(trips),
+        pre_positioning_trips=sum(
+            1 for t in trips if (t.get("rationale") or {}).get("outbreak")
+        ),
+    )
+
+
+class IdspReportIn(BaseModel):
+    pdf_base64: str
+    filename: str | None = Field(default=None, max_length=200)
+
+
+class IdspRowOut(BaseModel):
+    unique_id: str
+    year: int
+    week: int
+    state: str
+    state_code: str | None
+    district: str
+    disease: str
+    cases: int
+    deaths: int
+    start_date: str | None
+    reported_date: str | None
+    status: str | None
+    row_text: str
+    check: dict
+    in_network: bool = False
+    activated: bool = False
+
+
+class IdspReportOut(BaseModel):
+    year: int | None
+    week: int | None
+    source: str | None
+    model: str
+    read_by: str | None
+    read_at: datetime | None
+    cached: bool
+    rows: list[IdspRowOut]
+    dropped: int
+    agrees: int
+    disagrees: int
+    unparsed: int
+    activated: int
+    trips_proposed: int = 0
+
+
+def _idsp_out(report: IdspReport, *, cached: bool, trips: int = 0) -> IdspReportOut:
+    rows = [IdspRowOut(**r) for r in report.rows]
+    verdicts = [r.check.get("verdict") for r in rows]
+    return IdspReportOut(
+        year=report.year, week=report.week, source=report.source, model=report.model,
+        read_by=report.read_by, read_at=report.read_at, cached=cached, rows=rows,
+        dropped=report.dropped or 0,
+        agrees=verdicts.count("agrees"), disagrees=verdicts.count("disagrees"),
+        unparsed=verdicts.count("unparsed"),
+        activated=sum(1 for r in rows if r.activated), trips_proposed=trips,
+    )
+
+
+async def ingest_idsp_pdf(
+    session: AsyncSession,
+    pdf: bytes,
+    *,
+    source: str | None,
+    read_by: str,
+    allowed,
+) -> IdspReportOut:
+    """Read one report with the model, cross-check it, keep it, and turn the
+    rows both readings agree on into active outbreaks (#41). A report already
+    read is returned from the table; the model is never asked twice."""
+    digest = hashlib.sha256(pdf).hexdigest()
+    cached = await session.scalar(select(IdspReport).where(IdspReport.sha256 == digest))
+    if cached is not None:
+        return _idsp_out(cached, cached=True)
+    try:
+        read = await vision.read_idsp_report(pdf)
+    except vision.VisionError as exc:
+        status = 503 if "live model" in str(exc) else 502
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    now = datetime.now(timezone.utc)
+    rows = [{**r, "check": idsp.cross_check(r)} for r in read.rows]
+    touched = await outbreak.activate_idsp(
+        session, rows, now,
+        allowed=allowed,
+    )
+    report = IdspReport(
+        sha256=digest, year=read.year, week=read.week, source=source, model=read.model,
+        read_by=read_by, read_at=now, rows=rows, dropped=read.dropped,
+    )
+    session.add(report)
+    await session.flush()
+    # Retention: the newest reports only, pruned in the same write.
+    keep = select(IdspReport.id).order_by(IdspReport.read_at.desc()).limit(settings.idsp_reports_kept)
+    await session.execute(delete(IdspReport).where(IdspReport.id.not_in(keep)))
+    await events.record(
+        session,
+        events.IDSP_READ,
+        {"year": read.year, "week": read.week, "rows": len(rows), "model": read.model,
+         "activated": [o.id for o in touched]},
+    )
+    await session.commit()
+
+    trips = 0
+    by_state: dict[str, set[str]] = {}
+    for o in touched:
+        by_state.setdefault(o.state_silo or "", set()).update(
+            outbreak.medicines_for(o.disease_category or "")
+        )
+    for state, skus in by_state.items():
+        trips += len(await _replan_medicines(session, state, sorted(skus)))
+    return _idsp_out(report, cached=False, trips=trips)
+
+
+@router.post("/outbreaks/idsp-report", response_model=IdspReportOut, tags=["outbreaks"])
+async def read_idsp_report(
+    payload: IdspReportIn,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> IdspReportOut:
+    """An officer gives the platform an IDSP weekly report PDF; Gemini reads
+    it (fix #42). Public demo accounts read NCDC's latest report instead, so a
+    stranger cannot spend the model's daily quota on uploads."""
+    if user.role not in ("admin", "state_officer"):
+        raise HTTPException(status_code=403, detail="Only state and national officers read IDSP reports")
+    if is_public_demo(user):
+        raise HTTPException(
+            status_code=403,
+            detail="Uploading a report is for officer accounts; the public demo reads NCDC's latest report instead",
+        )
+    try:
+        pdf = base64.b64decode(payload.pdf_base64, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise HTTPException(status_code=422, detail="The report is not valid base64") from exc
+    if not pdf.startswith(b"%PDF"):
+        raise HTTPException(status_code=422, detail="That file is not a PDF")
+    if len(pdf) > vision.MAX_REPORT_BYTES:
+        raise HTTPException(status_code=413, detail="The report is too large")
+    return await ingest_idsp_pdf(
+        session, pdf, source=payload.filename, read_by=user.name,
+        allowed=lambda st, d: can_plan_state(user, st) and demo_may_write(user, state=st, district=d),
+    )
+
+
+# ======================================================== NCDC intake (#57) ===
+# Check-on-use plus a button (Aditya's decision), never a scheduler. Opening
+# the outbreak panel checks NCDC when the last check is over a day old, after
+# the response is sent; an officer may press "Check NCDC now" every few
+# minutes. Only a week newer than the last report read is fetched, and the
+# model reads it once (#42). Every check is an event, so the panel can say
+# when NCDC was last checked and what it found.
+
+_ncdc_lock = asyncio.Lock()
+
+
+async def _last_ncdc_check(session: AsyncSession) -> Event | None:
+    return await session.scalar(
+        select(Event).where(Event.kind == events.IDSP_CHECKED).order_by(Event.created_at.desc()).limit(1)
+    )
+
+
+async def run_ncdc_check(session: AsyncSession, requested_by: str) -> dict:
+    """One check of NCDC's listing, and a read of the newest report if it is
+    new. Rows from an official report activate wherever the network has
+    centres, whoever asked: the report, not the asker, is the authority."""
+    async with _ncdc_lock:
+        payload: dict = {"requested_by": requested_by}
+        try:
+            listed = await ncdc.fetch_latest()
+        except ncdc.NcdcError as exc:
+            listed = None
+            payload.update(status="unreachable", detail=str(exc))
+        if listed is not None:
+            payload.update(
+                year=listed.year, week=listed.week, url=listed.url,
+                uploaded_on=listed.uploaded_on.isoformat(),
+            )
+            last = await session.scalar(
+                select(IdspReport).order_by(IdspReport.year.desc(), IdspReport.week.desc()).limit(1)
+            )
+            last_week = (last.year, last.week) if last and last.year and last.week else None
+            if not ncdc.is_newer((listed.year, listed.week), last_week):
+                payload.update(status="up_to_date")
+            else:
+                try:
+                    pdf = await ncdc.fetch_pdf(listed.url)
+                    out = await ingest_idsp_pdf(
+                        session, pdf, source=listed.url,
+                        read_by=f"NCDC check ({requested_by})", allowed=lambda st, d: True,
+                    )
+                    payload.update(
+                        status="read", rows=len(out.rows), agrees=out.agrees,
+                        activated=out.activated, trips=out.trips_proposed,
+                    )
+                except ncdc.NcdcError as exc:
+                    payload.update(status="found_unread", detail=str(exc))
+                except HTTPException as exc:
+                    payload.update(status="found_unread", detail=str(exc.detail))
+        elif "status" not in payload:
+            payload.update(status="no_reports")
+        await events.record(session, events.IDSP_CHECKED, payload)
+        return payload
+
+
+async def _check_ncdc_in_background(requested_by: str) -> None:
+    async with SessionLocal() as session:
+        last = await _last_ncdc_check(session)
+        if ncdc.check_due(last.created_at if last else None, datetime.now(timezone.utc)):
+            await run_ncdc_check(session, requested_by)
+
+
+class NcdcStatusOut(BaseModel):
+    checked_at: datetime | None
+    result: dict | None
+    checking: bool
+
+
+@router.get("/outbreaks/ncdc-status", response_model=NcdcStatusOut, tags=["outbreaks"])
+async def ncdc_status(
+    background: BackgroundTasks,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> NcdcStatusOut:
+    """When NCDC was last checked and what it said. If that was more than a
+    day ago, a check runs after this response (check-on-use)."""
+    last = await _last_ncdc_check(session)
+    due = ncdc.check_due(last.created_at if last else None, datetime.now(timezone.utc))
+    if due and not _ncdc_lock.locked():
+        background.add_task(_check_ncdc_in_background, user.name)
+    return NcdcStatusOut(
+        checked_at=last.created_at if last else None,
+        result=last.payload if last else None,
+        checking=due or _ncdc_lock.locked(),
+    )
+
+
+@router.post("/outbreaks/ncdc-check", tags=["outbreaks"])
+async def ncdc_check(
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> dict:
+    """"Check NCDC now": an officer's button, at most every few minutes."""
+    if user.role == "facility_user":
+        raise HTTPException(status_code=403, detail="Officers check NCDC for new reports")
+    if _ncdc_lock.locked():
+        raise HTTPException(status_code=409, detail="A check is already running")
+    last = await _last_ncdc_check(session)
+    now = datetime.now(timezone.utc)
+    if not ncdc.may_check_now(last.created_at if last else None, now):
+        wait = math.ceil((ncdc.BUTTON_COOLDOWN - (now - last.created_at)).total_seconds() / 60)
+        raise HTTPException(
+            status_code=429,
+            detail=f"NCDC was checked moments ago; try again in {wait} minute{'' if wait == 1 else 's'}",
+        )
+    result = await run_ncdc_check(session, user.name)
+    return {"checked_at": datetime.now(timezone.utc), "result": result}
+
+
+@router.get("/outbreaks/idsp-reports/latest", response_model=IdspReportOut | None, tags=["outbreaks"])
+async def latest_idsp_report(
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> IdspReportOut | None:
+    report = await session.scalar(
+        select(IdspReport).order_by(IdspReport.read_at.desc()).limit(1)
+    )
+    return _idsp_out(report, cached=True) if report is not None else None
+
+
+@router.post("/outbreaks/{outbreak_id}/end", tags=["outbreaks"])
+async def end_outbreak(
+    outbreak_id: int,
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> dict:
+    row = await session.get(OutbreakEvent, outbreak_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="No such outbreak")
+    refusal = outbreak.may_declare(user, row.state_silo or "", row.district or "")
+    if refusal:
+        raise HTTPException(status_code=403, detail=refusal)
+    if row.ended_at is None:
+        row.ended_at = datetime.now(timezone.utc)
+        await events.record(
+            session,
+            events.OUTBREAK_ENDED,
+            {
+                "outbreak_id": row.id,
+                "state": row.state_silo,
+                "district": row.district,
+                "disease": row.disease_category,
+                "ended_by": user.name,
+            },
+            state_silo=row.state_silo,
+        )
+        await session.commit()
+        await _replan_medicines(
+            session, row.state_silo or "", outbreak.medicines_for(row.disease_category or "")
+        )
+    return {"id": row.id, "ended_at": row.ended_at}
 
 
 # ==================================================== the ingestion spine ===
@@ -2532,6 +4281,12 @@ class SimulatedReadingOut(BaseModel):
     qty: float
     days_of_stock: float | None
     status: str | None
+    # The loop, closed where the sender can see it (fix list #24): the row
+    # written, and what the district map showed for this medicine before it.
+    reading_id: int | None = None
+    qty_before: float | None = None
+    days_before: float | None = None
+    status_before: str | None = None
 
 
 class SimulateOut(BaseModel):
@@ -2543,6 +4298,11 @@ class SimulateOut(BaseModel):
     duplicate: bool
     readings: list[SimulatedReadingOut]
     actions: list[str]
+    # The event the district map and the live feed poll for; None when
+    # nothing was committed.
+    event_id: int | None = None
+    # Rows written other than stock readings, in words: "check-in #412".
+    written: list[str] = []
 
 
 class HandsetOut(BaseModel):
@@ -2581,6 +4341,10 @@ async def facility_handsets(
     facility = await session.get(Facility, facility_id)
     if facility is None:
         raise HTTPException(status_code=404, detail="Facility not found")
+    # A handset is a way to write for its centre, so it is offered only to
+    # whoever may state that centre's facts: its own staff, or a public demo
+    # account inside the sandbox.
+    _require_own_handset(user, facility)
     out: list[HandsetOut] = []
     for role in ("reporter", "supervisor"):
         number = ingest.demo_number(facility_id, role)
@@ -2604,6 +4368,16 @@ async def ingest_simulate(
 ) -> SimulateOut:
     if not settings.demo_mode:
         raise HTTPException(status_code=404, detail="Not found")
+    # The sender decides which centre the message writes for, so the sender
+    # must be a handset registered to a centre this account may state facts
+    # for: a pharmacist, only their own centre's (fix list #24); a public demo
+    # account, a sandbox centre's. An unregistered number belongs to no
+    # centre and writes nothing: the spine refuses it at identify.
+    contact = await ingest.identify(session, payload.sender)
+    if contact is not None:
+        owner = await session.get(Facility, contact.facility_id)
+        if owner is not None:
+            _require_own_handset(user, owner)
     submission = ingest.RawSubmission(
         channel=payload.channel,
         sender_ref=payload.sender,
@@ -2622,11 +4396,20 @@ async def ingest_simulate(
         duplicate=outcome.duplicate,
         readings=[
             SimulatedReadingOut(
-                sku_code=r.sku_code, qty=r.qty, days_of_stock=r.days_of_stock, status=r.status
+                sku_code=r.sku_code,
+                qty=r.qty,
+                days_of_stock=r.days_of_stock,
+                status=r.status,
+                reading_id=r.reading_id,
+                qty_before=r.qty_before,
+                days_before=r.days_before,
+                status_before=r.status_before,
             )
             for r in outcome.readings
         ],
         actions=outcome.actions,
+        event_id=outcome.event_id,
+        written=outcome.written,
     )
 
 
@@ -2785,11 +4568,20 @@ async def list_calls(
     session: AsyncSession = Depends(get_session),
     user: Principal = Depends(current_user),
 ) -> list[dict]:
-    """The call log, for the demo panel. Capped by the table itself."""
+    """The call log, for the demo panel, inside the caller's scope (fix #77):
+    a call is a row about the centre it was placed to. Capped by the table."""
+    narrowed = _narrow_to_rows_scope(user, None, None)
+    if narrowed is None and user.role != "facility_user":
+        return []
+    stmt = select(CallLog).join(Facility, Facility.id == CallLog.facility_id)
+    if user.role == "facility_user":
+        stmt = stmt.where(CallLog.facility_id == user.facility_id)
+    else:
+        stmt = stmt.where(Facility.state_silo == narrowed[0])
+        if narrowed[1]:
+            stmt = stmt.where(Facility.district == narrowed[1])
     rows = (
-        await session.execute(
-            select(CallLog).order_by(CallLog.created_at.desc()).limit(limit)
-        )
+        await session.execute(stmt.order_by(CallLog.created_at.desc()).limit(limit))
     ).scalars().all()
     return [
         {

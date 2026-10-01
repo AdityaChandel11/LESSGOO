@@ -121,6 +121,16 @@ class Settings(BaseSettings):
     # A public showcase deployment may run demo mode on purpose; it has to say
     # so explicitly, so a real deployment can never inherit it by accident.
     allow_public_demo: bool = False
+    # The one district where a public demo account may change anything. Anyone
+    # can enter a demo account without a password, so outside this district
+    # they are view-only (auth.demo_may_write); the drill and the demo requests
+    # all live here, and scripts/reset_nashik.py puts it back afterwards.
+    demo_sandbox_state: str = "MH"
+    demo_sandbox_district: str = "Nashik"
+    # A full re-plan deletes and rewrites a whole state's proposals and takes
+    # seconds of the free instance's CPU. A demo account may start one per
+    # state this often; a single-medicine plan (the drill's) is not limited.
+    demo_plan_interval_minutes: float = 10.0
 
     # --- web ---
     # Built frontend served by this process in production. In development the
@@ -230,6 +240,13 @@ class Settings(BaseSettings):
     # proposals can never consume a pharmacist's allowance.
     max_open_requests_per_facility: int = 3
     max_open_facility_requests_global: int = 100
+    # How long a centre's request waits for the donor's reply before it lapses
+    # (fix list #31). Derived at read time, never written: a lapsed request
+    # stops counting against the centre's cap and cannot be accepted. Half an
+    # hour in the public demo, so a judge's requests do not lock a centre out
+    # for the rest of the day.
+    request_reply_hours: float = 24.0
+    demo_request_reply_minutes: float = 30.0
     # A request raised after the cutoff leaves the next morning; district
     # stores do not load vehicles at night. Both are assumptions, returned to
     # the browser alongside every estimate and shown on screen as assumptions,
@@ -240,6 +257,10 @@ class Settings(BaseSettings):
     # overdue (spec 26.3). Generous on purpose: a batch sitting unconfirmed is
     # a question for the officer, not an accusation against the facility.
     receipt_window_hours: float = 72.0
+    # A photographed stock document older than this is not applied (fix #11):
+    # the shelf figure has probably moved on since, and applying it would
+    # count the same stock twice.
+    stock_photo_max_age_days: int = 7
 
     # --- bed capture (spec 26.2) ---
     # How close a photo or check-in must be to the registered coordinates. GPS
@@ -252,6 +273,25 @@ class Settings(BaseSettings):
     bed_register_tolerance: float = 0.25
     # Below this the model is not sure enough to record a count unreviewed.
     bed_confidence_floor: float = 0.45
+    # A verified ward count older than this is stale and not counted as
+    # available (fix #68). A day, because the verification code changes daily
+    # and a ward is photographed once a day (data-trust-layer.md §2).
+    bed_stale_hours: int = 24
+
+    # --- outbreak pre-positioning (spec v3 §12.5, fix #41) ---
+    # How long a declared outbreak raises demand: the spec's ttl_days=14.
+    outbreak_ttl_days: int = 14
+    # Observed rise = use over the last N days against the N before.
+    outbreak_window_days: int = 14
+    # Below this rise the readings do not show a surge, and only the
+    # officer's stated expectation (labelled an assumption) can set one. A
+    # rule parameter, not a claim about any outbreak.
+    outbreak_min_rise: float = 0.10
+    # The largest expected surge an officer may type, as a percentage.
+    outbreak_max_surge_pct: float = 300.0
+    # IDSP reports read by the model are kept for this many weeks, newest
+    # first, then pruned in the same write, so the table never grows without bound.
+    idsp_reports_kept: int = 12
 
     # --- phone channels (spec 13) ---
     # Salt for hashing inbound phone numbers. Deliberately NOT derived from
