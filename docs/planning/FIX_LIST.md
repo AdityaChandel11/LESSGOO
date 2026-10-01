@@ -783,7 +783,7 @@ When an active outbreak is in the centre's district: "Cholera reported in Nashik
 cover at the surge rate → one-tap "Find supply" / request (#31). Nothing shown when there is no
 outbreak nearby. Same data as the officer view, never a separate copy.
 
-### Fix #59 — Outbreak panel that warns instead of archives  · Tier 1 · small · status: TODO
+### Fix #59 — Outbreak panel that warns instead of archives  · Tier 1 · small · status: DONE dc220b6 (rows grouped recent / historical with age, network centres and medicines; an active outbreak's district is a diamond marker on the map. A row links to the active outbreak above it when one exists, not to a prefilled declare form)
 Sort by recency, then "in network" first; each row → number of network facilities in that
 district + medicines at risk + link to the surge warnings (#41/#45); outbreak districts as a
 map layer; report week + age on every row ("reported 3 weeks ago"). Old rows grouped under
@@ -883,7 +883,7 @@ Summary first: by warehouse/route — % short, units unaccounted, unconfirmed by
 / 14+ days), trend; by district. Cards become drill-down. Plain header: "Warehouse dispatch records
 are simulated in this prototype; in deployment they come from the state's e-Aushadhi/DVDMS system."
 
-### Fix #77 — Data governance tiers, enforced (the premise of "federated")  · Tier 1 · status: TODO  (upgrades #4)
+### Fix #77 — Data governance tiers, enforced (the premise of "federated")  · Tier 1 · status: DONE 075eb38  (upgrades #4. API enforcement only; #77b's database-level enforcement is Tier 2. One labelled exception kept from #74/#82: a public demo administrator reads the centres of the Nashik sandbox so the drill runs — a real national account reads no centre anywhere. A district officer loses the state-wide oversight lists and keeps the trips that touch their district)
 - The challenge asks for national visibility, so **aggregates at national level are legitimate**
   (states already report to MoHFW). What stays in the state: facility-level rows and raw histories.
 - **API enforcement:** admin/national → state and district aggregates + model outputs only; state

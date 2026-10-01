@@ -20,7 +20,7 @@ This is a working prototype on synthetic data. Every facility, stock figure, bed
 | Sent per round | 22,788 bytes (5,697 weights × 4 bytes). 0 facility rows |
 | Google AI | Gemini vision (`gemini-3.1-flash-lite`), Gemini text (`gemini-3.5-flash-lite`), Google Maps Routes and Map Tiles (optional, off on the demo) |
 | Optimiser | OR-Tools SimpleMinCostFlow, greedy fallback |
-| Tests | 808 unit tests, 13 integration check suites |
+| Tests | 845 unit tests, 13 integration check suites |
 | Hosting | One Docker service on Render |
 | Languages | English, with Hindi labels on the main screens and Hindi briefings |
 
@@ -104,7 +104,7 @@ The deployed database is a small free instance, so the rule is: live where an ac
 | AI / Technical Execution (25%) | Gemini reads a ward board into a bed report whose rotating code is checked, reads a bill, slip or register page into stock changes that depend on which document it is, and writes the reason behind each transfer and trust flag. A PyTorch LSTM trains across four state silos on Flower's deployment engine | `backend/app/vision.py`, `tests/test_explanations.py`, `tests/test_beds.py`, `tests/test_stock_photo.py`, `checks/federation.py` |
 | Problem-Solution Fit (20%) | One loop covers the track: stock, beds and attendance in, forecast, outbreak-driven early warning, pre-positioning, donor acceptance, confirmed receipt | `frontend/src/liveloop.tsx`, `backend/app/outbreak.py`, `backend/app/redistribution.py`, `tests/test_outbreak_surge.py` |
 | Depth & Reach (20%) | 3,510 synthetic facilities in 157 districts across 28 states and 8 union territories. Four state silos train the shared model. The officer console works on a phone | `tests/test_seed_geography.py`, `backend/app/geo.py`, Federation tab |
-| Deployability (20%) | One Docker service that runs migrations at start. Every external service has a fallback that needs no credentials. Production refuses to boot with unsafe settings. Roles scoped by the server; public demo accounts confined to a sandbox | `render.yaml`, `checks/platform.py`, `tests/test_api_boundary.py`, `tests/test_auth.py`, `tests/test_demo_sandbox.py` |
+| Deployability (20%) | One Docker service that runs migrations at start. Every external service has a fallback that needs no credentials. Production refuses to boot with unsafe settings. Facility-level rows readable only by the state and district that hold them; public demo accounts confined to a sandbox | `render.yaml`, `checks/platform.py`, `tests/test_api_boundary.py`, `tests/test_governance_tiers.py`, `tests/test_demo_sandbox.py` |
 | Impact (15%) | Officers see a stock-out days before it happens, and audit visits go where the records disagree instead of at random. No figure for lives or money saved is claimed, because synthetic data cannot support one | `backend/app/trust.py`, `tests/test_trust.py`, Data trust tab |
 
 ## Who sees what
@@ -112,11 +112,11 @@ The deployed database is a small free instance, so the rule is: live where an ac
 | Role | Sees | Can do |
 |---|---|---|
 | Pharmacist (facility) | A mobile workspace: Medicines, Orders, Beds, Attendance, plus today's to-do list in English and Hindi (and, written by Gemini, the state's language) and an alert when an outbreak is active in the district. No national map | Submit counts and photographed documents, ask a nearby centre for stock and withdraw the request, accept or decline requests for its stock, confirm receipts |
-| District officer | The dashboard, scoped to their district, with its movements ledger and audit queue | Watch transfers; chase a centre for a report. Cannot report a count, a check-in or a bed figure on a centre's behalf |
-| State officer | The dashboard, scoped to their state, with its ledger, audit queue and federation view | Update recommendations, declare an outbreak, run the Nashik drill |
-| National admin | Every tab, including the full Federation inspector | Everything above, across all states |
+| District officer | The centres of their own district, with its movements ledger and audit queue; district summaries everywhere else | Watch transfers; chase a centre for a report. Cannot report a count, a check-in or a bed figure on a centre's behalf |
+| State officer | The centres of their own state, with its ledger, audit queue and federation view; district summaries for other states | Update recommendations, declare an outbreak, run the Nashik drill |
+| National admin | State and district summaries, outbreak and early-warning figures, the ledger's totals and the full Federation inspector. No centre's own rows | Read the national picture; update a state's recommendations |
 
-Every signed-in role can still open any state's map and facility panels: scope narrows what a role may change, not what it may see. See Known gaps.
+**Facility-level rows stay with the state that holds them.** Asking for a centre outside your scope returns "Held in Maharashtra's store — the national view sees district summaries only", from the server: map pins, the facility panel, trips, ledger rows, the audit queue, named outbreak warnings, the call log and event details all follow one rule (`auth.can_read_facility_rows`), and a test classifies every read route as aggregate or row-level. One labelled exception: on the public demo, the demo administrator also reads the centres of the Nashik sandbox, so the emergency drill can run from that role.
 
 ## Features
 
@@ -288,7 +288,7 @@ To see Gemini live, set `LLM_MODE=live` and `GEMINI_API_KEY` in `.env`, then che
 
 ```bash
 cd backend
-.venv/bin/python -m pytest -q     # 808 unit tests
+.venv/bin/python -m pytest -q     # 845 unit tests
 .venv/bin/python -m checks        # 13 integration suites, against the seeded database
 cd ../frontend && npx tsc -b && npm run build
 ```
@@ -355,7 +355,7 @@ Not yet built for a pilot: one database per state, warehouse stock and indents, 
 Gaps in the current build:
 
 - In this prototype the four silos are separated by state inside one PostgreSQL instance, not in four databases. Each SuperNode reads only its own state's rows.
-- Any signed-in role can open any state's facility-level figures. The separation between states is enforced in the training queries, not yet in what the national role may read.
+- The separation between states is enforced in the API and in the training queries, not yet in the database itself: one database role reads every table.
 - Beds and staff attendance are visible one facility at a time; there is no district or state view of either.
 - The map and national totals show each centre's status as of its last report; only the pharmacist's cards count cover down to today.
 - The Federation tab's wording has not had its plain-language pass; this README's figures are the ones to quote.
@@ -366,7 +366,7 @@ Gaps in the current build:
 Planned:
 
 - District and state views of beds and staff
-- State-scoped reading for the national role
+- Per-state database roles or row-level security, so the database itself refuses a cross-state read
 - Speech-to-text for Hindi voice input
 - Differential privacy and secure aggregation
 - Warehouse stock and indents
