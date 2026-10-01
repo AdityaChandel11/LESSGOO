@@ -377,19 +377,25 @@ export default function NationalMap({
       if (totals.size) {
         focusState = [...totals.entries()].sort((a, b) => b[1] - a[1])[0][0];
       } else {
-        // Zoomed into a gap between district anchors: fall back to the
-        // nearest state centre so the panel never goes blank mid-pan.
+        // Zoomed into a gap between district anchors: fall back to the state
+        // of the nearest district, so the panel never goes blank mid-pan. Not
+        // the nearest state centre: a deep link to Nashik at zoom 11 sits
+        // closer to Dadra & Nagar Haveli's centre than to Maharashtra's (#88).
         const c = map.getCenter();
-        let best: Bucket | null = null;
-        let bestD = Infinity;
-        for (const s of statesRef.current) {
-          const dist = (s.lat - c.lat) ** 2 + (s.lng - c.lng) ** 2;
-          if (dist < bestD) {
-            bestD = dist;
-            best = s;
+        const near = (pts: Bucket[]) => {
+          let best: Bucket | null = null;
+          let bestD = Infinity;
+          for (const x of pts) {
+            const dist = (x.lat - c.lat) ** 2 + (x.lng - c.lng) ** 2;
+            if (dist < bestD) {
+              bestD = dist;
+              best = x;
+            }
           }
-        }
-        focusState = best?.key ?? null;
+          return best;
+        };
+        const district = near(districtsRef.current.filter((d) => d.parent));
+        focusState = district?.parent ?? near(statesRef.current)?.key ?? null;
       }
     }
 

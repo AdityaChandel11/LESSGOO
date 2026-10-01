@@ -66,7 +66,12 @@ export default function AuthGate() {
   // whoever was last signed in on that browser — which is the one thing the
   // front door exists to prevent. It is not a sign-out: the session is intact
   // and one click resumes it.
-  const [entered, setEntered] = useState(false);
+  // A link that names a place in the console (view, facility, medicine or
+  // map position) is someone sending you somewhere: with a live session it
+  // opens there, not at the front door (fix #88).
+  const [entered, setEntered] = useState(() =>
+    ["view", "facility", "sku", "at"].some((k) => new URLSearchParams(window.location.search).has(k)),
+  );
 
   useEffect(() => {
     auth
