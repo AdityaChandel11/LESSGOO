@@ -68,6 +68,19 @@ export function groupTrips(transfers: Transfer[]): Trip[] {
   );
 }
 
+/**
+ * Fix #48: days of stock as a sentence says them. "<1 day → 2.0 days (14 days
+ * with 1 more)" is a formula; a first-time reader needs "has under 1 day
+ * left; this delivery gives it 2 days".
+ */
+export function daysWords(d: number | null | undefined): string {
+  if (d === null || d === undefined) return "an unknown number of days";
+  if (d < 1) return "under 1 day";
+  if (d >= 60) return "more than 60 days";
+  const shown = d < 10 ? Math.round(d * 10) / 10 : Math.round(d);
+  return `${shown} ${shown === 1 ? "day" : "days"}`;
+}
+
 function travelTime(hours: number): string {
   const mins = Math.round(hours * 60);
   if (mins < 60) return `${mins} min`;
@@ -653,39 +666,36 @@ function TripCard({
                   {Math.round(t.qty).toLocaleString("en-IN")} {t.unit}
                 </span>
               </div>
-              <div className="flex items-baseline justify-between gap-2 text-[11px] text-ink-3">
-                <span>
-                  Receiver{" "}
-                  <span style={{ color: STATUS_COLOR[r.recipient_status ?? "at_risk"] }}>
-                    {formatDays(r.recipient_days_before)}
-                  </span>{" "}
-                  → <span className="text-ink-2">{formatDays(r.recipient_days_after_this)}</span>
-                  {others > 0 && (
-                    <span title="Once the other transfers of this medicine to this facility are approved too">
-                      {" "}
-                      ({formatDays(r.recipient_days_after_plan)} with {others} more)
-                    </span>
-                  )}
-                </span>
-                <span
-                  title={
-                    (r.donor_outgoing_transfers ?? 1) > 1
-                      ? `After all ${r.donor_outgoing_transfers} of this donor's transfers of this medicine`
-                      : undefined
-                  }
-                >
-                  donor keeps at least {formatDays(r.donor_days_after_plan)}
-                </span>
-              </div>
+              {/* Fix #48: the same figures, as sentences. */}
+              <p className="text-[11px] leading-snug text-ink-2">
+                {trip.to.name} has{" "}
+                <span className="font-medium" style={{ color: STATUS_COLOR[r.recipient_status ?? "at_risk"] }}>
+                  {daysWords(r.recipient_days_before)}
+                </span>{" "}
+                left. This delivery gives it{" "}
+                <span className="font-medium text-ink">{daysWords(r.recipient_days_after_this)}</span>
+                {others > 0 &&
+                  `; with the ${others} other ${others === 1 ? "delivery" : "deliveries"} of this medicine planned for it, ${daysWords(r.recipient_days_after_plan)}`}
+                .
+              </p>
+              <p className="text-[11px] leading-snug text-ink-3">
+                {trip.from.name} keeps at least {daysWords(r.donor_days_after_plan)}
+                {(r.donor_outgoing_transfers ?? 1) > 1 &&
+                  ` after all ${r.donor_outgoing_transfers} of its deliveries of this medicine`}
+                .
+              </p>
               {r.outbreak && (
                 // Why this trip exists: an active outbreak raised the
                 // receiver's expected use (spec v3 §12.5), on a stated basis.
-                <div className="text-[11px] text-ink-2">
-                  <span className="font-medium text-ink">Pre-positioning</span> for {r.outbreak.disease} in{" "}
-                  {r.outbreak.district} · use ×{r.outbreak.multiplier.toFixed(2)}{" "}
-                  ({r.outbreak.basis === "observed" ? "observed" : "officer's assumption"}) · receiver has{" "}
-                  {formatDays(r.outbreak.recipient_days_without_outbreak)} without the outbreak
-                </div>
+                <p className="text-[11px] leading-snug text-ink-2">
+                  <span className="font-medium text-ink">Sent ahead</span> for {r.outbreak.disease} in{" "}
+                  {r.outbreak.district}: use there is taken as {r.outbreak.multiplier.toFixed(2)} times the usual (
+                  {r.outbreak.basis === "observed"
+                    ? "the rise seen in the district's own readings"
+                    : "the declaring officer's assumption"}
+                  ). Without the outbreak {trip.to.name} would have{" "}
+                  {daysWords(r.outbreak.recipient_days_without_outbreak)}.
+                </p>
               )}
               {t.status !== "proposed" && (
                 <div
