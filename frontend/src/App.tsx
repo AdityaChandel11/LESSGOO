@@ -663,7 +663,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
           </div>
         </div>
 
-        <nav aria-label="Location" className="hidden min-w-0 shrink-0 items-center gap-1.5 text-[13px] whitespace-nowrap md:flex">
+        <nav aria-label="Location" className="hidden min-w-0 items-center gap-1.5 text-[13px] whitespace-nowrap md:flex">
           <button
             onClick={goNational}
             className={`rounded px-1.5 py-0.5 hover:bg-canvas ${activeState ? "text-brand" : "font-medium text-ink"}`}
@@ -686,7 +686,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
           {selected && (
             <>
               <span className="text-ink-3">›</span>
-              <span className="truncate px-1.5 font-medium text-ink">{selected.name}</span>
+              <span className="min-w-0 truncate px-1.5 font-medium text-ink" title={selected.name}>{selected.name}</span>
             </>
           )}
         </nav>
