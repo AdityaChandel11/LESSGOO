@@ -580,6 +580,12 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
 
   return (
     <div className="flex h-full flex-col bg-canvas font-sans text-ink">
+      <a
+        href="#console-panel"
+        className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-[2000] focus:rounded focus:bg-panel focus:px-3 focus:py-2 focus:text-[13px] focus:text-ink"
+      >
+        Skip to main content
+      </a>
       {/* ------------------------------------------------------ top bar --- */}
       <header className="z-[1100] flex shrink-0 flex-wrap items-center gap-x-3 border-b-2 border-brand bg-panel md:h-14 md:flex-nowrap md:pr-4 min-[1360px]:gap-5">
         {/* The mark sits on a solid brand block — flat, no gradient — so the
@@ -749,7 +755,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
 
       <main className="flex min-h-0 flex-1 flex-col md:flex-row">
         {/* ---------------------------------------------------- panel --- */}
-        <aside className="z-[1000] order-2 flex min-h-0 w-full flex-1 flex-col border-r border-line bg-panel md:order-1 md:w-[400px] md:flex-none md:shrink-0">
+        <aside id="console-panel" tabIndex={-1} className="z-[1000] order-2 flex min-h-0 w-full flex-1 flex-col border-r border-line bg-panel md:order-1 md:w-[400px] md:flex-none md:shrink-0">
           {loopFor ? (
             <LiveLoopPanel
               key={`${loopFor.id}:${loopAuto}:${loopKind}`}

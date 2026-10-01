@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import App from "./App";
 import BrandMark from "./Brand";
 import DemoData from "./DemoData";
+import Notices from "./Notices";
 import Landing from "./Landing";
 import SignInPanel from "./SignInPanel";
 import Workspace from "./workspace/Shell";
@@ -24,6 +25,8 @@ const LANDING_PATH = "/";
 const SIGN_IN_PATH = "/sign-in";
 /** Public, with or without a session: how the synthetic data is made (fix #28). */
 const DEMO_DATA_PATH = "/demo-data";
+/** Public: privacy, accessibility, sources, help (fix #91). */
+const NOTICES_PATH = "/notices";
 
 function SignIn({
   onSignedIn,
@@ -129,6 +132,9 @@ export default function AuthGate() {
   // does not wait for the session check.
   if (path === DEMO_DATA_PATH) {
     return <DemoData onBack={() => go(LANDING_PATH)} />;
+  }
+  if (path === NOTICES_PATH) {
+    return <Notices onBack={() => go(LANDING_PATH)} />;
   }
 
   if (checking) {

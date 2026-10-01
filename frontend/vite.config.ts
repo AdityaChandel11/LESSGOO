@@ -7,6 +7,8 @@ import { defineConfig } from "vite";
 // event stream behave exactly as they will when hosted.
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  // The notices page's "Last updated" is the day this build was made (fix #91).
+  define: { __BUILD_DATE__: JSON.stringify(new Date().toISOString().slice(0, 10)) },
   server: {
     port: 5173,
     strictPort: true,

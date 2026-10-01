@@ -30,6 +30,26 @@ export default function DataNotice({ className = "" }: { className?: string }) {
         How this data is generated
         <span className="sr-only"> (opens in a new tab)</span>
       </a>
+      {/* Fix #91: the notices every public health site carries. */}
+      {[
+        ["privacy", "Privacy"],
+        ["accessibility", "Accessibility"],
+        ["sources", "Data sources"],
+        ["help", "Help"],
+      ].map(([id, label]) => (
+        <span key={id}>
+          {" · "}
+          <a
+            href={`/notices#${id}`}
+            target="_blank"
+            rel="noopener"
+            className="text-brand underline-offset-2 hover:underline focus:ring-2 focus:ring-brand/30 focus:outline-none"
+          >
+            {label}
+            <span className="sr-only"> (opens in a new tab)</span>
+          </a>
+        </span>
+      ))}
     </p>
   );
 }

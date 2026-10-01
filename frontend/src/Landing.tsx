@@ -178,6 +178,12 @@ export default function Landing({
 
   return (
     <div className="min-h-full bg-canvas font-sans text-ink">
+      <a
+        href="#landing-main"
+        className="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-[2000] focus:rounded focus:bg-panel focus:px-3 focus:py-2 focus:text-[13px] focus:text-ink"
+      >
+        Skip to main content
+      </a>
       {/* ------------------------------------------------------- the fold --- */}
       <section className="flex min-h-screen flex-col lg:flex-row">
         <div className="relative flex flex-col justify-between overflow-hidden bg-brand px-6 py-10 text-white sm:px-10 lg:w-[46%] lg:shrink-0">
@@ -256,7 +262,7 @@ export default function Landing({
           </svg>
         </div>
 
-        <main className="flex flex-1 flex-col items-center justify-center px-5 py-12 sm:px-8">
+        <main id="landing-main" tabIndex={-1} className="flex flex-1 flex-col items-center justify-center px-5 py-12 sm:px-8">
           {/* Only when a session is already open. The front door is the front
               door even for somebody who has been here before, but it must not
               become a wall they have to sign in through twice. */}
