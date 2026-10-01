@@ -713,6 +713,20 @@ export interface WorkspaceView {
   /** Both languages of the computed line. Always present, needs no key, and is
    *  what the screen shows until somebody asks the model for its version. */
   briefing: Record<string, string>;
+  /** Fix #58: active outbreaks in this centre's district; empty when none. */
+  outbreaks: {
+    outbreak_id: number;
+    headline: string;
+    expires_at: string | null;
+    medicines: {
+      sku_code: string;
+      sku_name: string;
+      multiplier: number | null;
+      basis: "observed" | "assumption" | null;
+      days_now: number | null;
+      days_at_outbreak_rate: number | null;
+    }[];
+  }[];
 }
 
 export interface Briefing {

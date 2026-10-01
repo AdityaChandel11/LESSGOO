@@ -132,6 +132,39 @@ def warning_line(district: str, sku_name: str, surged: date, normal: date) -> st
     )
 
 
+def centre_alert(view: "OutbreakView", cover: dict[str, float | None]) -> dict:
+    """One active outbreak as a centre's staff see it (fix #58): what was
+    reported, the medicines it drives, and this centre's own days of cover at
+    the outbreak rate. `cover` is the centre's as-of-now cover per medicine."""
+    row = view.row
+    source = (
+        "IDSP report {0}".format(row.source_ref or "")
+        if row.source == "idsp"
+        else "declared by {0}".format(row.declared_by or "an officer")
+    )
+    medicines = []
+    for m in view.medicines:
+        days = cover.get(m["sku_code"])
+        medicines.append({
+            "sku_code": m["sku_code"],
+            "sku_name": m["sku_name"],
+            "multiplier": m["multiplier"],
+            "basis": m["basis"],
+            "days_now": round(days, 1) if days is not None else None,
+            "days_at_outbreak_rate": (
+                round(days / m["multiplier"], 1) if days is not None and m["multiplier"] else None
+            ),
+        })
+    return {
+        "outbreak_id": row.id,
+        "headline": "{0} reported in {1} district ({2})".format(
+            row.disease_category, row.district, source.strip()
+        ),
+        "expires_at": row.expires_at,
+        "medicines": medicines,
+    }
+
+
 def may_declare(p: Principal, state: str, district: str) -> str | None:
     """None when allowed, else the refusal. Declaring re-plans the state's
     medicines, so it takes the same right as a plan, and a public demo account

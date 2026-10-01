@@ -954,6 +954,9 @@ class WorkspaceOut(BaseModel):
     # Both languages of the computed line, always present and needing no key.
     # The screen renders this on load; the model is an overlay on top of it.
     briefing: dict[str, str]
+    # Active outbreaks in this centre's district, with its own cover at the
+    # outbreak rate (fix #58). Empty when there is none: nothing is shown.
+    outbreaks: list[dict] = []
 
 
 def _require_demo_write(user: Principal, facility: Facility) -> None:
@@ -1089,8 +1092,18 @@ async def facility_workspace(
             )
         )
 
+    alerts = [
+        outbreak.centre_alert(
+            await outbreak.evaluate(session, row, now),
+            {r.sku_code: r.days_of_stock for r in rows},
+        )
+        for row in await outbreak.active(session, now, facility.state_silo)
+        if row.district == facility.district
+    ]
+
     return WorkspaceOut(
         facility=_to_out(snap),
+        outbreaks=alerts,
         skus=rows,
         open_requests=open_here,
         max_open_requests=settings.max_open_requests_per_facility,

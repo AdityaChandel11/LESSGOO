@@ -164,3 +164,18 @@ def test_no_random_generator_left_in_the_outbreak_code():
     for name in ("idsp.py", "outbreak.py"):
         source = (Path(__file__).resolve().parents[1] / "app" / name).read_text(encoding="utf-8")
         assert "import random" not in source and "random." not in source, name
+
+
+def test_a_centre_sees_its_own_cover_at_the_outbreak_rate():
+    from app.models import OutbreakEvent
+
+    row = OutbreakEvent(id=3, state_silo="MH", district="Nashik", disease_category="Cholera",
+                        source="idsp", source_ref="MH/NSK/2026/38/1021")
+    view = outbreak.OutbreakView(row=row, ids=["F"], surges=[], medicines=[
+        {"sku_code": "ORS", "sku_name": "Oral Rehydration Salts", "multiplier": 2.0, "basis": "assumption"},
+        {"sku_code": "ZINC", "sku_name": "Zinc", "multiplier": None, "basis": None},
+    ])
+    alert = outbreak.centre_alert(view, {"ORS": 9.0, "ZINC": 12.0})
+    assert alert["headline"] == "Cholera reported in Nashik district (IDSP report MH/NSK/2026/38/1021)"
+    assert alert["medicines"][0]["days_at_outbreak_rate"] == 4.5
+    assert alert["medicines"][1]["days_at_outbreak_rate"] is None

@@ -328,6 +328,47 @@ export default function Medicines({
 
   return (
     <>
+      {/* Fix #58: shown only when an outbreak is active in this district —
+          the same rows the officer's panel reads, never a separate copy. */}
+      {view.outbreaks.map((o) => (
+        <section
+          key={o.outbreak_id}
+          role="alert"
+          className="mb-3 rounded-lg border border-risk/40 bg-risk/5 px-3.5 py-3"
+        >
+          <h2 className="text-[13px] font-semibold text-ink">{o.headline}</h2>
+          <p className="mt-0.5 text-[11.5px] text-ink-2">
+            प्रकोप की सूचना · Expected use is raised for these medicines until the outbreak ends.
+          </p>
+          <ul className="mt-1.5 space-y-1">
+            {o.medicines.map((m) => {
+              const s = view.skus.find((x) => x.sku_code === m.sku_code);
+              return (
+                <li key={m.sku_code} className="flex items-baseline justify-between gap-2 text-[12px]">
+                  <span className="text-ink">
+                    <span className="font-medium">{m.sku_name}</span>
+                    {m.multiplier !== null ? (
+                      <span className="text-ink-2">
+                        {" "}
+                        · {formatDays(m.days_at_outbreak_rate)} at the outbreak rate ({formatDays(m.days_now)} usually
+                        {m.basis === "assumption" ? "; the rise is the officer's assumption" : "; rise observed in this district"})
+                      </span>
+                    ) : (
+                      <span className="text-ink-3"> · no rise expected yet</span>
+                    )}
+                  </span>
+                  {s && m.multiplier !== null && (
+                    <button onClick={() => openSupply(s)} className="shrink-0 font-medium text-brand hover:underline">
+                      {both("findSupply")}
+                    </button>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ))}
+
       <Briefing facilityId={facilityId} computed={view.briefing} />
 
       <StockPhoto facilityId={facilityId} onCommitted={onChanged} />
