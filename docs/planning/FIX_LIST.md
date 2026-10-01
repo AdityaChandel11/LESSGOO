@@ -650,7 +650,7 @@ warehouse". Widen drill sandbox to Nashik + one neighbouring district (reset scr
 both). If cross-district trips don't occur naturally, don't fake them — say why; the unmet
 list carries the escalation story.
 
-### Fix #39 — Redistribution tab = oversight, not an approval queue  · Tier 1 · status: TODO
+### Fix #39 — Redistribution tab = oversight, not an approval queue  · Tier 1 · status: DONE 31c60ee
 1. Plain header: "The system recommends 108 transfers in Maharashtra, computed 14:02 from
    stock as of today. Each goes to the donor centre to accept — nothing moves without them."
 2. "Re-run plan" → **"Update recommendations"** + "Last computed 14:02 · 37 stock reports
@@ -729,7 +729,8 @@ receiving stock.
   → stock moves; prints each API call. Honest and strong — but no outbreak in it, and it
   triggers #37's deletion bug.
 
-### Fix #41 — Outbreak → surge → warning → plan, computed  · Tier 1 (core of the challenge) · status: TODO
+### Fix #41 — Outbreak → surge → warning → plan, computed  · Tier 1 (core of the challenge) · status: DONE 0139405
+(Which medicines: idsp.DISEASE_MEDICINES; how much: observed 14-day rise ≥ 10%, else the officer's assumption — the spec's commodity multipliers are not used. Declaring takes can_plan_state.)
 Read v3 §12.5 first. An active outbreak (IDSP row or officer-declared) applies a temporary
 demand multiplier to mapped medicines in that district; days of cover recomputes; warnings
 read "Nashik · ORS · runs out 4 Oct (19 Oct without the outbreak)"; solver raises target
@@ -737,12 +738,13 @@ cover there → pre-positioning trips. Multiplier source must be honest: (a) dis
 observed 14-day consumption rise where data shows one, else (b) officer-set expected surge,
 labelled an assumption. **Remove the RNG percentage.**
 
-### Fix #42 — Gemini reads the IDSP report  · Tier 1 · spike first · status: TODO
+### Fix #42 — Gemini reads the IDSP report  · Tier 1 · spike first · status: BLOCKED (code 9fcdcc3; live spike needs GEMINI_API_KEY — BLOCKERS.md)
 Officer uploads this week's IDSP PDF → Gemini extracts rows (state, district, disease, cases,
 deaths, dates, status) → regex parser cross-checks; disagreements flagged → rows feed #41.
 Load-bearing Gemini: remove it and "new report in → warnings out" disappears.
 
-### Fix #43 — Fresh outbreak data  · Tier 1 · NEEDS ADITYA'S OK to download · status: TODO
+### Fix #43 — Fresh outbreak data  · Tier 1 · NEEDS ADITYA'S OK to download · status: DONE 18a9393
+(Weeks 31–32/2026 parsed; the 2026 layout needed a broken-date fix. All 95 rows are past the 14-day window, and the panel says so.)
 Fetch the latest available IDSP reports (ask before downloading). Until then label old rows
 "historical report used to demonstrate the pipeline".
 
@@ -787,7 +789,8 @@ district + medicines at risk + link to the surge warnings (#41/#45); outbreak di
 map layer; report week + age on every row ("reported 3 weeks ago"). Old rows grouped under
 "Historical" (#43). Remove the RNG percentage (#41).
 
-### Fix #44 — Drill becomes outbreak-driven  · Tier 1 · after #37, #38, #41 · status: TODO
+### Fix #44 — Drill becomes outbreak-driven  · Tier 1 · after #37, #38, #41 · status: DONE 8f339bb
+(Checked locally end to end: declare → 50 warnings → 52 pre-positioning trips → accept → dispatch → receipt. Follows a trip inside Nashik until #38 widens the sandbox.)
 "Simulate emergency": pick/declare an outbreak → surge (#41) → warnings → plan (cross-district
 via #38's wider sandbox) → donor accepts → dispatch → receipt. If not outbreak-driven, rename
 "Stock-out drill".
@@ -992,7 +995,7 @@ Map layer switch **Medicines | Beds | Staff**. Beds = #65 aggregates. Staff = pe
 centres with verified staff present today, share verified vs unverified vs no check-in, "no one
 verified present" list — counts only, never names (district officer sees per-centre counts, #20).
 
-### Fix #84 — Make the forecast visible  · Tier 1 · status: TODO
+### Fix #84 — Make the forecast visible  · Tier 1 · status: DONE a722728
 Facility panel and PHC medicine card: small chart of the last 28 days' use + next 7 days forecast vs
 burn-rate line, model version and age, "trained across 4 states". For the other 32 states and 6 SKUs the
 model never saw: "burn rate — this state/medicine is not in the shared model yet" (#55). Feeds #45.
