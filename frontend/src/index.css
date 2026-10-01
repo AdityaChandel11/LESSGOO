@@ -45,6 +45,14 @@ body {
   }
 }
 
+/* The Federation view is the centre of the product, so it reads at a larger
+   size than the side lists once it has the wider panel. */
+@media (min-width: 768px) {
+  .fed-panel {
+    zoom: 1.12;
+  }
+}
+
 /* ------------------------------------------------------------ map chrome --- */
 
 .leaflet-container {

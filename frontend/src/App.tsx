@@ -820,7 +820,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
 
       <main className="flex min-h-0 flex-1 flex-col md:flex-row">
         {/* ---------------------------------------------------- panel --- */}
-        <aside id="console-panel" tabIndex={-1} className="z-[1000] order-2 flex w-full flex-1 flex-col border-r md:min-h-0 md:overflow-y-auto border-line bg-panel md:order-1 md:w-[400px] md:flex-none md:shrink-0">
+        <aside id="console-panel" tabIndex={-1} className={`z-[1000] order-2 flex w-full flex-1 flex-col border-r md:min-h-0 md:overflow-y-auto border-line bg-panel md:order-1 md:flex-none md:shrink-0 ${mode === "federation" && !loopFor ? "md:w-[560px]" : "md:w-[400px]"}`}>
           {loopFor ? (
             <LiveLoopPanel
               key={`${loopFor.id}:${loopAuto}:${loopKind}`}

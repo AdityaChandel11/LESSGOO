@@ -414,10 +414,12 @@ export function FederationPanel({
   const beats = data?.final_improvement_pct != null && data.final_improvement_pct > 0;
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <div className="border-b border-line px-3 py-2.5">
+    // One scroller: the side panel itself. The results used to sit in a
+    // short window of their own under the header and the forecast strip.
+    <div className="fed-panel flex flex-col">
+      <div className="border-b border-line px-4 py-3">
         <div className="flex items-start justify-between gap-2">
-          <h2 className="text-[13px] font-semibold text-ink">Federated training · संघीय प्रशिक्षण</h2>
+          <h2 className="text-[16px] font-semibold tracking-tight text-ink">Federated training · संघीय प्रशिक्षण</h2>
           <div role="group" aria-label="Wording" className="flex shrink-0 gap-1">
             {(["official", "technical"] as Voice[]).map((v) => (
               <button
@@ -510,7 +512,7 @@ export function FederationPanel({
         )}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div>
         {error ? (
           <p className="p-3 text-[12.5px] text-crit">{error}</p>
         ) : loading && !data ? (

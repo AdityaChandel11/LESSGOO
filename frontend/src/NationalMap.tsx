@@ -525,6 +525,9 @@ export default function NationalMap({
     layerRef.current = L.layerGroup().addTo(map);
     outbreakLayerRef.current = L.layerGroup().addTo(map);
     mapRef.current = map;
+    // The side panel changes width between views; Leaflet has to be told.
+    const resized = new ResizeObserver(() => map.invalidateSize());
+    resized.observe(hostRef.current);
 
     // Tier switches happen on every zoom frame, not at the end of the
     // animation — otherwise a fly-out shows stale facility dots for a second
@@ -579,6 +582,7 @@ export default function NationalMap({
     return () => {
       if (moveTimerRef.current) window.clearTimeout(moveTimerRef.current);
       abortRef.current?.abort();
+      resized.disconnect();
       map.remove();
       mapRef.current = null;
       layerRef.current = null;
