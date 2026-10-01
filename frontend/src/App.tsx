@@ -645,10 +645,12 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
         Skip to main content
       </a>
       {/* ------------------------------------------------------ top bar --- */}
-      <header className="z-[1100] flex shrink-0 flex-wrap items-center gap-x-3 border-b-2 border-brand bg-panel md:h-14 md:flex-nowrap md:pr-4 min-[1360px]:gap-5">
+      {/* Below 1360px (a laptop at 125-150% zoom) the controls take a second
+          row instead of running off the right edge. */}
+      <header className="z-[1100] flex shrink-0 flex-wrap items-center gap-x-3 border-b-2 border-brand bg-panel min-[1360px]:h-14 min-[1360px]:flex-nowrap min-[1360px]:pr-4 min-[1360px]:gap-5">
         {/* The mark sits on a solid brand block — flat, no gradient — so the
             product reads as one identity before any data does. */}
-        <div className="flex h-12 shrink-0 items-center gap-2.5 bg-brand pr-4 pl-4 whitespace-nowrap text-white md:h-full">
+        <div className="flex h-12 shrink-0 items-center gap-2.5 bg-brand pr-4 pl-4 whitespace-nowrap text-white min-[1360px]:h-full">
           <svg width="28" height="28" viewBox="0 0 26 26" aria-hidden="true">
             <rect width="26" height="26" rx="6" fill="#fff" />
             <path d="M13 6v14M6 13h14" stroke="#0b3d5c" strokeWidth="3" strokeLinecap="round" />
@@ -663,7 +665,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
           </div>
         </div>
 
-        <nav aria-label="Location" className="hidden min-w-0 items-center gap-1.5 text-[13px] whitespace-nowrap md:flex">
+        <nav aria-label="Location" className="hidden min-w-0 items-center gap-1.5 overflow-hidden text-[13px] whitespace-nowrap md:flex">
           <button
             onClick={goNational}
             className={`rounded px-1.5 py-0.5 hover:bg-canvas ${activeState ? "text-brand" : "font-medium text-ink"}`}
@@ -691,7 +693,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
           )}
         </nav>
 
-        <div className="order-last flex w-full flex-wrap items-center gap-2 px-3 py-2 md:order-none md:ml-auto md:w-auto md:flex-nowrap md:p-0 min-[1500px]:gap-3">
+        <div className="order-last flex w-full flex-wrap items-center gap-2 border-t border-line px-3 py-2 min-[1360px]:order-none min-[1360px]:ml-auto min-[1360px]:w-auto min-[1360px]:flex-nowrap min-[1360px]:border-t-0 min-[1360px]:p-0 min-[1500px]:gap-3">
           <label className="md:hidden">
             <span className="sr-only">View</span>
             <select
@@ -749,7 +751,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
           </label>
 
           <span
-            className="hidden rounded-md border border-line px-2 py-1 text-[11px] whitespace-nowrap text-ink-2 md:inline"
+            className="hidden rounded-md border border-line px-2 py-1 text-[11px] whitespace-nowrap text-ink-2 min-[1360px]:inline"
             title={`District locations are real. Facility positions and stock levels are simulated: ${SEED_RULES.seededCentres.toLocaleString("en-IN")} synthetic centres, a sample for the demo, not India's real network.`}
           >
             Simulated data
@@ -820,7 +822,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
 
       <main className="flex min-h-0 flex-1 flex-col md:flex-row">
         {/* ---------------------------------------------------- panel --- */}
-        <aside id="console-panel" tabIndex={-1} className={`z-[1000] order-2 flex w-full flex-1 flex-col border-r md:min-h-0 md:overflow-y-auto border-line bg-panel md:order-1 md:flex-none md:shrink-0 ${mode === "federation" && !loopFor ? "md:w-[560px]" : "md:w-[400px]"}`}>
+        <aside id="console-panel" tabIndex={-1} className={`panel-scroll z-[1000] order-2 flex w-full flex-1 flex-col border-r md:min-h-0 md:overflow-y-auto border-line bg-panel md:order-1 md:flex-none md:shrink-0 ${mode === "federation" && !loopFor ? "md:w-[560px]" : "md:w-[400px]"}`}>
           {loopFor ? (
             <LiveLoopPanel
               key={`${loopFor.id}:${loopAuto}:${loopKind}`}
