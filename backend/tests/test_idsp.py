@@ -65,9 +65,8 @@ def test_the_committed_file_keeps_only_structured_fields():
     assert data["rows"] and all(set(r) == keys for r in data["rows"])
 
 
-def test_the_endpoint_filters_by_state():
-    out = asyncio.run(api.outbreaks("KL"))
-    assert out.rows and all(r.state_code == "KL" for r in out.rows)
+# The endpoint's state filter is pinned in tests/test_outbreak_panel.py, with
+# the facility counts and active outbreaks it now reads (fix #59).
 
 
 # --------------------------------------------------- the 2026 layout (#43) ---

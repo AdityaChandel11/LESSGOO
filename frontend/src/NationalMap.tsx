@@ -78,6 +78,8 @@ interface Props {
    *  tab is open so the four silos are visible on the country, not only in a
    *  table beside it. */
   siloStates?: string[];
+  /** Districts with an active outbreak (fix #59), marked at every zoom. */
+  outbreakDistricts?: OutbreakMark[];
   /** Null until runtime config has loaded. */
   basemap?: { mode: "osm" | "google"; key: string } | null;
   onBasemapFallback?: (reason: string) => void;
@@ -90,6 +92,30 @@ const ROUTE_COLOR = { proposed: "#0b3d5c", approved: "#1b9150", mixed: "#0b3d5c"
 /** The ring marking a state that trains the shared model. Brand navy, so it
  *  reads as chrome rather than joining the three status colours. */
 const SILO_RING = "#0b3d5c";
+
+export interface OutbreakMark {
+  id: number;
+  lat: number;
+  lng: number;
+  /** "Cholera · Nashik" — the tooltip and the accessible name. */
+  label: string;
+}
+
+/** An active outbreak's district: a navy diamond outline, a different shape
+ *  from every stock marker so it is not read as a fourth status colour. */
+function outbreakIcon(label: string): L.DivIcon {
+  return L.divIcon({
+    className: "",
+    iconSize: [26, 26],
+    iconAnchor: [13, 13],
+    html: `<svg width="26" height="26" viewBox="0 0 26 26" role="img" aria-label="Active outbreak: ${label.replace(/"/g, "&quot;")}">
+      <rect x="5" y="5" width="16" height="16" transform="rotate(45 13 13)" fill="#ffffff" fill-opacity="0.85"
+        stroke="${SILO_RING}" stroke-width="2.5"/>
+      <rect x="11.75" y="7.5" width="2.5" height="7" fill="${SILO_RING}"/>
+      <rect x="11.75" y="16" width="2.5" height="2.5" fill="${SILO_RING}"/>
+    </svg>`,
+  });
+}
 // Past this many trips, per-route arrowheads become noise; only the highlighted
 // route keeps one.
 const MAX_ARROWS = 120;
@@ -207,6 +233,7 @@ export default function NationalMap({
   highlightRouteId = null,
   initialView = null,
   siloStates,
+  outbreakDistricts,
   basemap = null,
   onBasemapFallback,
   onView,
@@ -216,6 +243,7 @@ export default function NationalMap({
   const hostRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
   const layerRef = useRef<L.LayerGroup | null>(null);
+  const outbreakLayerRef = useRef<L.LayerGroup | null>(null);
   const routesLayerRef = useRef<L.LayerGroup | null>(null);
   const routesRendererRef = useRef<L.Canvas | null>(null);
 
@@ -479,6 +507,7 @@ export default function NationalMap({
     routesLayerRef.current = L.layerGroup().addTo(map);
 
     layerRef.current = L.layerGroup().addTo(map);
+    outbreakLayerRef.current = L.layerGroup().addTo(map);
     mapRef.current = map;
 
     // Tier switches happen on every zoom frame, not at the end of the
@@ -537,6 +566,7 @@ export default function NationalMap({
       map.remove();
       mapRef.current = null;
       layerRef.current = null;
+      outbreakLayerRef.current = null;
       routesLayerRef.current = null;
       routesRendererRef.current = null;
       pinMarkers.clear();
@@ -703,6 +733,26 @@ export default function NationalMap({
   useEffect(() => {
     if (mapRef.current && tierFor(mapRef.current.getZoom()) === "state") draw();
   }, [siloStates]);
+
+  // Fix #59: districts with an active outbreak, on a layer of their own so a
+  // redraw of the stock markers never drops them. Keyed on the ids and
+  // labels, not the array, which is rebuilt on every poll.
+  const outbreakKey = (outbreakDistricts ?? []).map((o) => `${o.id}:${o.label}`).join("|");
+  useEffect(() => {
+    const layer = outbreakLayerRef.current;
+    if (!layer) return;
+    layer.clearLayers();
+    for (const o of outbreakDistricts ?? []) {
+      L.marker([o.lat, o.lng], {
+        icon: outbreakIcon(o.label),
+        interactive: true,
+        keyboard: false,
+        zIndexOffset: 500,
+      })
+        .bindTooltip(`Active outbreak: ${o.label}`, { direction: "top", offset: [0, -12] })
+        .addTo(layer);
+    }
+  }, [outbreakKey]);
 
   useEffect(() => {
     if (flyTarget && mapRef.current) {

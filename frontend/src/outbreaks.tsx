@@ -625,6 +625,18 @@ function Freshness({ data, ttlDays }: { data: Outbreaks; ttlDays: number }) {
   );
 }
 
+function ago(days: number): string {
+  if (days < 14) return `${days} day${days === 1 ? "" : "s"} ago`;
+  const weeks = Math.round(days / 7);
+  return `${weeks} weeks ago`;
+}
+
+/**
+ * Fix #59: a warning, not an archive. Rows that began inside the outbreak
+ * window come first; older ones are grouped as historical and say so. Every
+ * row carries its report week and age, the network's centres in that
+ * district, and the medicines its disease drives.
+ */
 function IdspTable({
   data,
   state,
@@ -639,40 +651,78 @@ function IdspTable({
   if (data.rows.length === 0) {
     return <p className="mt-1.5 text-[11.5px] text-ink-2">No outbreak in these reports for {stateLabel}.</p>;
   }
-  const rows = open ? data.rows : data.rows.slice(0, SHOWN);
+  // The server sorts recent first, so the historical rows are the tail.
+  const recent = data.rows.filter((r) => !r.historical);
+  const historical = data.rows.filter((r) => r.historical);
+  const shownHistorical = open ? historical : historical.slice(0, Math.max(0, SHOWN - recent.length));
+
+  const item = (r: Outbreaks["rows"][number]) => (
+    <li key={r.unique_id} className="border-t border-line py-1 text-[11px] leading-snug" title={r.unique_id}>
+      <div className="flex items-baseline justify-between gap-2">
+        <span>
+          <span className="font-medium text-ink">{r.disease}</span>{" "}
+          <span className="text-ink-2">
+            · {r.district}
+            {!state && `, ${r.state_code ?? r.state}`}
+          </span>
+        </span>
+        <span className="shrink-0 font-mono tabular-nums text-ink">
+          {r.cases} cases
+          {r.deaths > 0 && <span className="text-crit"> · {r.deaths} deaths</span>}
+        </span>
+      </div>
+      <p className="text-[10.5px] text-ink-3">
+        IDSP week {r.week}/{r.year}
+        {r.start_date
+          ? ` · began ${day(r.start_date)}${r.age_days != null ? `, ${ago(r.age_days)}` : ""}`
+          : " · start date not stated"}
+        {" · "}
+        {r.status ?? "status not stated"}
+      </p>
+      <p className="text-[10.5px] text-ink-2">
+        {r.in_network ? (
+          <span className="font-medium text-brand">
+            {r.facilities} network centre{r.facilities === 1 ? "" : "s"} in this district
+          </span>
+        ) : (
+          "No network centres in this district"
+        )}
+        {r.medicines.length > 0 && ` · drives ${r.medicines.join(", ")}`}
+        {r.active && (
+          <span className="ml-1 rounded border border-brand/40 px-1 text-[9.5px] font-medium text-brand">
+            active now — warnings above
+          </span>
+        )}
+      </p>
+    </li>
+  );
+
   return (
-    <table className="mt-1.5 w-full text-[11px]">
-      <thead>
-        <tr className="text-left text-ink-3">
-          <th className="py-0.5 font-medium">{data.columns[0]}</th>
-          <th className="py-0.5 font-medium">District</th>
-          <th className="py-0.5 text-right font-medium">Cases</th>
-          <th className="py-0.5 text-right font-medium">Deaths</th>
-          <th className="py-0.5 pl-2 font-medium">Status</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((r) => (
-          <tr
-            key={r.unique_id}
-            className="border-t border-line align-top"
-            title={`${r.unique_id} · ${data.columns[3]}: ${day(r.start_date)}`}
-          >
-            <td className="py-1 font-medium text-ink">{r.disease}</td>
-            <td className="py-1 text-ink-2">
-              {r.district}
-              {!state && <span className="text-ink-3">, {r.state_code ?? r.state}</span>}
-              {r.in_network && <span className="ml-1 text-[10px] font-medium text-brand">in network</span>}
-            </td>
-            <td className="py-1 text-right font-mono tabular-nums text-ink">{r.cases}</td>
-            <td className={`py-1 text-right font-mono tabular-nums ${r.deaths ? "text-crit" : "text-ink-3"}`}>
-              {r.deaths}
-            </td>
-            <td className="py-1 pl-2 text-ink-2">{r.status ?? "not stated"}</td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <div className="mt-1.5">
+      <h4 className="text-[11px] font-semibold text-ink">
+        Began in the last {data.ttl_days} days{" "}
+        <span className="font-mono text-[10.5px] font-normal text-ink-3">{recent.length}</span>
+      </h4>
+      {recent.length === 0 ? (
+        <p className="text-[11px] text-ink-2">
+          None. No outbreak in these reports for {stateLabel} began in the last {data.ttl_days} days.
+        </p>
+      ) : (
+        <ul>{recent.map(item)}</ul>
+      )}
+      {historical.length > 0 && (
+        <>
+          <h4 className="mt-1.5 text-[11px] font-semibold text-ink">
+            Historical · पुरानी रिपोर्ट{" "}
+            <span className="font-mono text-[10.5px] font-normal text-ink-3">{historical.length}</span>
+          </h4>
+          <p className="text-[10.5px] text-ink-3">
+            Older than {data.ttl_days} days: shown as the record NCDC published, not as a current warning.
+          </p>
+          <ul>{shownHistorical.map(item)}</ul>
+        </>
+      )}
+    </div>
   );
 }
 

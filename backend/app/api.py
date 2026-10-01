@@ -37,6 +37,7 @@ from . import (
     earlywarning,
     events,
     federation_live,
+    geo,
     idsp,
     movements,
     ncdc,
@@ -3211,6 +3212,12 @@ class OutbreakOut(BaseModel):
     reported_date: str | None
     status: str | None
     in_network: bool
+    # Fix #59: what makes a report row a warning.
+    facilities: int = 0
+    medicines: list[str] = []
+    age_days: int | None = None
+    historical: bool = True
+    active: bool = False
 
 
 class OutbreaksOut(BaseModel):
@@ -3219,6 +3226,8 @@ class OutbreaksOut(BaseModel):
     columns: list[str]
     reports: list[dict]
     rows: list[OutbreakOut]
+    # A row older than this many days is historical, not a current warning.
+    ttl_days: int = 14
 
 
 class NextOutbreakOut(BaseModel):
@@ -3290,19 +3299,42 @@ async def next_warnings(
     )
 
 
+async def _district_facility_counts(session: AsyncSession) -> dict[tuple[str, str], int]:
+    """Centres per (state, district): one grouped read of the facility list."""
+    rows = await session.execute(
+        select(Facility.state_silo, Facility.district, func.count()).group_by(
+            Facility.state_silo, Facility.district
+        )
+    )
+    return {(s, d): n for s, d, n in rows.all()}
+
+
 @router.get("/outbreaks", response_model=OutbreaksOut, tags=["outbreaks"])
-async def outbreaks(state: str | None = None) -> OutbreaksOut:
+async def outbreaks(
+    state: str | None = None, session: AsyncSession = Depends(get_session)
+) -> OutbreaksOut:
     """Outbreaks from the IDSP Weekly Outbreak Report, parsed once from the
-    published PDFs into a committed file. No database read, no polling."""
+    published PDFs into a committed file — each row with its age, the network's
+    centres in its district, the medicines its disease drives and whether an
+    outbreak is active there (fix #59). Rows inside the outbreak window come
+    first; older ones are historical."""
     data = idsp.load()
-    ours = idsp.network_districts()
+    now = datetime.now(timezone.utc)
+    active = {
+        (o.state_silo, (o.district or "").lower()) for o in await outbreak.active(session, now, state)
+    }
+    rows = idsp.panel_rows(
+        idsp.outbreaks(state),
+        ours=idsp.network_districts(),
+        facility_counts=await _district_facility_counts(session),
+        today=workspace.in_india(now).date(),
+        ttl_days=settings.outbreak_ttl_days,
+        active=active,
+    )
     return OutbreaksOut(
         source=data["source"], source_url=data["source_url"], columns=data["columns"],
-        reports=data["reports"],
-        rows=[
-            OutbreakOut(**r, in_network=(r["state_code"], r["district"].lower()) in ours)
-            for r in idsp.outbreaks(state)
-        ],
+        reports=data["reports"], ttl_days=settings.outbreak_ttl_days,
+        rows=[OutbreakOut(**r) for r in rows],
     )
 
 
@@ -3369,6 +3401,9 @@ class ActiveOutbreakOut(BaseModel):
     facilities: int
     # Centres whose shelf would already be empty at the surge rate: count them.
     count_overdue: int
+    # Where the district sits, so the map can ring it (fix #59).
+    lat: float | None = None
+    lng: float | None = None
     medicines: list[OutbreakMedicineOut]
     warnings: list[OutbreakWarningOut]
 
@@ -3399,7 +3434,10 @@ class DeclaredOutbreakOut(BaseModel):
 
 def _active_out(view, warnings: list[dict]) -> ActiveOutbreakOut:
     row = view.row
+    at = geo.district_anchor(row.state_silo or "", row.district or "")
     return ActiveOutbreakOut(
+        lat=at[0] if at else None,
+        lng=at[1] if at else None,
         id=row.id,
         state=row.state_silo or "",
         district=row.district or "",

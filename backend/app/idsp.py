@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import date, datetime
 from functools import lru_cache
 from pathlib import Path
 
@@ -263,6 +263,47 @@ def network_districts() -> set[tuple[str, str]]:
         for s in geo.INDIA_STATES
         for a in s.anchors
     }
+
+
+def panel_rows(
+    rows: list[dict],
+    *,
+    ours: set[tuple[str, str]],
+    facility_counts: dict[tuple[str, str], int],
+    today: date,
+    ttl_days: int,
+    active: set[tuple[str, str]],
+) -> list[dict]:
+    """Report rows as the panel shows them (fix #59): a warning, not an archive.
+
+    Each row says how long ago the outbreak began, whether this network has
+    centres in its district and how many, which medicines its disease drives,
+    and whether an outbreak is active there now. Rows that began inside the
+    outbreak window come first; a row older than that, or with no start date,
+    is historical — the report is real, but it is not a current warning.
+    Within each group: the newest report, then districts in the network, then
+    the latest start and the most cases.
+    """
+    counts = {(s, d.lower()): n for (s, d), n in facility_counts.items()}
+    out: list[dict] = []
+    for r in rows:
+        key = (r["state_code"], r["district"].lower())
+        age = (today - date.fromisoformat(r["start_date"])).days if r["start_date"] else None
+        out.append({
+            **r,
+            "in_network": key in ours,
+            "facilities": counts.get(key, 0) if key in ours else 0,
+            "medicines": [MEDICINE_NAMES[c] for c in DISEASE_MEDICINES.get(r["disease"], [])],
+            "age_days": age,
+            "historical": age is None or age > ttl_days,
+            "active": key in active,
+        })
+    out.sort(key=lambda r: r["cases"], reverse=True)
+    out.sort(key=lambda r: r["start_date"] or "", reverse=True)
+    out.sort(key=lambda r: not r["in_network"])
+    out.sort(key=lambda r: (r["year"], r["week"]), reverse=True)
+    out.sort(key=lambda r: r["historical"])
+    return out
 
 
 # ======================================================== stocking advice ===

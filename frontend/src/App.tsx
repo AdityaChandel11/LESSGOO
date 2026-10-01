@@ -5,6 +5,7 @@ import NationalMap, {
   DISTRICT_ZOOM,
   FACILITY_ZOOM,
   type FlyTarget,
+  type OutbreakMark,
   type RouteLine,
   type ViewInfo,
 } from "./NationalMap";
@@ -220,6 +221,27 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
   // Which states train the shared model, reported by the federation panel so
   // the map can ring them while that tab is open.
   const [siloStates, setSiloStates] = useState<string[]>([]);
+  // Fix #59: districts with an active outbreak, marked on the map in every tab.
+  const [outbreakMarks, setOutbreakMarks] = useState<OutbreakMark[]>([]);
+  useEffect(() => {
+    let alive = true;
+    api
+      .activeOutbreaks(null)
+      .then((a) => {
+        if (!alive) return;
+        setOutbreakMarks(
+          a.outbreaks.flatMap((o) =>
+            o.lat != null && o.lng != null
+              ? [{ id: o.id, lat: o.lat, lng: o.lng, label: `${o.disease} · ${o.district}` }]
+              : [],
+          ),
+        );
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [refreshKey]);
   // Holds why Google's basemap was refused or dropped, so the banner can say
   // it rather than leaving the map quietly different from what was configured.
   const [basemapFallback, setBasemapFallback] = useState<string | null>(null);
@@ -1031,6 +1053,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
             sku={sku}
             refreshKey={refreshKey}
             siloStates={siloStates}
+            outbreakDistricts={outbreakMarks}
             selectedFacilityId={selected?.id ?? null}
             pulse={pulse}
             flyTarget={flyTarget}

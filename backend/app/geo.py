@@ -249,6 +249,18 @@ INDIA_STATES: list[StateGeo] = [
 
 STATE_BY_CODE: dict[str, StateGeo] = {s.code: s for s in INDIA_STATES}
 
+
+def district_anchor(state_code: str, district: str) -> tuple[float, float] | None:
+    """Where a district sits on the map: its anchor, or None if the network
+    has no such district."""
+    state = STATE_BY_CODE.get(state_code)
+    if state is None:
+        return None
+    for name, lat, lng in state.anchors:
+        if name.lower() == district.lower():
+            return lat, lng
+    return None
+
 TOTAL_SEEDED_FACILITIES = sum(s.facilities for s in INDIA_STATES)
 
 # India is 28 states and 8 union territories. The list above holds both, which

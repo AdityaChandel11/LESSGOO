@@ -1326,6 +1326,16 @@ export interface Outbreak {
   status: string | null;
   /** Whether this network has facilities in that district. */
   in_network: boolean;
+  /** Fix #59. Centres this network has in the district (0 outside it). */
+  facilities: number;
+  /** The medicines this disease drives; empty where the map has none. */
+  medicines: string[];
+  /** Days since the outbreak began; null where the report gives no date. */
+  age_days: number | null;
+  /** Began longer ago than the outbreak window, or undated. */
+  historical: boolean;
+  /** An outbreak is active in this district now. */
+  active: boolean;
 }
 
 export interface Outbreaks {
@@ -1335,6 +1345,8 @@ export interface Outbreaks {
   /** uploaded_on: the day NCDC published the report (from its file name), fix #43. */
   reports: { year: number; week: number; rows: number; found?: number; uploaded_on?: string | null }[];
   rows: Outbreak[];
+  /** A row older than this many days is historical, not a current warning. */
+  ttl_days: number;
 }
 
 /** An IDSP outbreak turned into a stocking action. How much demand rises is
@@ -1386,6 +1398,9 @@ export interface ActiveOutbreak {
   expires_at: string | null;
   facilities: number;
   count_overdue: number;
+  /** Where the district sits on the map; null if it has no anchor. */
+  lat: number | null;
+  lng: number | null;
   medicines: OutbreakMedicine[];
   warnings: OutbreakWarning[];
 }
