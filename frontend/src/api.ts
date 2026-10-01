@@ -464,6 +464,8 @@ export const api = {
   outbreakAdvice: (state: string | null) => get<StockingAdvice[]>("/outbreaks/advice", { state }),
   outbreaks: (state: string | null) => get<Outbreaks>("/outbreaks", { state }),
   activeOutbreaks: (state: string | null) => get<ActiveOutbreaks>("/outbreaks/active", { state }),
+  nextWarnings: (state: string | null, source: "all" | "forecast" = "all") =>
+    get<NextWarnings>("/warnings/next", { state, source }),
   declareOutbreak: (body: { state: string; district: string; disease: string; surge_pct: number | null }) =>
     post<DeclaredOutbreak>("/outbreaks/declare", body),
   oversight: (state: string) => get<Oversight>("/transfers/oversight", { state }),
@@ -732,6 +734,34 @@ export interface WorkspaceView {
       days_at_outbreak_rate: number | null;
     }[];
   }[];
+}
+
+/** Fix #45: one district × medicine pair projected to run short. */
+export interface NextPair {
+  state: string;
+  state_name: string;
+  district: string;
+  sku_code: string;
+  sku_name: string;
+  /** Centres projected to run out inside the horizon. */
+  centres: number;
+  first_on: string;
+  first_centre: string;
+  by_forecast: number;
+  /** Which rule the dates rest on. */
+  source: "forecast" | "mixed" | "burn_rate" | "outbreak";
+  outbreak: { disease: string; basis: "observed" | "assumption"; without_on: string } | null;
+  line: string;
+}
+
+export interface NextWarnings {
+  horizon_days: number;
+  as_of: string;
+  pairs: NextPair[];
+  /** Centre × medicine counts already past their own run-out date. */
+  counts_overdue: number;
+  forecast_published_at: string | null;
+  forecast_max_age_days: number;
 }
 
 export interface TodoItem {

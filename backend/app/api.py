@@ -34,6 +34,7 @@ from . import (
     aggregates,
     attendance,
     beds,
+    earlywarning,
     events,
     federation_live,
     idsp,
@@ -3218,6 +3219,75 @@ class OutbreaksOut(BaseModel):
     columns: list[str]
     reports: list[dict]
     rows: list[OutbreakOut]
+
+
+class NextOutbreakOut(BaseModel):
+    disease: str
+    basis: str
+    without_on: date
+
+
+class NextPairOut(BaseModel):
+    """One district × medicine pair projected to run short (fix #45)."""
+
+    state: str
+    state_name: str
+    district: str
+    sku_code: str
+    sku_name: str
+    centres: int
+    first_on: date
+    first_centre: str
+    by_forecast: int
+    # Which rule the dates rest on: forecast | mixed | burn_rate | outbreak.
+    source: str
+    outbreak: NextOutbreakOut | None
+    line: str
+
+
+class NextWarningsOut(BaseModel):
+    horizon_days: int
+    as_of: datetime
+    pairs: list[NextPairOut]
+    counts_overdue: int
+    forecast_published_at: datetime | None
+    forecast_max_age_days: float
+
+
+@router.get("/warnings/next", response_model=NextWarningsOut, tags=["warnings"])
+async def next_warnings(
+    state: str | None = Query(default=None, pattern="^[A-Z]{2}$"),
+    source: Literal["all", "forecast"] = "all",
+    limit: int = Query(default=earlywarning.DEFAULT_LIMIT, ge=1, le=20),
+    session: AsyncSession = Depends(get_session),
+) -> NextWarningsOut:
+    """The "Next 14 days" strip: district × medicine pairs whose centres are
+    projected to run out inside the horizon, earliest first. `source=forecast`
+    keeps only dates that rest on the shared model's fresh forecast — the same
+    data as the Federation tab shows it. District aggregates only; one capped
+    aggregate over the map's own table."""
+    out = await earlywarning.strip(
+        session, datetime.now(timezone.utc),
+        state=state, only_forecast=source == "forecast", limit=limit,
+    )
+    return NextWarningsOut(
+        horizon_days=out.horizon_days,
+        as_of=out.as_of,
+        counts_overdue=out.counts_overdue,
+        forecast_published_at=out.forecast_published_at,
+        forecast_max_age_days=out.forecast_max_age_days,
+        pairs=[
+            NextPairOut(
+                state=p.state, state_name=earlywarning.state_name(p.state),
+                district=p.district, sku_code=p.sku_code, sku_name=p.sku_name,
+                centres=p.centres, first_on=p.first_on, first_centre=p.first_centre,
+                by_forecast=p.by_forecast, source=p.source,
+                outbreak=NextOutbreakOut(**vars(p.outbreak)) if p.outbreak else None,
+                line=earlywarning.line(p),
+            )
+            for p in out.pairs
+        ],
+    )
 
 
 @router.get("/outbreaks", response_model=OutbreaksOut, tags=["outbreaks"])

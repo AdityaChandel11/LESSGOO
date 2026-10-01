@@ -13,6 +13,7 @@ import {
   type Bucket,
   type FacilityDetail,
   type LiveEvent,
+  type NextPair,
   type Pin,
   type Plan,
   ROLE_LABEL,
@@ -40,6 +41,7 @@ import { FieldSimulator } from "./field";
 import { MovementsPanel } from "./movements";
 import { AuditQueuePanel } from "./trustpanel";
 import { OutbreakWarnings } from "./outbreaks";
+import { NextWarnings } from "./nextwarnings";
 import { RedistributionPanel, TransfersPrompt, type Trip, groupTrips } from "./transfers";
 import { SEED_RULES } from "./seedRules";
 
@@ -458,6 +460,14 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
     if (b) fly(b.lat, b.lng, Math.max(b.zoom, DISTRICT_ZOOM + 0.5));
   };
 
+  // Fix #45: a warning opens its own recommendations — the Redistribution
+  // tab, on that state and that medicine.
+  const openRecommendations = (p: NextPair) => {
+    setSku(p.sku_code);
+    goState(p.state);
+    setMode("transfers");
+  };
+
   // Demo-only: the whole emergency chain in one click, confined to the
   // sandbox district and offered only to someone who may write there.
   const canRunEmergency =
@@ -850,12 +860,23 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               onBack={() => setSelected(null)}
             />
           ) : mode === "federation" ? (
+            <>
+            {/* Fix #45 (absorbs #2): the same strip, only the dates that rest
+                on the shared model's fresh forecast. */}
+            <NextWarnings
+              state={null}
+              stateLabel="India"
+              refreshKey={refreshKey}
+              forecastOnly
+              onOpen={openRecommendations}
+            />
             <FederationPanel
               refreshKey={refreshKey}
               onSilos={setSiloStates}
               stateName={stateName}
               canTrain={user.role === "admin"}
             />
+            </>
           ) : mode === "trust" ? (
             <AuditQueuePanel
               // One value decides both the request and the heading. An
@@ -953,6 +974,12 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
             )
           ) : activeState ? (
             <>
+            <NextWarnings
+              state={activeState}
+              stateLabel={stateName(activeState)}
+              refreshKey={refreshKey}
+              onOpen={openRecommendations}
+            />
             <OutbreakWarnings
               state={activeState}
               stateLabel={stateName(activeState)}
@@ -974,6 +1001,12 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
             </>
           ) : (
             <>
+            <NextWarnings
+              state={null}
+              stateLabel="India"
+              refreshKey={refreshKey}
+              onOpen={openRecommendations}
+            />
             <OutbreakWarnings
               state={null}
               stateLabel="India"
