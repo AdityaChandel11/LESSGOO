@@ -204,6 +204,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
   // button runs the stock-out drill.
   const [loopKind, setLoopKind] = useState<"stockout" | "outbreak">("stockout");
   const [emergencyBusy, setEmergencyBusy] = useState(false);
+  const [feedOpen, setFeedOpen] = useState(false);
   const [emergencyError, setEmergencyError] = useState<string | null>(null);
   // Which states train the shared model, reported by the federation panel so
   // the map can ring them while that tab is open.
@@ -594,11 +595,11 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               SwasthSetu{" "}
               <span className="ml-0.5 text-[13px] font-medium text-white/85">स्वस्थसेतु</span>
             </div>
-            <div className="text-[10.5px] text-white/80">National Health Supply Command</div>
+            <div className="hidden text-[10.5px] text-white/80 min-[1500px]:block">National Health Supply Command</div>
           </div>
         </div>
 
-        <nav aria-label="Location" className="flex min-w-0 items-center gap-1.5 text-[13px]">
+        <nav aria-label="Location" className="flex min-w-0 shrink-0 items-center gap-1.5 text-[13px] whitespace-nowrap">
           <button
             onClick={goNational}
             className={`rounded px-1.5 py-0.5 hover:bg-canvas ${activeState ? "text-brand" : "font-medium text-ink"}`}
@@ -626,7 +627,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
           )}
         </nav>
 
-        <div className="ml-auto flex items-center gap-2 min-[1360px]:gap-3">
+        <div className="ml-auto flex items-center gap-2 min-[1500px]:gap-3">
           <div role="tablist" aria-label="View" className="flex rounded-md border border-line bg-canvas p-0.5">
             {(
               [
@@ -657,7 +658,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
             <select
               value={sku ?? ""}
               onChange={(e) => setSku(e.target.value || null)}
-              className="h-8 min-w-[150px] rounded-md min-[1360px]:min-w-[190px] 2xl:min-w-[210px] border border-line bg-panel px-2 text-[12.5px] font-medium text-ink focus:border-brand focus:outline-none"
+              className="h-8 w-[150px] rounded-md min-[1500px]:w-[190px] 2xl:w-[210px] border border-line bg-panel px-2 text-[12.5px] font-medium text-ink focus:border-brand focus:outline-none"
             >
               <option value="">All medicines (lowest stocked)</option>
               {skus.map((s) => (
@@ -674,6 +675,32 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
           >
             Simulated data
           </span>
+
+          {/* Field reports moved off the bottom of the panel into a badge
+              and drawer, so the panel's list keeps its height (fix #52). */}
+          <div className="relative">
+            <button
+              onClick={() => setFeedOpen((o) => !o)}
+              aria-expanded={feedOpen}
+              className="flex items-center gap-1 rounded-md border border-line px-2 py-1 text-[12px] font-medium whitespace-nowrap text-ink-2 hover:bg-canvas"
+              title="Field reports this session"
+            >
+              Reports
+              <span className="font-mono text-[11px] text-ink-3">
+                {events.filter((e) => e.kind === "reading.committed").length}
+              </span>
+            </button>
+            {feedOpen && (
+              <div className="absolute right-0 top-full z-[1100] mt-1 w-[360px] max-w-[90vw] overflow-hidden rounded-lg border border-line bg-panel shadow-sm">
+                <ActivityFeed
+                  events={events}
+                  onSimulate={sendTestReport}
+                  canSimulate={canSendTestReports}
+                  sandboxDistrict={SANDBOX.district}
+                />
+              </div>
+            )}
+          </div>
 
           <span
             className="flex items-center gap-1.5 text-[12px] font-medium"
@@ -918,12 +945,6 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
             />
             </>
           )}
-          <ActivityFeed
-            events={events}
-            onSimulate={sendTestReport}
-            canSimulate={canSendTestReports}
-            sandboxDistrict={SANDBOX.district}
-          />
         </aside>
 
         {/* ------------------------------------------------------ map --- */}

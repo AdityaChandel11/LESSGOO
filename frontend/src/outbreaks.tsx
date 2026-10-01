@@ -85,18 +85,30 @@ export function OutbreakWarnings({
   }, [state, showAdvice]);
 
   const mayDeclare = !!state && can.planState(user, state);
+  // Collapsed to one line unless an outbreak is active, so the list below
+  // keeps most of the panel (fix #52).
+  const [expanded, setExpanded] = useState<boolean | null>(null);
+  const activeCount = active?.outbreaks.length ?? 0;
+  const show = expanded ?? activeCount > 0;
 
   return (
-    <section className="shrink-0 border-b border-line bg-panel px-3 py-2.5" aria-label="Outbreak warnings">
-      <div className="flex items-baseline justify-between gap-2">
+    <section className="shrink-0 border-b border-line bg-panel px-3 py-2" aria-label="Outbreak warnings">
+      <button
+        onClick={() => setExpanded(!show)}
+        aria-expanded={show}
+        className="flex w-full items-baseline justify-between gap-2 text-left"
+      >
         <h2 className="text-[12.5px] font-semibold text-ink">
-          Active outbreaks · सक्रिय प्रकोप{" "}
-          <span className="font-mono text-[11px] font-normal text-ink-3">
-            {active?.outbreaks.length ?? 0}
-          </span>
+          {show ? "▾" : "▸"} Active outbreaks · सक्रिय प्रकोप{" "}
+          <span className="font-mono text-[11px] font-normal text-ink-3">{activeCount}</span>
         </h2>
-        <span className="text-[10.5px] text-ink-3">{stateLabel}</span>
-      </div>
+        <span className="text-[10.5px] text-ink-3">
+          {stateLabel}
+          {!show && data && ` · IDSP week ${data.reports.map((r) => r.week).join("–")}/${data.reports[0]?.year ?? ""}`}
+        </span>
+      </button>
+      {show && (
+        <div className="max-h-[50vh] overflow-y-auto">
 
       {active && active.outbreaks.length === 0 && (
         <p className="mt-1 text-[11.5px] text-ink-2">
@@ -160,6 +172,8 @@ export function OutbreakWarnings({
             )}
           </div>
           {showAdvice && <Advice advice={advice} />}
+        </div>
+      )}
         </div>
       )}
     </section>

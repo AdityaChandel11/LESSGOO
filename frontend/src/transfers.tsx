@@ -337,6 +337,9 @@ export function RedistributionPanel({
   const [busy, setBusy] = useState<Set<string>>(new Set());
   const [errors, setErrors] = useState<Record<number, string>>({});
   const [oversight, setOversight] = useState<Oversight | null>(null);
+  // Once the list is scrolled, the header shrinks to its title and button so
+  // the trips keep the panel (fix #52).
+  const [compact, setCompact] = useState(false);
   const [elapsed, setElapsed] = useState(0);
 
   // Re-read whenever the trips change: the same poll that moves the list
@@ -409,7 +412,7 @@ export function RedistributionPanel({
       <div className="border-b border-line px-4 pt-4 pb-4">
         <Eyebrow>Redistribution</Eyebrow>
         <h2 className="mt-1 text-[22px] font-semibold tracking-tight text-ink">{stateLabel}</h2>
-        <p className="mt-0.5 text-[12.5px] leading-snug text-ink-2">
+        <p className={`mt-0.5 text-[12.5px] leading-snug text-ink-2 ${compact ? "hidden" : ""}`}>
           {oversight && oversight.computed_at ? (
             <>
               The system recommends{" "}
@@ -453,7 +456,7 @@ export function RedistributionPanel({
         </div>
         {planError && <p className="mt-2 text-[12px] text-crit">{planError}</p>}
 
-        {oversight && (oversight.recommended_open > 0 || oversight.unreached_total > 0) ? (
+        {compact ? null : oversight && (oversight.recommended_open > 0 || oversight.unreached_total > 0) ? (
           <div className="mt-3 grid grid-cols-3 gap-px overflow-hidden rounded-lg border border-line bg-line">
             <Stat value={counts.open.toLocaleString("en-IN")} label="trips awaiting their donors" />
             <Stat
@@ -507,7 +510,10 @@ export function RedistributionPanel({
         </div>
       )}
 
-      <div className="min-h-0 flex-1 overflow-y-auto">
+      <div
+        className="min-h-0 flex-1 overflow-y-auto"
+        onScroll={(e) => setCompact(e.currentTarget.scrollTop > 40)}
+      >
         {view === "impact" && trips.length > 0 && (
           <p className="border-b border-line bg-canvas px-4 py-2 text-[11.5px] text-ink-2">
             Receivers under {CRITICAL_DAYS} days of stock that this trip alone lifts to{" "}
