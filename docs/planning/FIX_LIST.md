@@ -115,7 +115,7 @@ Only numbers already recorded. Out of scope: training, forecasts, emergency, map
 
 Done when: build + type-check pass, browser check on local server, committed, not pushed.
 
-## Fix #2 — Payoff panel from real `forecasts` rows  · MERGED into #45 (build once, show on Federation tab too)
+## Fix #2 — Payoff panel from real `forecasts` rows  · MERGED into #45 (build once, show on Federation tab too) · DONE f20fa08
 
 "What the federated model is predicting now": named districts / facilities at risk,
 medicine, days of stock, linked to the map. Real rows only — if a forecast doesn't
@@ -799,7 +799,7 @@ via #38's wider sandbox) → donor accepts → dispatch → receipt. If not outb
 
 ## NATIONAL — #45
 
-### Fix #45 — National "Next 14 days" warning strip  · Tier 1 · **absorbs Fix #2** · status: TODO
+### Fix #45 — National "Next 14 days" warning strip  · Tier 1 · **absorbs Fix #2** · status: DONE f20fa08 (`/api/warnings/next`; national + state panels, and the Federation tab limited to forecast-based dates. Dates run from each centre's last count, so on Render most seeded centres read as "count overdue" until #30's roll-forward, and the Federation strip is empty until #81's republish)
 Top district × medicine pairs with projected run-out date, from `forecasts` + as-of-now cover
 (#26/#29) + outbreak multiplier (#41). Each links to its recommendations. Fix #2's payoff panel
 is the same data seen from the Federation tab — build once, show in both places.
@@ -1000,7 +1000,7 @@ Facility panel and PHC medicine card: small chart of the last 28 days' use + nex
 burn-rate line, model version and age, "trained across 4 states". For the other 32 states and 6 SKUs the
 model never saw: "burn rate — this state/medicine is not in the shared model yet" (#55). Feeds #45.
 
-### Fix #85 — A daily briefing worth reading  · Tier 1 · status: TODO
+### Fix #85 — A daily briefing worth reading  · Tier 1 · status: DONE b0568ec (computed to-do list in English + Hindi; Gemini rewrites it in English, Hindi and the state language under the grounded-figure check. Live Gemini write unverified — no key locally, BLOCKERS.md. Migration `a9d3f5b27c14` widens one check constraint. The bed and check-in lines state a fact, not an instruction: the PHC has no capture or check-in button until #64/#18)
 Gemini writes a prioritised to-do for today from real rows only: medicines to order (forecast-based),
 deliveries arriving and overdue, requests awaiting reply, counts that are stale ("recount ORS"), outbreak
 nearby (#58), today's bed photo/code, check-in not done. English, Hindi, and the state language
@@ -1062,7 +1062,7 @@ CLAUDE.md first and may believe features are missing. Update only the status lin
 Aditya's instruction file — show the diff and get a yes). Until then: trust git and this file's
 "Verified facts", not those status lines.
 
-### Fix #95 — Submission deliverables match the fixed product  · Tier 1 · last · status: TODO
+### Fix #95 — Submission deliverables match the fixed product  · Tier 1 · last · status: DONE 5ffac7d (README + `docs/submission/DESCRIPTION.md` only. Deck and demo video script NOT done — Aditya, 2026-10-01: "don't do any ppt demo work". The README states what is DONE at that commit; re-read it after later fixes land)
 README "what works, with a proof link" rewritten after the fixes (no stale claims); 2–3 line
 description; 10–12 slide deck (problem, solution, AI approach, who it serves, deployability, scale);
 3–5 min demo video script following the spine (#41 → #45 → #39/#40 → #9 → #18 → #1); the

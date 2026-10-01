@@ -20,7 +20,7 @@ This is a working prototype on synthetic data. Every facility, stock figure, bed
 | Sent per round | 22,788 bytes (5,697 weights × 4 bytes). 0 facility rows |
 | Google AI | Gemini vision (`gemini-3.1-flash-lite`), Gemini text (`gemini-3.5-flash-lite`), Google Maps Routes and Map Tiles (optional, off on the demo) |
 | Optimiser | OR-Tools SimpleMinCostFlow, greedy fallback |
-| Tests | 782 unit tests, 13 integration check suites |
+| Tests | 808 unit tests, 13 integration check suites |
 | Hosting | One Docker service on Render |
 | Languages | English, with Hindi labels on the main screens and Hindi briefings |
 
@@ -34,7 +34,7 @@ Each line of the challenge, what the prototype does about it today, and where to
 | Real-time visibility: beds | Partial | One figure per centre: the latest verified report, with its source and age; a report that does not match the registered capacity is rejected. No district or state view of beds yet | `tests/test_one_bed_figure.py`, `tests/test_beds.py` |
 | Real-time visibility: staff attendance | Partial | Geofenced check-ins and a per-centre count on the facility panel. No district or state roll-up yet; the demo pharmacist's own record is generated and labelled synthetic | `tests/test_self_attendance.py`, `tests/test_team_card.py` |
 | Demand forecasting | Working for four states and six medicines | Each medicine shows its last 28 days of use, its burn rate and the shared model's next-7-day rate, with the date the forecast was published. Elsewhere, and when a forecast is over 8 days old, the burn rate is used and the card says so | `tests/test_forecast_visible.py`, `tests/test_forecast_age.py` |
-| Early stock-out warnings during health emergencies | Working | An active outbreak raises expected use of the medicines its disease drives, in its district, for 14 days. Warnings name the centre, the medicine and the run-out date with and without the outbreak. Outbreak rows come from NCDC's IDSP weekly reports | `tests/test_outbreak_surge.py`, `tests/test_outbreak_api.py`, `tests/test_idsp.py`, `tests/test_ncdc.py` |
+| Early stock-out warnings during health emergencies | Working | A "Next 14 days" strip names the districts and medicines projected to run short, earliest first, and opens their recommendations. An active outbreak raises expected use of the medicines its disease drives, in its district, for 14 days; warnings give the run-out date with and without the outbreak. Outbreak rows come from NCDC's IDSP weekly reports | `tests/test_next_warnings.py`, `tests/test_outbreak_surge.py`, `tests/test_outbreak_api.py`, `tests/test_idsp.py`, `tests/test_ncdc.py` |
 | Automated cross-district redistribution | Working within a state | The same solver pre-positions stock for an outbreak. It may cross districts inside a state; the trips seen so far stay inside one district, and no cross-district trip has been demonstrated. Nothing moves until the donor centre accepts | `tests/test_redistribution.py`, `tests/test_replan.py`, `tests/test_oversight.py` |
 | Shared predictive modelling across states | Recorded run | One Flower SuperLink and four SuperNodes; every round's bytes and weights hash are stored and replayed on the Federation tab | `backend/checks/federation.py`, `tests/test_federation_live.py`, Federation tab |
 
@@ -111,7 +111,7 @@ The deployed database is a small free instance, so the rule is: live where an ac
 
 | Role | Sees | Can do |
 |---|---|---|
-| Pharmacist (facility) | A mobile workspace: Medicines, Orders, Beds, Attendance, plus a daily briefing in English or Hindi and an alert when an outbreak is active in the district. No national map | Submit counts and photographed documents, ask a nearby centre for stock and withdraw the request, accept or decline requests for its stock, confirm receipts |
+| Pharmacist (facility) | A mobile workspace: Medicines, Orders, Beds, Attendance, plus today's to-do list in English and Hindi (and, written by Gemini, the state's language) and an alert when an outbreak is active in the district. No national map | Submit counts and photographed documents, ask a nearby centre for stock and withdraw the request, accept or decline requests for its stock, confirm receipts |
 | District officer | The dashboard, scoped to their district, with its movements ledger and audit queue | Watch transfers; chase a centre for a report. Cannot report a count, a check-in or a bed figure on a centre's behalf |
 | State officer | The dashboard, scoped to their state, with its ledger, audit queue and federation view | Update recommendations, declare an outbreak, run the Nashik drill |
 | National admin | Every tab, including the full Federation inspector | Everything above, across all states |
@@ -123,6 +123,10 @@ Every signed-in role can still open any state's map and facility panels: scope n
 ### Live map
 
 Every facility is coloured by its worst medicine, with state and district roll-ups. Days of stock come from the last 28 days of readings, or from the federated forecast when one is fresh (`FORECAST_MODE`). Under 3 days is critical, and 3 to 7 is at risk. The "Live" badge says how long ago the last change was. Browser Back returns to the previous place, and a link to a state, facility or view opens exactly there.
+
+### Next 14 days
+
+The national and state panels open with the district × medicine pairs whose centres are projected to run out within 14 days, earliest first. Each date is a centre's last count carried forward at the shared model's forecast where one is fresh, otherwise the burn rate, and at the outbreak rate where an outbreak is active; every row says which, and links to that state's recommendations for that medicine. Counts already past their own run-out date are reported as a number: a count is overdue there. The Federation tab shows the same strip limited to dates that rest on the forecast.
 
 ### Outbreak early warning
 
@@ -190,7 +194,7 @@ The web form, SMS in a forgiving keypad grammar (`ORS 60 ZINC 20`), WhatsApp and
 | Service | What it does | Used in |
 |---|---|---|
 | Gemini vision (`gemini-3.1-flash-lite`) | Reads a ward photo into total beds, occupied beds and the rotating code in one pass; reads a photographed bill, slip or register page into stock lines and the document's type | Bed capture and the Medicines tab's photo path. Both depend on it |
-| Gemini text (`gemini-3.5-flash-lite`) | Writes a facility's daily briefing in English and Hindi, and the reason behind a proposed trip or a trust flag | Emergency drill, trip cards, Data trust, the pharmacist's briefing |
+| Gemini text (`gemini-3.5-flash-lite`) | Rewrites a facility's computed to-do list in English, Hindi and the state's language (Marathi in Maharashtra) — an answer with an extra line or a figure the list does not hold is discarded — and writes the reason behind a proposed trip or a trust flag. The new list prompt has not yet been run with a live key (`BLOCKERS.md`) | Emergency drill, trip cards, Data trust, the pharmacist's Today card |
 | Gemini reading the IDSP weekly report | Extracts outbreak rows from NCDC's PDF; a regex parser checks every row and only agreed rows become outbreaks | Built and tested with a stand-in transport; not yet run live (`BLOCKERS.md`) |
 | Google Maps Routes API, Map Tiles | Road distances for the solver, and the basemap | `MAPS_MODE=google`. The public demo uses the tested OSM fallback |
 
@@ -284,7 +288,7 @@ To see Gemini live, set `LLM_MODE=live` and `GEMINI_API_KEY` in `.env`, then che
 
 ```bash
 cd backend
-.venv/bin/python -m pytest -q     # 782 unit tests
+.venv/bin/python -m pytest -q     # 808 unit tests
 .venv/bin/python -m checks        # 13 integration suites, against the seeded database
 cd ../frontend && npx tsc -b && npm run build
 ```
