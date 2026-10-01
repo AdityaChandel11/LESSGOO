@@ -29,20 +29,34 @@ body {
   font-feature-settings: "tnum" 0;
 }
 
-/* A ranked list in the side panel always shows five rows (5 x 51px). When the
-   screen is too short for that, the panel scrolls; the list never collapses. */
-.list-min {
-  flex: 1 1 0px;
-  min-height: 256px;
+/* ------------------------------------------------------- side panel --- */
+
+/* One scroll container per panel: the side panel itself (the page, on a
+   phone). Every view inside it used to be a fixed-height column with its own
+   inner scroller, so whatever sat above a list took the list's height. Here,
+   once, for every tab: nothing inside the panel scrolls on its own, nothing
+   inside it is height-capped, and no block gives up height to another. */
+.panel-scroll .overflow-y-auto {
+  overflow-y: visible;
+  max-height: none;
 }
 
-/* On a phone the panel is the only scroller, so the list runs at full length
-   rather than scrolling inside a scrolling panel. */
-@media (max-width: 767px) {
-  .list-min {
-    flex: none;
-    overflow-y: visible;
-  }
+.panel-scroll .min-h-0 {
+  min-height: auto;
+}
+
+.panel-scroll .flex-col > * {
+  flex-shrink: 0;
+}
+
+.panel-scroll > .h-full {
+  height: auto;
+  flex: 1 0 auto;
+}
+
+/* A ranked list keeps room for five rows (5 x 51px) even while it loads. */
+.list-min {
+  min-height: 256px;
 }
 
 /* The Federation view is the centre of the product, so it reads at a larger
