@@ -32,6 +32,7 @@ import StockPhoto from "./StockPhoto";
 import Team from "./Team";
 import FindSupply from "./FindSupply";
 import { both } from "./labels";
+import UsageChart from "../usagechart";
 
 const STATUS_STYLE: Record<string, { dot: string; text: string; label: string }> = {
   critical: { dot: "bg-crit", text: "text-crit", label: "Critical" },
@@ -140,12 +141,27 @@ function RequestChip({
   );
 }
 
+/** Fix #84: the last 28 days' use and the forecast, loaded only when opened. */
+function UseAndForecast({ facilityId, sku }: { facilityId: string; sku: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="px-3.5 py-2.5">
+      <details onToggle={(e) => setOpen(e.currentTarget.open)}>
+        <summary className="cursor-pointer text-[12px] text-ink-2">{both("useAndForecast")}</summary>
+        {open && <UsageChart facilityId={facilityId} sku={sku} />}
+      </details>
+    </div>
+  );
+}
+
 function MedicineCard({
+  facilityId,
   s,
   request,
   onFindSupply,
   onCancel,
 }: {
+  facilityId: string;
   s: WorkspaceSku;
   /** This centre's latest request for the medicine in the last day, if any. */
   request: OwnRequest | undefined;
@@ -217,6 +233,8 @@ function MedicineCard({
             )}
           </dd>
         </div>
+
+        <UseAndForecast facilityId={facilityId} sku={s.sku_code} />
 
         <div className="px-3.5 py-2.5">
           <dt className="text-[12px] text-ink-2">How this was checked</dt>
@@ -382,6 +400,7 @@ export default function Medicines({
         {view.skus.map((s) => (
           <li key={s.sku_code}>
             <MedicineCard
+              facilityId={facilityId}
               s={s}
               request={requestFor(s.sku_code)}
               onFindSupply={openSupply}

@@ -72,6 +72,7 @@ from .models import (
     Facility,
     FacilityContact,
     FederationRound,
+    Forecast,
     IdspReport,
     MedicineMovement,
     OutbreakEvent,
@@ -1076,6 +1077,87 @@ async def facility_workspace(
         ],
         briefing=workspace.rules_briefing(
             _briefing_rows(snap.skus, units, now, snap.warning_multiplier)
+        ),
+    )
+
+
+class DayUseOut(BaseModel):
+    day: date
+    used: float | None
+    spread: bool = False
+
+
+class UsageOut(BaseModel):
+    """Fix #84: one medicine's use, burn rate and forecast, for its chart."""
+
+    facility_id: str
+    sku_code: str
+    sku_name: str
+    unit: str
+    days: list[DayUseOut]
+    burn_rate: float | None
+    forecast_daily: float | None
+    forecast_version: str | None
+    forecast_published_at: datetime | None
+    forecast_fresh: bool
+    in_model: bool
+    note: str
+
+
+@router.get("/facilities/{facility_id}/usage", response_model=UsageOut, tags=["workspace"])
+async def facility_usage(
+    facility_id: str,
+    sku: str = Query(..., min_length=1, max_length=16),
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> UsageOut:
+    """Bounded by one facility, one medicine and the burn window."""
+    facility = await session.get(Facility, facility_id)
+    if facility is None:
+        raise HTTPException(status_code=404, detail="Facility not found")
+    meta = await session.get(Sku, sku)
+    if meta is None:
+        raise HTTPException(status_code=404, detail="Unknown SKU")
+    now = datetime.now(timezone.utc)
+    window = settings.burn_rate_window_days
+    rows = await session.execute(
+        select(StockReading.reported_at, StockReading.qty_on_hand, StockReading.source)
+        .where(
+            StockReading.facility_id == facility.id,
+            StockReading.sku_code == sku,
+            StockReading.reported_at >= now - timedelta(days=window + 1),
+            StockReading.superseded_by.is_(None),
+        )
+        .order_by(StockReading.reported_at)
+    )
+    series = [(at, float(qty), source) for at, qty, source in rows.all()]
+    forecast = await session.get(Forecast, (facility.id, sku))
+    fresh = bool(
+        forecast is not None
+        and settings.forecast_mode == "federated"
+        and forecast.computed_at >= now - timedelta(days=settings.forecast_max_age_days)
+    )
+    in_model = facility.state_silo in workspace.MODEL_STATES and sku in workspace.MODEL_SKUS
+    return UsageOut(
+        facility_id=facility.id,
+        sku_code=sku,
+        sku_name=meta.name,
+        unit=meta.unit,
+        days=[
+            DayUseOut(day=d.day, used=d.used, spread=d.spread)
+            for d in workspace.daily_use(series, now, window)
+        ],
+        burn_rate=services._burn_rate(series),
+        forecast_daily=forecast.predicted_daily_use if forecast is not None else None,
+        forecast_version=forecast.model_version if forecast is not None else None,
+        forecast_published_at=forecast.computed_at if forecast is not None else None,
+        forecast_fresh=fresh,
+        in_model=in_model,
+        note=workspace.forecast_note(
+            in_model=in_model,
+            fresh=fresh,
+            published=forecast.computed_at if forecast is not None else None,
+            version=forecast.model_version if forecast is not None else None,
         ),
     )
 

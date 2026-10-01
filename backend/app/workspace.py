@@ -317,6 +317,71 @@ def day_words(d: date) -> str:
     return "{0} {1}".format(d.day, MONTHS[d.month - 1])
 
 
+# ===================================================== use and forecast ===
+# Fix #84: the forecast made visible. A medicine's last 28 days of use, the
+# burn rate, and the shared model's next-7-day forecast where the model
+# covers that state and medicine. The web service carries no torch, so the
+# model's coverage is mirrored here; tests/test_forecast_visible.py keeps it
+# in step with federation/pytorchexample.
+
+MODEL_STATES = ("MH", "KL", "BR", "UP")
+MODEL_SKUS = ("ORS", "PARA500", "AMOX", "IRONFA", "IVFLUID", "ZINC")
+
+
+@dataclass(frozen=True)
+class DayUse:
+    day: date
+    # None when no count covers that day: use is never invented.
+    used: float | None
+    # True when the figure is a decline spread evenly over the days between
+    # two counts more than a day apart, rather than one day's own count.
+    spread: bool = False
+
+
+def daily_use(
+    series: list[tuple[datetime, float, str | None]], now: datetime, window: int = 28
+) -> list[DayUse]:
+    """Each decline between two counts, spread evenly over the days it covers —
+    the same arithmetic as the burn rate, which divides by elapsed days. A
+    restock is not negative use, and stock that left on a transfer was not
+    used."""
+    days = [(now - timedelta(days=window - 1 - i)).date() for i in range(window)]
+    used: dict[date, float] = {}
+    spread: set[date] = set()
+    for (prev_at, prev_qty, _), (at, qty, source) in zip(series, series[1:]):
+        if source == "transfer":
+            continue
+        start, end = prev_at.date(), at.date()
+        covered = [end - timedelta(days=k) for k in range((end - start).days)] or [end]
+        share = max(0.0, prev_qty - qty) / len(covered)
+        for d in covered:
+            used[d] = used.get(d, 0.0) + share
+            if len(covered) > 1:
+                spread.add(d)
+    return [DayUse(d, used.get(d), d in spread) for d in days]
+
+
+def forecast_note(
+    *, in_model: bool, fresh: bool, published: datetime | None, version: str | None
+) -> str:
+    if not in_model:
+        return "Burn rate — this state or medicine is not in the shared model yet."
+    if fresh and published is not None:
+        return (
+            "Next 7 days from the shared model, trained across {0} states ({1}) without "
+            "moving their rows · {2}, published {3}"
+        ).format(len(MODEL_STATES), ", ".join(MODEL_STATES), version, day_words(published.date()))
+    if published is not None:
+        return (
+            "This state and medicine are in the shared model, but its latest forecast here "
+            "(published {0}) is older than {1:g} days, so the burn rate is used."
+        ).format(day_words(published.date()), settings.forecast_max_age_days)
+    return (
+        "This state and medicine are in the shared model, but no forecast has been published "
+        "for this centre yet, so the burn rate is used."
+    )
+
+
 # ========================================================= find supply ===
 
 

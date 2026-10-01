@@ -4,6 +4,7 @@ import { AttendancePanel } from "./attendancepanel";
 import { BedPanel } from "./bedpanel";
 import { inSandbox } from "./liveloop";
 import { TrustBlock } from "./trustpanel";
+import UsageChart from "./usagechart";
 import {
   type Bucket,
   type FacilityDetail,
@@ -598,12 +599,24 @@ export function FacilityPanel({
                   {s.last_source === "seed" ? "baseline" : `via ${s.last_source}`} · {ago(s.last_reported_at)}
                 </span>
               </div>
+              {detail && <SkuUsage facilityId={detail.id} sku={s.sku_code} />}
             </div>
           );
         })}
 
       </div>
     </div>
+  );
+}
+
+/** Fix #84: one medicine's use and forecast, loaded only when opened. */
+function SkuUsage({ facilityId, sku }: { facilityId: string; sku: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details className="mt-1" onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary className="cursor-pointer text-[10.5px] font-medium text-brand">Use and forecast</summary>
+      {open && <UsageChart facilityId={facilityId} sku={sku} />}
+    </details>
   );
 }
 

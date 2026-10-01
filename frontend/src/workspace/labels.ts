@@ -25,6 +25,7 @@ export const L = {
   daysOfCover: ["Days of cover", "कितने दिन का स्टॉक"],
   runsOut: ["Runs out about", "लगभग समाप्त"],
   countOverdue: ["Count overdue", "गिनती बाकी"],
+  useAndForecast: ["Use and forecast", "खपत और पूर्वानुमान"],
   countTheShelf: ["Count the shelf", "अलमारी गिनें"],
   notEnoughReadings: ["Not enough readings to estimate", "अनुमान के लिए पर्याप्त रिकॉर्ड नहीं"],
 

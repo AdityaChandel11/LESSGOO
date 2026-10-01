@@ -464,6 +464,8 @@ export const api = {
   activeOutbreaks: (state: string | null) => get<ActiveOutbreaks>("/outbreaks/active", { state }),
   declareOutbreak: (body: { state: string; district: string; disease: string; surge_pct: number | null }) =>
     post<DeclaredOutbreak>("/outbreaks/declare", body),
+  usage: (facilityId: string, sku: string) =>
+    get<Usage>(`/facilities/${encodeURIComponent(facilityId)}/usage`, { sku }),
   latestIdspReport: () => get<IdspReport | null>("/outbreaks/idsp-reports/latest"),
   readIdspReport: (body: { pdf_base64: string; filename: string }) =>
     post<IdspReport>("/outbreaks/idsp-report", body),
@@ -1369,6 +1371,22 @@ export interface IdspReport {
   unparsed: number;
   activated: number;
   trips_proposed: number;
+}
+
+/** Fix #84: one medicine's last 28 days of use, burn rate and forecast. */
+export interface Usage {
+  facility_id: string;
+  sku_code: string;
+  sku_name: string;
+  unit: string;
+  days: { day: string; used: number | null; spread: boolean }[];
+  burn_rate: number | null;
+  forecast_daily: number | null;
+  forecast_version: string | null;
+  forecast_published_at: string | null;
+  forecast_fresh: boolean;
+  in_model: boolean;
+  note: string;
 }
 
 export interface DeclaredOutbreak {
