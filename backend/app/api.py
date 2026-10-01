@@ -3185,6 +3185,10 @@ class FederationSiloOut(BaseModel):
     trust: float
     flagged_pct: float
     train_loss: float
+    # The same score from today's ledger (fix #54), so a run recorded on an
+    # earlier dataset can be read against the one in the database now.
+    trust_now: float | None = None
+    flagged_pct_now: float | None = None
 
 
 class FederationRoundOut(BaseModel):
@@ -3225,6 +3229,63 @@ class FederationOut(BaseModel):
     silos: int = 0
     upload_bytes_total: int = 0
     total_windows: int = 0
+    # Fix #54: states whose receipt discipline in today's ledger is materially
+    # different from what the run recorded. Not empty means the run was trained
+    # on a dataset that is no longer the one in the database.
+    silos_changed_since_run: list[str] = Field(default_factory=list)
+
+
+# How far a state's score may move before the run is said to describe a
+# different dataset. Ordinary days move it a little: a consignment confirmed,
+# another falling overdue.
+SILO_DRIFT = 0.15
+RECEIPT_WINDOW_DAYS = 60
+
+
+def receipt_trust(*, total: int, overdue: int, short: int) -> tuple[float, float]:
+    """(trust, flagged %) from a state's consignments — the federation's own
+    rule (federation/pytorchexample/silo.py live_trust), mirrored because the
+    web service carries no torch. A test pins the two together."""
+    if not total:
+        return 1.0, 0.0
+    penalty = min(1.0, (overdue + 0.5 * short) / total / 0.4)
+    return round(max(0.0, 1.0 - penalty), 3), round(100 * (overdue + short) / total, 1)
+
+
+def silo_drift(recorded: dict[str, float], today: dict[str, float]) -> list[str]:
+    """States whose score today differs materially from the recorded one."""
+    return sorted(
+        state for state, was in recorded.items()
+        if state in today and abs(today[state] - was) > SILO_DRIFT
+    )
+
+
+async def _receipt_trust_now(
+    session: AsyncSession, states: list[str], now: datetime
+) -> dict[str, tuple[float, float]]:
+    """Each state's receipt discipline from the ledger as it stands. One
+    grouped read, bounded by the silo states and the 60-day window."""
+    if not states:
+        return {}
+    rows = await session.execute(
+        select(
+            MedicineMovement.state_silo,
+            func.count(),
+            func.count().filter(
+                MedicineMovement.status == movements.OPEN, MedicineMovement.expected_by < now
+            ),
+            func.count().filter(MedicineMovement.status == movements.SHORT),
+        )
+        .where(
+            MedicineMovement.state_silo.in_(states),
+            MedicineMovement.dispatched_at >= now - timedelta(days=RECEIPT_WINDOW_DAYS),
+        )
+        .group_by(MedicineMovement.state_silo)
+    )
+    return {
+        state: receipt_trust(total=total, overdue=overdue, short=short)
+        for state, total, overdue, short in rows.all()
+    }
 
 
 def federation_summary(rounds: list[dict]) -> dict:
@@ -3311,8 +3372,18 @@ async def federation_inspector(
     scored = [r.global_val_mae for r in rows if r.global_val_mae is not None]
     baseline = next((r.baseline_mae for r in reversed(rows) if r.baseline_mae), None)
     best = min(scored) if scored else None
+
+    # Today's ledger beside the recorded run (fix #54), on the last round only:
+    # that is the round whose weights became the model.
+    recorded = {s.state: s.trust for s in rounds[-1].per_silo} if rounds else {}
+    today = await _receipt_trust_now(session, sorted(recorded), datetime.now(timezone.utc))
+    if rounds:
+        for s in rounds[-1].per_silo:
+            if s.state in today:
+                s.trust_now, s.flagged_pct_now = today[s.state]
     return FederationOut(
         available=True,
+        silos_changed_since_run=silo_drift(recorded, {k: v[0] for k, v in today.items()}),
         run_id=latest,
         strategy=next((r.strategy for r in reversed(rows) if r.strategy), None),
         rounds=rounds,

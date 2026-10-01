@@ -63,3 +63,40 @@ def test_the_examples_that_stayed_are_the_silos_own_windows():
 def test_an_empty_run_has_no_figures():
     s = api.federation_summary([])
     assert s["final_mae"] is None and s["upload_bytes_total"] == 0 and s["total_windows"] == 0
+
+
+# ------------------------------------------- the run against today's ledger ---
+# Fix #54. The recorded run is dated 20 Sept; the demo data was reloaded on
+# 21 Sept, and the reload re-drew which state has the weak paperwork. The run's
+# per-state weights therefore describe a dataset that is no longer the one in
+# the database. The inspector now computes each state's receipt discipline
+# from today's ledger, by the federation's own rule, and says when the two
+# differ — so the tab is honest whichever dataset is loaded.
+
+
+def test_receipt_discipline_is_the_federations_own_rule():
+    # Mirrors federation/pytorchexample/silo.py: an unconfirmed consignment
+    # counts in full, a short one half, and 40% of that is a score of zero.
+    trust, flagged = api.receipt_trust(total=100, overdue=10, short=10)
+    assert (trust, flagged) == (0.625, 20.0)
+    assert api.receipt_trust(total=0, overdue=0, short=0) == (1.0, 0.0)
+    assert api.receipt_trust(total=10, overdue=10, short=0)[0] == 0.0
+
+
+def test_the_rule_matches_the_federation_source():
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "federation" / "pytorchexample" / "silo.py").read_text(
+        encoding="utf-8"
+    )
+    assert "penalty = min(1.0, (overdue + 0.5 * short) / total / 0.4)" in src
+    assert "interval '60 days'" in src
+
+
+def test_a_run_whose_weights_no_longer_match_the_ledger_is_said_to_differ():
+    recorded = {"BR": 0.389, "KL": 0.863, "MH": 0.755, "UP": 0.750}
+    today = {"BR": 0.665, "KL": 0.797, "MH": 0.341, "UP": 0.664}
+    assert api.silo_drift(recorded, today) == ["BR", "MH"]
+    assert api.silo_drift(recorded, {**recorded, "KL": 0.84}) == []
+    # A state today's ledger says nothing about is not called a difference.
+    assert api.silo_drift(recorded, {"BR": 0.389}) == []

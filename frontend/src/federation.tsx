@@ -650,11 +650,21 @@ export function FederationPanel({
                 past their window (counted in full) or arrive short (counted half). A state that
                 confirms fewer of its deliveries carries less of the shared model.
               </p>
+              {replayAt == null && data.silos_changed_since_run.length > 0 && (
+                <p role="note" className="mt-1.5 rounded border border-line bg-canvas px-2 py-1.5 text-[11px] leading-snug text-ink">
+                  <span className="font-semibold">This run describes an earlier dataset.</span> It was
+                  recorded on {rounds.length ? day(rounds[0].completed_at) : "an earlier day"}, and
+                  today's ledger gives {data.silos_changed_since_run.map(named).join(" and ")} a
+                  materially different score: the data behind them has changed since the run, as it
+                  does when the demonstration data is reloaded. The "recorded" columns are the run's
+                  own figures, as stored then, and the model in use is that run's model.
+                </p>
+              )}
               {weighting && (
                 <p className="mt-1 text-[11px] leading-snug text-ink-2">
-                  {named(weighting.worst.state)} is the clearest case:{" "}
-                  {weighting.worst.flagged_pct.toFixed(1)}% of its warehouse consignments in the last
-                  60 days went unconfirmed or arrived short, against{" "}
+                  In the recorded run, {named(weighting.worst.state)} is the clearest case:{" "}
+                  {weighting.worst.flagged_pct.toFixed(1)}% of its warehouse consignments in the 60
+                  days before the run went unconfirmed or arrived short, against{" "}
                   {weighting.best.flagged_pct.toFixed(1)}% in {named(weighting.best.state)} — so its{" "}
                   {weighting.worst.windows.toLocaleString("en-IN")} examples count as{" "}
                   {weighting.worst.counts_as.toLocaleString("en-IN")}, {weighting.lostPct}% less
@@ -682,8 +692,9 @@ export function FederationPanel({
                   <tr className="text-ink-3">
                     <th className="py-1 text-left font-medium">State</th>
                     <th className="py-1 text-right font-medium">{L.windows}</th>
-                    <th className="py-1 text-right font-medium">{L.trust}</th>
+                    <th className="py-1 text-right font-medium">{L.trust}, recorded</th>
                     <th className="py-1 text-right font-medium">{L.countsAs}</th>
+                    <th className="py-1 text-right font-medium">Today's ledger</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -699,6 +710,19 @@ export function FederationPanel({
                       </td>
                       <td className="py-1 text-right font-mono tabular-nums text-ink">
                         {s.counts_as.toLocaleString("en-IN")}
+                      </td>
+                      <td
+                        className="py-1 text-right font-mono tabular-nums text-ink-2"
+                        title={
+                          s.flagged_pct_now != null
+                            ? `${s.flagged_pct_now.toFixed(1)}% of its consignments in the last 60 days unconfirmed or short, from the ledger now`
+                            : undefined
+                        }
+                      >
+                        {replayAt != null || s.trust_now == null ? "—" : s.trust_now.toFixed(3)}
+                        {replayAt == null && data.silos_changed_since_run.includes(s.state) && (
+                          <span className="ml-1 font-sans text-[10px] text-ink">changed</span>
+                        )}
                       </td>
                     </tr>
                   ))}

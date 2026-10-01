@@ -339,6 +339,9 @@ export interface FederationSilo {
   trust: number;
   flagged_pct: number;
   train_loss: number;
+  /** Fix #54: the same score from today's ledger; set on the last round only. */
+  trust_now?: number | null;
+  flagged_pct_now?: number | null;
 }
 
 export interface FederationRound {
@@ -381,6 +384,10 @@ export interface FederationInspector {
   upload_bytes_total: number;
   /** The states' own training examples: the rows that never moved. */
   total_windows: number;
+  /** Fix #54: states whose receipt discipline in today's ledger differs
+   *  materially from what the run recorded. Not empty means the run was
+   *  trained on a dataset that is no longer the one in the database. */
+  silos_changed_since_run: string[];
 }
 
 /** One real round started from the page; phases are lines Flower printed. */
