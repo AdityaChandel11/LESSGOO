@@ -94,12 +94,19 @@ export default function Incoming({
           {rows.map((t) => (
             <li key={t.id} className="rounded-md border border-line px-2.5 py-2">
               <p className="text-[12.5px] text-ink">
-                <span className="font-medium">{t.to.name}</span> asks for{" "}
+                {/* Fix #40: a state-plan recommendation is not a request the centre typed. */}
+                <span className="font-medium">{t.to.name}</span>{" "}
+                {t.triggered_by === "facility_request" ? "asks for" : "is recommended"}{" "}
                 <span className="font-mono">{Math.round(t.qty).toLocaleString("en-IN")}</span> {t.unit} of{" "}
                 <span className="font-medium">{t.sku_name}</span>
               </p>
               <p className="mt-0.5 text-[11px] text-ink-3">
-                ~{Math.round(t.route_km)} km
+                {t.triggered_by === "facility_request"
+                  ? "Requested by the centre"
+                  : t.rationale.outbreak
+                    ? `Recommended by the state plan — pre-positioning for ${t.rationale.outbreak.disease}`
+                    : "Recommended by the state plan"}
+                {" · "}~{Math.round(t.route_km)} km
                 {t.rationale.recipient_days_before != null &&
                   ` · they have ${formatDays(t.rationale.recipient_days_before)} left`}
                 {t.rationale.donor_days_after_plan != null &&
