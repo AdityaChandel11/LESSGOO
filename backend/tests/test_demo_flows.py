@@ -39,7 +39,9 @@ def test_the_demo_request_does_not_exist_outside_demo_mode(monkeypatch):
     assert exc.value.status_code == 404
 
 
-def test_stocking_advice_says_its_demand_trend_is_simulated():
+def test_stocking_advice_invents_no_demand_trend():
+    # Fix #41: the random "demand up N% (simulated)" is gone; the rise comes
+    # from declaring the outbreak (observed, or the officer's assumption).
     advice = idsp.stocking_advice("MH", 9)
-    assert advice and all(any("(simulated)" in s for s in a["signals"]) for a in advice)
+    assert advice and not any("simulated" in s for a in advice for s in a["signals"])
     assert all(a["medicines"] for a in advice)

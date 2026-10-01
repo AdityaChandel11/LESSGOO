@@ -557,6 +557,20 @@ async def plan_transfers(
     )
 
 
+@router.get("/transfers/oversight", tags=["transfers"])
+async def transfers_oversight(
+    state: str = Query(..., min_length=2, max_length=4),
+    session: AsyncSession = Depends(get_session),
+    user: Principal = Depends(current_user),
+) -> dict:
+    """Fix #39: one state's redistribution as an officer oversees it — the
+    pipeline, what is stuck, and the exceptions that are theirs to act on.
+    Bounded by the state's facilities and the last 30 days."""
+    if await session.scalar(select(Facility.id).where(Facility.state_silo == state).limit(1)) is None:
+        raise HTTPException(status_code=404, detail="Unknown state")
+    return await redistribution.oversight(session, state, datetime.now(timezone.utc))
+
+
 @router.get("/transfers", response_model=list[TransferOut], tags=["transfers"])
 async def get_transfers(
     state: str | None = Query(default=None),
@@ -689,7 +703,13 @@ async def _decide(
     # The emergency drill runs in the Nashik sandbox in demo mode; an officer
     # running it acts for the donor there, and the drill says so on screen.
     in_sandbox = all(in_demo_sandbox(f.state_silo, f.district) for f in (src, dst))
-    if not allowed and settings.demo_mode and in_sandbox and user.role in ("state_officer", "block_mo"):
+    # A public demo account outside the sandbox is told that, not a vaguer
+    # "outside your area".
+    if not in_sandbox and is_public_demo(user):
+        raise HTTPException(status_code=403, detail=demo_sandbox_refusal())
+    if not allowed and settings.demo_mode and in_sandbox and user.role in (
+        "admin", "state_officer", "block_mo"
+    ):
         allowed = can_submit_reading(
             user, facility_id=src.id, facility_state=src.state_silo, facility_district=src.district
         )

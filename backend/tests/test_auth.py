@@ -57,7 +57,8 @@ CROSS_STATE = dict(from_state="MH", from_district="Nashik", to_state="GJ", to_di
 @pytest.mark.parametrize(
     "who, route, allowed",
     [
-        (ADMIN, CROSS_STATE, True),
+        # Fix #39: the administrator watches; the donor decides.
+        (ADMIN, CROSS_STATE, False),
         # Officers watch transfers; the donor centre decides them.
         (MH_OFFICER, WITHIN_NASHIK, False),
         (NASHIK_MO, WITHIN_NASHIK, False),

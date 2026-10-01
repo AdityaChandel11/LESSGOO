@@ -108,11 +108,11 @@ def can_decide_transfer(
 
     Stock leaves a shelf only when the staff of the centre that holds it say
     yes, so the human approval of spec 1.6 sits with the donor. District and
-    state officers see every transfer on the dashboard but do not decide them.
-    The platform administrator can act on any transfer.
+    state officers and the platform administrator see every transfer and act
+    on exceptions; none of them approves a routine trip (fix #39, decision
+    recorded in the fix list). The labelled sandbox drill is the one place an
+    officer acts for the donor, and api._decide grants that, not this rule.
     """
-    if p.role == "admin":
-        return True
     if p.role == "facility_user":
         return from_facility is not None and p.facility_id == from_facility
     return False

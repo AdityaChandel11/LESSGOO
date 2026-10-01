@@ -301,6 +301,11 @@ GUARDED = {
     "/facilities/{facility_id}/checkins",
     "/facilities/{facility_id}/chase",
     "/ingest/simulate",
+    # Fix #41/#42: declaring and ending check outbreak.may_declare (sandbox
+    # for demo accounts); reading a report refuses public demo accounts.
+    "/outbreaks/declare",
+    "/outbreaks/{outbreak_id}/end",
+    "/outbreaks/idsp-report",
 }
 EXEMPT = {
     "/transfers/explain": "writes nothing but a cache of the model's wording",

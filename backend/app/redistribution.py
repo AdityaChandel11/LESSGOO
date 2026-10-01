@@ -30,16 +30,18 @@ from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 import numpy as np
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from . import maps, movements, outbreak, services
+from .movements import OPEN as MOVEMENT_OPEN, RECEIVED as MOVEMENT_RECEIVED, SHORT as MOVEMENT_SHORT
 from .config import settings
 from .models import (
     Approval,
     Facility,
     FacilitySkuState,
+    MedicineMovement,
     Sku,
     StockReading,
     Transfer,
@@ -508,6 +510,212 @@ def _outbreak_note(
     base = unsurged.get((p.to_id, p.sku_code))
     days = round(base.qty / base.burn, 2) if base is not None and base.burn > 0 else None
     return {"outbreak": surge.rationale(days)}
+
+
+# ================================================= oversight (fix #39) ===
+# The Redistribution tab is oversight, not an approval queue: the donor
+# centre decides every trip, and officers watch the pipeline and act on its
+# exceptions. Everything below is counted from the rows, bounded by one state
+# and OVERSIGHT_DAYS.
+
+OVERSIGHT_DAYS = 30
+
+
+def pipeline(transfers: list[dict], movements: list[dict]) -> dict[str, int]:
+    """Where every recommendation and request of the window stands now."""
+    by_status = defaultdict(int)
+    for t in transfers:
+        by_status[t["status"]] += 1
+    moved = defaultdict(int)
+    for m in movements:
+        moved[m["status"]] += 1
+    return {
+        "recommended": len(transfers),
+        "awaiting_donor": by_status["proposed"],
+        "accepted": by_status["approved"] + by_status["completed"],
+        "declined": by_status["rejected"],
+        "withdrawn": by_status["cancelled"],
+        "in_transit": moved[MOVEMENT_OPEN],
+        "received": moved[MOVEMENT_RECEIVED] + moved[MOVEMENT_SHORT] + moved["over"],
+        # Received in full: the receipt matched the dispatch.
+        "verified": moved[MOVEMENT_RECEIVED],
+    }
+
+
+def would_lift(proposals: list[dict], critical_days: float) -> int:
+    """Receivers the open plan takes from under the critical line to over it,
+    if every donor accepts — a promise, not an outcome, and worded as one."""
+    lifted = {
+        p["to"]
+        for p in proposals
+        if p["status"] == "proposed"
+        and p.get("recipient_days_before") is not None
+        and p["recipient_days_before"] < critical_days
+        and (p.get("recipient_days_after_plan") or 0) >= critical_days
+    }
+    return len(lifted)
+
+
+def no_reply(transfers: list[dict], now: datetime, window: timedelta) -> list[dict]:
+    """Proposals still waiting for the donor after the reply window."""
+    return [t for t in transfers if t["status"] == "proposed" and now - t["created_at"] > window]
+
+
+def not_received(movements: list[dict], now: datetime) -> list[dict]:
+    """Deliveries still on the road after the day they were expected."""
+    return [m for m in movements if m["status"] == MOVEMENT_OPEN and m["expected_by"] < now]
+
+
+async def oversight(session: AsyncSession, state: str, now: datetime) -> dict:
+    """The officer's view of one state's redistribution, from the rows."""
+    since = now - timedelta(days=OVERSIGHT_DAYS)
+    in_state = select(Facility.id).where(Facility.state_silo == state)
+    names = {
+        fid: (name, district)
+        for fid, name, district in (
+            await session.execute(
+                select(Facility.id, Facility.name, Facility.district).where(
+                    Facility.state_silo == state
+                )
+            )
+        ).all()
+    }
+    sku_names = {s.code: s.name for s in (await session.execute(select(Sku))).scalars()}
+
+    transfers = [
+        {
+            "id": t.id, "status": t.status, "triggered_by": t.triggered_by, "to": t.to_facility,
+            "from": t.from_facility, "sku": t.sku_code, "qty": float(t.qty or 0),
+            "created_at": t.created_at,
+            "recipient_days_before": (t.rationale or {}).get("recipient_days_before"),
+            "recipient_days_after_plan": (t.rationale or {}).get("recipient_days_after_plan"),
+        }
+        for t in (
+            await session.execute(
+                select(Transfer).where(
+                    Transfer.to_facility.in_(in_state), Transfer.created_at >= since
+                )
+            )
+        ).scalars()
+    ]
+    ids = [t["id"] for t in transfers]
+    movements = (
+        [
+            {
+                "id": m.id, "status": m.status, "transfer_id": m.transfer_id,
+                "to": m.to_facility, "sku": m.sku_code, "batch": m.batch_id,
+                "qty": float(m.qty_dispatched), "expected_by": m.expected_by,
+            }
+            for m in (
+                await session.execute(
+                    select(MedicineMovement).where(MedicineMovement.transfer_id.in_(ids))
+                )
+            ).scalars()
+        ]
+        if ids
+        else []
+    )
+
+    solver_open = [
+        t for t in transfers if t["status"] == "proposed" and t["triggered_by"] == SOLVER_PROPOSAL
+    ]
+    computed_at = max((t["created_at"] for t in solver_open), default=None)
+    reports_since = 0
+    if computed_at is not None:
+        reports_since = int(
+            await session.scalar(
+                select(func.count())
+                .select_from(StockReading)
+                .where(
+                    StockReading.reported_at > computed_at,
+                    StockReading.facility_id.in_(in_state),
+                )
+            )
+            or 0
+        )
+
+    # Exceptions read from the map's stored rows for this state: the
+    # controlled medicines the solver never touches, and centres under the
+    # critical line that no open trip reaches.
+    short_rows = (
+        await session.execute(
+            select(
+                FacilitySkuState.facility_id, FacilitySkuState.sku_code,
+                FacilitySkuState.days_of_stock, Sku.is_controlled,
+            )
+            .join(Sku, Sku.code == FacilitySkuState.sku_code)
+            .where(
+                FacilitySkuState.facility_id.in_(in_state),
+                FacilitySkuState.status.in_(("critical", "at_risk")),
+            )
+        )
+    ).all()
+    reached = {
+        (t["to"], t["sku"]) for t in transfers if t["status"] in ("proposed", "approved")
+    }
+
+    def where(fid: str) -> dict:
+        name, district = names.get(fid, (fid, ""))
+        return {"facility_id": fid, "name": name, "district": district}
+
+    controlled = [
+        {**where(fid), "sku_code": sku, "sku_name": sku_names.get(sku, sku),
+         "days": round(days, 1) if days is not None else None}
+        for fid, sku, days, is_controlled in short_rows
+        if is_controlled
+    ]
+    unreached = [
+        {**where(fid), "sku_code": sku, "sku_name": sku_names.get(sku, sku),
+         "days": round(days, 1) if days is not None else None}
+        for fid, sku, days, is_controlled in short_rows
+        if not is_controlled
+        and days is not None
+        and days < settings.critical_days
+        and (fid, sku) not in reached
+    ]
+    unreached.sort(key=lambda r: r["days"] if r["days"] is not None else 1e9)
+
+    # The real reply window, not the demo's minutes-long one: an officer's
+    # "no reply" means a donor centre has sat on it for a working day.
+    reply_window = timedelta(hours=settings.request_reply_hours)
+
+    def trip(t: dict) -> dict:
+        return {
+            "transfer_id": t["id"], "sku_code": t["sku"], "sku_name": sku_names.get(t["sku"], t["sku"]),
+            "qty": t["qty"], "from": where(t["from"]) if t["from"] in names else {"facility_id": t["from"], "name": t["from"], "district": ""},
+            "to": where(t["to"]), "created_at": t["created_at"],
+        }
+
+    return {
+        "state": state,
+        "window_days": OVERSIGHT_DAYS,
+        "recommended_open": len(solver_open),
+        "requests_open": sum(
+            1 for t in transfers if t["status"] == "proposed" and t["triggered_by"] != SOLVER_PROPOSAL
+        ),
+        "computed_at": computed_at,
+        "reports_since": reports_since,
+        "would_lift": would_lift(
+            [t for t in transfers if t["status"] == "proposed"], settings.critical_days
+        ),
+        "critical_days": settings.critical_days,
+        "pipeline": pipeline(transfers, movements),
+        "no_reply": [trip(t) for t in no_reply(transfers, now, reply_window)][:20],
+        "no_reply_total": len(no_reply(transfers, now, reply_window)),
+        "reply_window_hours": settings.request_reply_hours,
+        "not_received": [
+            {"movement_id": m["id"], "transfer_id": m["transfer_id"], "batch": m["batch"],
+             "sku_name": sku_names.get(m["sku"], m["sku"]), "qty": m["qty"],
+             "to": where(m["to"]), "expected_by": m["expected_by"]}
+            for m in not_received(movements, now)
+        ][:20],
+        "not_received_total": len(not_received(movements, now)),
+        "declined": [trip(t) for t in transfers if t["status"] == "rejected"][:20],
+        "controlled": controlled[:20],
+        "controlled_total": len(controlled),
+        "unreached": unreached[:20],
+        "unreached_total": len(unreached),
+    }
 
 
 @dataclass

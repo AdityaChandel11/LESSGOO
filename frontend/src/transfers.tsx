@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   type Bucket,
+  type Oversight,
   type Plan,
   type Shortfall,
   type Sku,
@@ -10,6 +11,7 @@ import {
   api,
   formatDays,
 } from "./api";
+import { ChaseButton } from "./chase";
 import { StackBar } from "./panels";
 import { WhyLine } from "./why";
 
@@ -177,7 +179,123 @@ function isHighImpact(trip: Trip): boolean {
   );
 }
 
+function clock(iso: string): string {
+  return new Date(iso).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+/**
+ * Fix #39: the pipeline and the exceptions, counted from the rows. The donor
+ * centre decides every trip; these are what an officer watches and acts on.
+ */
+function OversightBlock({ o }: { o: Oversight }) {
+  const p = o.pipeline;
+  const stages: [string, number][] = [
+    ["Recommended", p.recommended],
+    ["Awaiting donor", p.awaiting_donor],
+    ["Accepted", p.accepted],
+    ["In transit", p.in_transit],
+    ["Received", p.received],
+    ["Received in full", p.verified],
+  ];
+  return (
+    <div className="border-b border-line px-4 py-3">
+      <Eyebrow>Pipeline, last {o.window_days} days</Eyebrow>
+      <ol className="mt-1.5 flex flex-wrap items-center gap-x-1 gap-y-1 text-[11.5px]">
+        {stages.map(([label, n], i) => (
+          <li key={label} className="flex items-center gap-1">
+            {i > 0 && <span aria-hidden="true" className="text-ink-3">→</span>}
+            <span className="text-ink-2">{label}</span>
+            <span className="font-mono font-semibold tabular-nums text-ink">{n.toLocaleString("en-IN")}</span>
+          </li>
+        ))}
+      </ol>
+      {(p.declined > 0 || p.withdrawn > 0) && (
+        <p className="mt-1 text-[11px] text-ink-3">
+          {p.declined} declined by the donor · {p.withdrawn} withdrawn by the centre that asked
+        </p>
+      )}
+    </div>
+  );
+}
+
+function ExceptionGroup({
+  title,
+  total,
+  children,
+}: {
+  title: string;
+  total: number;
+  children: React.ReactNode;
+}) {
+  if (total === 0) return null;
+  return (
+    <details className="border-b border-line px-4 py-2.5" open={total <= 5}>
+      <summary className="cursor-pointer text-[12px] font-semibold text-ink">
+        {title} <span className="font-mono text-ink-3">{total.toLocaleString("en-IN")}</span>
+      </summary>
+      <ul className="mt-1.5 space-y-1">{children}</ul>
+    </details>
+  );
+}
+
+function Exceptions({ o }: { o: Oversight }) {
+  const none =
+    o.no_reply_total + o.not_received_total + o.unreached_total + o.controlled_total + o.declined.length === 0;
+  return (
+    <div>
+      <div className="border-b border-line bg-canvas px-4 py-2">
+        <Eyebrow>Exceptions · officers act on these</Eyebrow>
+        {none && <p className="mt-1 text-[12px] text-ink-2">Nothing stuck and nothing unreached.</p>}
+      </div>
+      <ExceptionGroup title={`No reply from the donor in over ${o.reply_window_hours} h`} total={o.no_reply_total}>
+        {o.no_reply.slice(0, 8).map((t) => (
+          <li key={t.transfer_id} className="text-[11.5px] text-ink-2">
+            <span className="font-medium text-ink">{t.from.name}</span> → {t.to.name} · {t.sku_name} · asked{" "}
+            {new Date(t.created_at).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}
+          </li>
+        ))}
+      </ExceptionGroup>
+      <ExceptionGroup title="Dispatched, not received by the expected day" total={o.not_received_total}>
+        {o.not_received.slice(0, 8).map((m) => (
+          <li key={m.movement_id} className="text-[11.5px] text-ink-2">
+            <span className="font-medium text-ink">{m.to.name}</span> · {m.sku_name} · batch {m.batch} · expected{" "}
+            {new Date(m.expected_by).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}
+            <span className="ml-1.5 inline-block">
+              <ChaseButton facilityId={m.to.facility_id} topic="receipt" movementId={m.movement_id} label="Chase receipt" />
+            </span>
+          </li>
+        ))}
+      </ExceptionGroup>
+      <ExceptionGroup
+        title={`Under ${o.critical_days} days and no recommendation reaches them — escalate to the state warehouse`}
+        total={o.unreached_total}
+      >
+        {o.unreached.slice(0, 8).map((u) => (
+          <li key={`${u.facility_id}:${u.sku_code}`} className="text-[11.5px] text-ink-2">
+            <span className="font-medium text-ink">{u.name}</span> ({u.district}) · {u.sku_name} · {formatDays(u.days)} left
+          </li>
+        ))}
+      </ExceptionGroup>
+      <ExceptionGroup title="Controlled medicines short — manual review, never routed automatically" total={o.controlled_total}>
+        {o.controlled.slice(0, 8).map((u) => (
+          <li key={`${u.facility_id}:${u.sku_code}`} className="text-[11.5px] text-ink-2">
+            <span className="font-medium text-ink">{u.name}</span> ({u.district}) · {u.sku_name} · {formatDays(u.days)} left
+          </li>
+        ))}
+      </ExceptionGroup>
+      <ExceptionGroup title="Declined by the donor" total={o.declined.length}>
+        {o.declined.slice(0, 8).map((t) => (
+          <li key={t.transfer_id} className="text-[11.5px] text-ink-2">
+            <span className="font-medium text-ink">{t.from.name}</span> declined {t.sku_name} for {t.to.name}
+          </li>
+        ))}
+      </ExceptionGroup>
+    </div>
+  );
+}
+
 export function RedistributionPanel({
+  stateCode,
   stateLabel,
   sku,
   skus,
@@ -195,6 +313,7 @@ export function RedistributionPanel({
   onHoverTrip,
   onFocusTrip,
 }: {
+  stateCode: string;
   canPlan: boolean;
   /** Why the plan is view-only, when the usual reason is not the true one. */
   viewOnlyNote?: string;
@@ -217,6 +336,30 @@ export function RedistributionPanel({
   const [visibleCount, setVisibleCount] = useState(40);
   const [busy, setBusy] = useState<Set<string>>(new Set());
   const [errors, setErrors] = useState<Record<number, string>>({});
+  const [oversight, setOversight] = useState<Oversight | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+
+  // Re-read whenever the trips change: the same poll that moves the list
+  // moves the pipeline.
+  useEffect(() => {
+    let alive = true;
+    api
+      .oversight(stateCode)
+      .then((o) => alive && setOversight(o))
+      .catch(() => alive && setOversight(null));
+    return () => {
+      alive = false;
+    };
+  }, [stateCode, transfers]);
+
+  // Progress while the solver runs: plain elapsed seconds, nothing animated.
+  useEffect(() => {
+    if (!planning) return;
+    setElapsed(0);
+    const started = Date.now();
+    const id = window.setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 1000);
+    return () => window.clearInterval(id);
+  }, [planning]);
 
   const medicine = sku ? (skus.find((s) => s.code === sku)?.name ?? sku) : "all medicines";
 
@@ -266,9 +409,23 @@ export function RedistributionPanel({
       <div className="border-b border-line px-4 pt-4 pb-4">
         <Eyebrow>Redistribution</Eyebrow>
         <h2 className="mt-1 text-[22px] font-semibold tracking-tight text-ink">{stateLabel}</h2>
-        <p className="mt-0.5 text-[12.5px] text-ink-2">
-          Transfers of <span className="font-medium text-ink">{medicine}</span> between facilities
-          in this state
+        <p className="mt-0.5 text-[12.5px] leading-snug text-ink-2">
+          {oversight && oversight.computed_at ? (
+            <>
+              The system recommends{" "}
+              <span className="font-medium text-ink">{oversight.recommended_open.toLocaleString("en-IN")}</span> transfers
+              in {stateLabel}, computed {clock(oversight.computed_at)} from the stock reported by then. Each goes to the
+              donor centre to accept — nothing moves without them.
+              {oversight.requests_open > 0 &&
+                ` ${oversight.requests_open} requests between centres are waiting for their donors too.`}
+            </>
+          ) : (
+            <>
+              No recommendations are open for {stateLabel}. Each one the system makes goes to the donor centre to
+              accept — nothing moves without them.
+            </>
+          )}
+          {sku && <> Showing <span className="font-medium text-ink">{medicine}</span>.</>}
         </p>
 
         <div className="mt-3 flex items-center gap-2">
@@ -278,34 +435,35 @@ export function RedistributionPanel({
               disabled={planning}
               className="h-9 rounded-md bg-brand px-3.5 text-[13px] font-medium text-white hover:bg-brand/90 disabled:opacity-60"
             >
-              {planning ? "Solving…" : plan || transfers.length ? "Re-run plan" : "Generate transfer plan"}
+              {planning ? `Solving… ${elapsed} s` : "Update recommendations"}
             </button>
           ) : (
             <p className="rounded-md bg-canvas px-2.5 py-1.5 text-[12px] text-ink-2">
               {viewOnlyNote ?? `View only. Plans for ${stateLabel} are generated by its state officers.`}
             </p>
           )}
-          {plan && planMs !== null && (
+          {oversight?.computed_at && !planning && (
             <span className="text-[11px] text-ink-3">
-              Solved with {plan.solver === "ortools" ? "OR-Tools" : plan.solver} in{" "}
-              {(planMs / 1000).toFixed(1)} s
+              Last computed {clock(oversight.computed_at)} · {oversight.reports_since.toLocaleString("en-IN")} stock
+              reports since
+              {plan && planMs !== null &&
+                ` · solved with ${plan.solver === "ortools" ? "OR-Tools" : plan.solver} in ${(planMs / 1000).toFixed(1)} s`}
             </span>
           )}
         </div>
         {planError && <p className="mt-2 text-[12px] text-crit">{planError}</p>}
 
-        {plan ? (
+        {oversight && (oversight.recommended_open > 0 || oversight.unreached_total > 0) ? (
           <div className="mt-3 grid grid-cols-3 gap-px overflow-hidden rounded-lg border border-line bg-line">
-            <Stat value={counts.open.toLocaleString("en-IN")} label="trips to decide" />
+            <Stat value={counts.open.toLocaleString("en-IN")} label="trips awaiting their donors" />
             <Stat
-              value={String(plan.totals.facilities_helped)}
-              label="facilities helped"
-              tone={STATUS_COLOR.healthy}
+              value={oversight.would_lift.toLocaleString("en-IN")}
+              label={`would be lifted above ${oversight.critical_days} days if accepted`}
             />
             <Stat
-              value={String(plan.totals.facilities_still_short)}
-              label="still short"
-              tone={plan.totals.facilities_still_short ? STATUS_COLOR.critical : undefined}
+              value={oversight.unreached_total.toLocaleString("en-IN")}
+              label="short with no trip — state warehouse"
+              tone={oversight.unreached_total ? STATUS_COLOR.critical : undefined}
             />
           </div>
         ) : (
@@ -327,8 +485,8 @@ export function RedistributionPanel({
           {(
             [
               ["impact", "High impact", impact.length],
-              ["open", `To decide`, counts.open],
-              ["approved", "Approved", counts.approved],
+              ["open", "Awaiting donor", counts.open],
+              ["approved", "Accepted", counts.approved],
               ["all", "All", trips.length],
             ] as const
           ).map(([v, label, n]) => (
@@ -387,14 +545,16 @@ export function RedistributionPanel({
           </p>
         )}
 
-        {scopedUnmet.length > 0 && (
+        {oversight && <OversightBlock o={oversight} />}
+        {oversight && <Exceptions o={oversight} />}
+        {!oversight && scopedUnmet.length > 0 && (
           <ShortfallList
             title="Still short — escalate to state warehouse"
             tone={STATUS_COLOR.critical}
             items={scopedUnmet}
           />
         )}
-        {scopedManual.length > 0 && (
+        {!oversight && scopedManual.length > 0 && (
           <ShortfallList
             title="Controlled substances — manual review"
             tone="#4a525c"

@@ -241,7 +241,9 @@ export const can = {
     u: User,
     t: { fromId: string; state: string; fromDistrict: string; toDistrict: string },
   ) =>
-    (u.role === "admin" || (u.role === "facility_user" && u.facility_id === t.fromId)) &&
+    // Fix #39: the donor centre decides; officers and administrators oversee.
+    u.role === "facility_user" &&
+    u.facility_id === t.fromId &&
     inDemoSandbox(u, t.state, t.fromDistrict) &&
     inDemoSandbox(u, t.state, t.toDistrict),
   /**
@@ -464,6 +466,7 @@ export const api = {
   activeOutbreaks: (state: string | null) => get<ActiveOutbreaks>("/outbreaks/active", { state }),
   declareOutbreak: (body: { state: string; district: string; disease: string; surge_pct: number | null }) =>
     post<DeclaredOutbreak>("/outbreaks/declare", body),
+  oversight: (state: string) => get<Oversight>("/transfers/oversight", { state }),
   usage: (facilityId: string, sku: string) =>
     get<Usage>(`/facilities/${encodeURIComponent(facilityId)}/usage`, { sku }),
   latestIdspReport: () => get<IdspReport | null>("/outbreaks/idsp-reports/latest"),
@@ -1371,6 +1374,68 @@ export interface IdspReport {
   unparsed: number;
   activated: number;
   trips_proposed: number;
+}
+
+/** Fix #39: one state's redistribution as an officer oversees it. */
+export interface OversightPlace {
+  facility_id: string;
+  name: string;
+  district: string;
+}
+
+export interface OversightTrip {
+  transfer_id: number;
+  sku_code: string;
+  sku_name: string;
+  qty: number;
+  from: OversightPlace;
+  to: OversightPlace;
+  created_at: string;
+}
+
+export interface OversightShort extends OversightPlace {
+  sku_code: string;
+  sku_name: string;
+  days: number | null;
+}
+
+export interface Oversight {
+  state: string;
+  window_days: number;
+  recommended_open: number;
+  requests_open: number;
+  computed_at: string | null;
+  reports_since: number;
+  would_lift: number;
+  critical_days: number;
+  pipeline: {
+    recommended: number;
+    awaiting_donor: number;
+    accepted: number;
+    declined: number;
+    withdrawn: number;
+    in_transit: number;
+    received: number;
+    verified: number;
+  };
+  no_reply: OversightTrip[];
+  no_reply_total: number;
+  reply_window_hours: number;
+  not_received: {
+    movement_id: number;
+    transfer_id: number;
+    batch: string;
+    sku_name: string;
+    qty: number;
+    to: OversightPlace;
+    expected_by: string;
+  }[];
+  not_received_total: number;
+  declined: OversightTrip[];
+  controlled: OversightShort[];
+  controlled_total: number;
+  unreached: OversightShort[];
+  unreached_total: number;
 }
 
 /** Fix #84: one medicine's last 28 days of use, burn rate and forecast. */

@@ -810,6 +810,7 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
             activeState ? (
               <RedistributionPanel
                 key={activeState}
+                stateCode={activeState}
                 stateLabel={stateName(activeState)}
                 sku={sku}
                 skus={skus}
