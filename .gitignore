@@ -44,3 +44,13 @@ KEYS.md
 
 # --- evaluation outputs: generated, never committed ---
 backend/eval_reports/
+
+# --- internal working notes and agent tooling: kept locally, not published ---
+CLAUDE.md
+BLOCKERS.md
+.claude/
+.superpowers/
+docs/planning/
+docs/specs/
+docs/RENDER_OPS.md
+docs/STORAGE_NOTES.md
