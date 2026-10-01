@@ -20,7 +20,7 @@ This is a working prototype on synthetic data. Every facility, stock figure, bed
 | Sent per round | 22,788 bytes (5,697 weights × 4 bytes). 0 facility rows |
 | Google AI | Gemini vision (`gemini-3.1-flash-lite`), Gemini text (`gemini-3.5-flash-lite`), Google Maps Routes and Map Tiles (optional, off on the demo) |
 | Optimiser | OR-Tools SimpleMinCostFlow, greedy fallback |
-| Tests | 845 unit tests, 13 integration check suites |
+| Tests | 867 unit tests, 13 integration check suites |
 | Hosting | One Docker service on Render |
 | Languages | English, with Hindi labels on the main screens and Hindi briefings |
 
@@ -171,7 +171,7 @@ Six weighted rules check each facility's own signals against each other:
 - implausibly smooth figures
 - how much of what the facility reports can be verified
 
-Scores are computed live. A centre has one trust number, out of 100, with the same band words on the pharmacist's card and the officer's panel. A low score makes that facility's stock warning trip earlier and ranks a searchable audit queue. The wording is a reason to visit, never an accusation, and flags attach to facilities, never to people.
+Scores are computed live. A centre has one trust number, out of 100, with the same band words on the pharmacist's card and the officer's panel. Each rule says how many observations it rests on ("Based on 21 shifts in the last 14 days"), and a rule with too few is listed as not scored instead of moving the score. A low score makes that facility's stock warning trip earlier and ranks a searchable audit queue. The wording is a reason to visit, never an accusation, and flags attach to facilities, never to people.
 
 ### Bed capture
 
@@ -183,7 +183,7 @@ Gemini reads a bill, delivery slip, issue record or stock-count page and says wh
 
 ### Federation tab
 
-Each round's row shows when it finished, its error, the exact bytes sent and a weights hash. The aggregator asserts 0 facility rows before each round is written. Run next round trains one real round on the four silos, locally only.
+A header in plain words (how many training examples stayed in their states, how much each state sent), a flat diagram of the states and the Aggregator, and the model's error against the burn-rate rule on a chart scaled to the trained rounds. Each round's row shows when it finished, its error, the exact bytes sent and a weights hash; the aggregator asserts 0 facility records before each round is written. A Plain / Technical switch renames the same fields, and a closing section says what is not shown. Each state's recorded weight is shown beside the same score from today's ledger, and the panel says so when the run describes an earlier dataset. Run next round trains one real round on the four silos, locally only.
 
 ### Ingestion
 
@@ -239,6 +239,8 @@ Each silo's example count is scaled by its trust score before aggregation, so cl
 
 The four silos hold 139,427 windows in total (the sum of the per-silo counts). The anomalies are planted in the synthetic data to exercise the trust layer: the seed picks the weak state at random, so this says nothing about Bihar.
 
+**This run describes the dataset as it stood on 20 September.** The deployed data was reloaded on 21 September and the reload re-drew the weak state: today's ledger there shows Maharashtra, not Bihar, with the weak paperwork (checked 1 October). The committed `final_model.pt` is the model this run produced — its hash, `73488fa9…bfb2`, is the one recorded for the run's last round — but the per-state weights above are the run's, not today's. The Federation tab shows both and says so. The training has not been re-run on the current data.
+
 **Reproduction.** A real run on Flower's deployment engine, with one SuperLink and four SuperNode processes, each reading only its own state:
 
 | Round | MAE | Burn-rate rule, same held-out weeks | Bytes sent | Facility rows sent |
@@ -288,7 +290,7 @@ To see Gemini live, set `LLM_MODE=live` and `GEMINI_API_KEY` in `.env`, then che
 
 ```bash
 cd backend
-.venv/bin/python -m pytest -q     # 845 unit tests
+.venv/bin/python -m pytest -q     # 867 unit tests
 .venv/bin/python -m checks        # 13 integration suites, against the seeded database
 cd ../frontend && npx tsc -b && npm run build
 ```
@@ -358,7 +360,8 @@ Gaps in the current build:
 - The separation between states is enforced in the API and in the training queries, not yet in the database itself: one database role reads every table.
 - Beds and staff attendance are visible one facility at a time; there is no district or state view of either.
 - The map and national totals show each centre's status as of its last report; only the pharmacist's cards count cover down to today.
-- The Federation tab's wording has not had its plain-language pass; this README's figures are the ones to quote.
+- The recorded federated run was trained on the dataset before the last reload; its per-state weights no longer match today's ledger (see Federated result). The tab says so; the training has not been re-run.
+- A forecast is used only for the four training states and six medicines. No held-out-state check has been run, so nothing claims the model works anywhere else.
 - The SuperLink and SuperNodes run with `--insecure`. Production would need TLS and SuperNode authentication.
 - Gemini's read of a real IDSP report has not been run with a live key.
 - No cross-district trip has been demonstrated, although the solver allows one within a state.

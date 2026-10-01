@@ -82,7 +82,7 @@ then do it. Nothing here is pushed without Aditya's explicit OK.
 
 ---
 
-## Fix #1 — Federation tab tells the truth, in plain language  · APPROVED · status: TODO
+## Fix #1 — Federation tab tells the truth, in plain language  · APPROVED · status: DONE 6f605f8 (all ten points; figures computed on the server by `federation_summary`. Checked in the browser against a fixture shaped like the recorded run, because the local database holds no run)
 
 Scope: [frontend/src/federation.tsx](../../frontend/src/federation.tsx); maybe one field on
 `/api/federation/inspector` if the correct byte total needs silo count.
@@ -821,7 +821,7 @@ is the same data seen from the Federation tab — build once, show in both place
   breadcrumb are still missing (#47).
 - One 401 in console on load (auth check before sign-in) — harmless.
 
-### Fix #60 — National Data-trust overview + evidence threshold  · Tier 2 (threshold Tier 1) · status: TODO
+### Fix #60 — National Data-trust overview + evidence threshold  · Tier 2 (threshold Tier 1) · status: threshold DONE bb0a7fa (each signal says its sample; minimums 5 shifts / 5 stock reports / 3 ward reports / 3 consignments / 8 reports for smoothness; a thin signal is listed as not scored). National overview: TODO, Tier 2
 National: states ranked by share of low-confidence facilities, from the one materialized
 trust copy spec §12.6 allows (refreshed from `trust.compute()`); map switches to trust colours on
 this tab. **Tier 1 part:** show the sample size on every signal ("based on 3 shifts") and don't
@@ -1276,13 +1276,13 @@ The landing page is served by the same service, so a cold first click shows noth
 (Aditya's call, not built): Render's paid Starter plan (does not sleep), or an outside uptime pinger
 on `/api/health` every 10 minutes (it only pings the database and writes nothing).
 
-### Fix #54 — Is the recorded federation run from the data Render holds?  · Tier 1 check · status: TODO
+### Fix #54 — Is the recorded federation run from the data Render holds?  · Tier 1 check · status: DONE 38288d8 — **answer: the model yes, the weights no.** `final_model.pt` hashes to the last recorded round's `weights_sha256` (`73488fa9…bfb2`). But the run (20 Sept) records Bihar as the weak state (37.1%, 0.389) and today's ledger on Render gives Maharashtra ~38% and Bihar ~18%: the 21 Sept reseed re-drew the random weak state. The tab now shows today's ledger beside the recorded figures and says the run describes an earlier dataset. Re-running on a laptop and republishing is Aditya's call (BLOCKERS.md)
 Rounds are dated 20 Sept; Render was reseeded 21 Sept. Verify the run's windows/trust match
 the current DB (e.g. compare per-silo windows and trust against a fresh `load_state` count).
 If not, say so on the Federation tab or re-run on a laptop and republish (Aditya's OK).
 Also check `final_model.pt`'s hash against the last recorded round's `weights_sha256`.
 
-### Fix #55 — Forecasts for the 32 regions that don't train  · Tier 1 check · status: TODO
+### Fix #55 — Forecasts for the 32 regions that don't train  · Tier 1 check · status: DONE 077fa7f (checked: the publisher defaults to the four silo states but accepted any; the web service used any fresh row. No held-out-state check exists, so the publisher now refuses other states and both forecast readers ignore a row outside the model's states and medicines. NOTE for Aditya: CLAUDE.md's rebuild path says "publish forecasts for 36 regions" — the publisher now publishes for the 4 training states only)
 Only MH, KL, BR, UP are silos. Verify what `publish_forecast.py` writes for the other 32
 (global model applied, or burn rate). State it on screen truthfully ("forecast from the
 4-state model" vs "burn rate"); if the global model is applied to non-participants, show a
