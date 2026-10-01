@@ -380,53 +380,83 @@ async def read_ward_photo(
 # It runs on a *different* model from the ward photos on purpose. The free tier
 # caps GenerateRequestsPerDayPerProjectPerModel at 20 — per model — so a day of
 # bed photos cannot exhaust the briefings, or the reverse. `gemini_text_model`
-# is a lite model because the job is one sentence in two languages.
+# is a lite model because the job is a short list in two or three languages.
 #
 # What this never does is invent a figure. Every number the model may use is
-# handed to it in the prompt, and the prompt says so; the deterministic line in
-# `workspace.rules_briefing` is what renders when this is unavailable, out of
+# handed to it in the prompt, the prompt says so, and the answer is checked
+# against those figures; the computed list in `workspace.todo_items` is what renders when this is unavailable, out of
 # quota, or switched off, and it renders without an AI label.
 
 BRIEFING_PROMPT = (
-    "You write one short line of guidance for a pharmacist at a rural Indian "
-    "primary health centre, from their own stock position.\n"
+    "You write today's to-do list for a pharmacist at a rural Indian primary "
+    "health centre. The items below were computed from the centre's own "
+    "records and are already in priority order.\n"
     "Rules:\n"
-    "- Use ONLY the figures given below. Never invent a number, a date or a "
-    "medicine name.\n"
-    "- One sentence in English, one in Hindi. Plain words a busy person can "
-    "act on.\n"
-    "- Say what to do first, not what the data says.\n"
-    "- No clinical, dosing or treatment advice. This is about stock.\n"
+    "- Use ONLY the facts and figures given below. Never invent a number, a "
+    "date, a medicine name or a place. Do not calculate any new figure. Write "
+    "every number in Western digits (0-9).\n"
+    "- Keep the order. One short line per item, in plain words a busy person "
+    "can act on: what to do first, then why.\n"
+    "- You may join two items about the same medicine into one line. Never "
+    "add an item that is not below.\n"
+    "- No clinical, dosing or treatment advice. This is about stock, "
+    "deliveries, beds and attendance records.\n"
+    "- Write the whole list in {languages}. Keep medicine and centre names as "
+    "given.\n"
     "Centre: {facility}\n"
-    "Stock position today:\n"
+    "Today's items:\n"
     "{rows}\n"
 )
 
-BRIEFING_SCHEMA = {
-    "type": "object",
-    "properties": {"en": {"type": "string"}, "hi": {"type": "string"}},
-    "required": ["en", "hi"],
-}
+_LINES = {"type": "array", "items": {"type": "string"}}
 
-# One sentence each. Generous enough for Devanagari, which costs more tokens
-# per character than Latin script.
-BRIEFING_MAX_TOKENS = 400
+
+def briefing_schema(local: bool) -> dict:
+    """`local` is the state's language, asked for only where one is named."""
+    properties = {"en": _LINES, "hi": _LINES}
+    if local:
+        properties["local"] = _LINES
+    return {"type": "object", "properties": properties, "required": list(properties)}
+
+
+# A short line per item in up to three scripts. Generous enough for
+# Devanagari and the southern scripts, which cost more tokens per character
+# than Latin.
+BRIEFING_MAX_TOKENS = 1600
 
 
 @dataclass(frozen=True)
 class Briefing:
-    en: str
-    hi: str
+    # Language code -> the list in that language, in the order it was given.
+    lines: dict[str, list[str]]
     model: str
 
 
-def parse_briefing(payload: dict, *, model: str) -> Briefing:
-    """Validate what came back before any of it reaches a screen."""
-    en = (payload.get("en") or "").strip()
-    hi = (payload.get("hi") or "").strip()
-    if not en or not hi:
-        raise VisionError("The model did not return both languages")
-    return Briefing(en=en, hi=hi, model=model)
+def parse_briefing(
+    payload: dict, *, model: str, sources: list[str], local: str | None
+) -> Briefing:
+    """Validate what came back before any of it reaches a screen.
+
+    `sources` are the computed lines the model was given. An answer with more
+    lines than that has added something, and an answer holding a figure that
+    is in none of them has invented one; either is discarded whole, and the
+    caller shows the computed list instead.
+    """
+    wanted = {"en": "en", "hi": "hi"}
+    if local:
+        wanted[local] = "local"
+    lines: dict[str, list[str]] = {}
+    for code, key in wanted.items():
+        raw = payload.get(key)
+        got = [str(x).strip() for x in raw if str(x).strip()] if isinstance(raw, list) else []
+        if not got:
+            raise VisionError("The model did not return every language it was asked for")
+        if len(got) > len(sources):
+            raise VisionError("The model returned more lines than there are items")
+        if ungrounded_figures(" ".join(got), sources):
+            raise VisionError("The model used a figure that is not in this centre's records")
+        lines[code] = got
+    return Briefing(lines=lines, model=model)
 
 
 def briefing_available() -> bool:
@@ -444,30 +474,36 @@ async def write_briefing(
     *,
     facility_name: str,
     rows: list[str],
+    local: tuple[str, str] | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> Briefing:
-    """One line of guidance, in English and Hindi, from a live model.
+    """Today's list in English, Hindi and the state's language, from a live model.
 
-    `rows` are pre-formatted lines built by the caller from figures already on
-    screen — this function never reads the database, so there is no path by
-    which it can describe something the pharmacist is not also looking at.
+    `rows` are the computed to-do lines (workspace.todo_items) — this function
+    never reads the database, so there is no path by which it can describe
+    something the pharmacist is not also looking at. `local` is the state
+    language as (code, English name), or None where the state's language is
+    Hindi.
 
     Raises VisionError for every failure, including a spent quota. The caller
-    is expected to fall back to the deterministic line rather than retry.
+    is expected to fall back to the computed list rather than retry.
     """
     if settings.llm_mode != "live" or not settings.gemini_api_key:
         raise VisionError("The briefing model is not configured")
     if not rows:
-        raise VisionError("There is no stock position to describe")
+        raise VisionError("There is nothing to describe")
 
     model = settings.gemini_text_model
+    languages = "English, in Hindi and in {0}".format(local[1]) if local else "English and in Hindi"
     body = {
         "contents": [
             {
                 "parts": [
                     {
                         "text": BRIEFING_PROMPT.format(
-                            facility=facility_name, rows="\n".join(rows)
+                            facility=facility_name,
+                            languages=languages,
+                            rows="\n".join("- {0}".format(r) for r in rows),
                         )
                     }
                 ]
@@ -475,10 +511,10 @@ async def write_briefing(
         ],
         "generationConfig": {
             "responseMimeType": "application/json",
-            "responseSchema": BRIEFING_SCHEMA,
-            # Low, not zero: one sentence of advice reads better with a little
+            "responseSchema": briefing_schema(bool(local)),
+            # Low, not zero: a line of advice reads better with a little
             # freedom than a temperature-zero template, and the figures it may
-            # use are fixed by the prompt either way.
+            # use are fixed by the prompt and checked afterwards either way.
             "temperature": 0.2,
             "maxOutputTokens": BRIEFING_MAX_TOKENS,
         },
@@ -490,7 +526,9 @@ async def write_briefing(
         text = data["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError, TypeError) as exc:
         raise VisionError("the model returned no readable answer") from exc
-    return parse_briefing(_first_json_object(text), model=model)
+    return parse_briefing(
+        _first_json_object(text), model=model, sources=rows, local=local[0] if local else None
+    )
 
 
 # ======================================================= plain-language why ===

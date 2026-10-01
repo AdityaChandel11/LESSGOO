@@ -726,8 +726,9 @@ class FacilityBriefing(Base):
     """One cached line of "what to do today", per facility per language.
 
     A cache, and shaped like one. The composite primary key is the per-facility
-    cap: two rows for a centre, ever, overwritten in place rather than appended
-    to, so a judge clicking the button fifty times writes the same two rows.
+    cap: one row per language for a centre, ever, overwritten in place rather
+    than appended to, so a judge clicking the button fifty times writes the
+    same rows.
     `max_briefing_rows` caps the table as a whole, evicting the least recently
     generated — 3,510 facilities in two languages would otherwise be ~4 MB of
     cache on a 1 GB volume.
@@ -756,7 +757,9 @@ class FacilityBriefing(Base):
     )
 
     __table_args__ = (
-        CheckConstraint("lang IN ('en', 'hi')", name="ck_briefings_lang"),
+        # English, Hindi, and the state's own language where one is written
+        # (fix #85): at most three rows for a centre.
+        CheckConstraint("lang ~ '^[a-z]{2}$'", name="ck_briefings_lang"),
         # Eviction reads this; nothing else does.
         Index("ix_briefings_generated_at", "generated_at"),
     )

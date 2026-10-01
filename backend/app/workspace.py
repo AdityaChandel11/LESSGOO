@@ -763,6 +763,241 @@ def briefing_hash(rows: list[BriefingRow]) -> str:
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
 
 
+# ============================================================== to-do ===
+# Fix #85: the Today card as a prioritised list, not one sentence about one
+# medicine. Every line is computed from this centre's own rows, in an order a
+# rule decides, so it needs no key and reads the same whoever opens it. The
+# model's job (vision.write_briefing) is to say the same list in plainer
+# words and in the state's language; it may not add a line or a figure.
+
+
+@dataclass(frozen=True)
+class TodoDelivery:
+    """One consignment on its way to this centre."""
+
+    sku_name: str
+    unit: str
+    qty: float
+    from_name: str
+    expected_on: date
+    overdue: bool
+
+
+@dataclass(frozen=True)
+class TodoRequest:
+    """A request this centre raised that nobody has answered yet."""
+
+    sku_name: str
+    unit: str
+    qty: float
+    donor: str
+
+
+@dataclass(frozen=True)
+class TodoItem:
+    kind: str
+    en: str
+    hi: str
+    # The workspace tab where the thing is done.
+    tab: str
+
+
+@dataclass(frozen=True)
+class StateLanguage:
+    code: str
+    name: str
+    native: str
+
+
+# The principal official language of a state, where it is not Hindi. A centre
+# in any other state gets English and Hindi only.
+STATE_LANGUAGES: dict[str, StateLanguage] = {
+    "MH": StateLanguage("mr", "Marathi", "मराठी"),
+    "KL": StateLanguage("ml", "Malayalam", "മലയാളം"),
+    "TN": StateLanguage("ta", "Tamil", "தமிழ்"),
+    "KA": StateLanguage("kn", "Kannada", "ಕನ್ನಡ"),
+    "AP": StateLanguage("te", "Telugu", "తెలుగు"),
+    "TG": StateLanguage("te", "Telugu", "తెలుగు"),
+    "WB": StateLanguage("bn", "Bengali", "বাংলা"),
+    "GJ": StateLanguage("gu", "Gujarati", "ગુજરાતી"),
+    "PB": StateLanguage("pa", "Punjabi", "ਪੰਜਾਬੀ"),
+    "OD": StateLanguage("or", "Odia", "ଓଡ଼ିଆ"),
+    "AS": StateLanguage("as", "Assamese", "অসমীয়া"),
+}
+
+MAX_TODO = 7
+
+
+def state_language(state_code: str) -> StateLanguage | None:
+    return STATE_LANGUAGES.get(state_code)
+
+
+def _qty(value: float) -> str:
+    return "{0:,.0f}".format(value)
+
+
+def todo_items(
+    *,
+    rows: list[BriefingRow],
+    deliveries: list[TodoDelivery],
+    awaiting_your_reply: int,
+    own_waiting: list[TodoRequest],
+    outbreaks: list[str],
+    bed_report_today: bool | None,
+    checked_in_today: int | None,
+) -> list[TodoItem]:
+    """Today's list, most urgent first, capped at MAX_TODO.
+
+    The order is the rule: a shelf nobody has counted, then a shelf about to
+    empty, then stock that should have arrived, then a neighbour waiting on
+    this centre, then an outbreak, then everything that can wait a day.
+    `None` for the ward report or the check-in means "not known", and nothing
+    is asked for on the strength of not knowing.
+    """
+    requested = {r.sku_name for r in own_waiting}
+    items: list[TodoItem] = []
+
+    overdue = sorted(
+        (r for r in rows if r.status == COUNT_OVERDUE),
+        key=lambda r: r.ran_out_on or date.max,
+    )
+    for r in overdue:
+        counted = day_words(r.last_counted_on) if r.last_counted_on else "an earlier day"
+        ran_out = day_words(r.ran_out_on) if r.ran_out_on else "before today"
+        items.append(TodoItem(
+            "recount",
+            "Recount {0}: last counted {1} {2} on {3}; at your usual use it would have "
+            "run out around {4}.".format(r.sku_name, _qty(r.qty), r.unit, counted, ran_out),
+            "{0} दोबारा गिनें: आखिरी गिनती {3} को {1} {2} थी; सामान्य खपत पर यह लगभग {4} "
+            "तक खत्म हो गई होगी।".format(r.sku_name, _qty(r.qty), r.unit, counted, ran_out),
+            "medicines",
+        ))
+
+    def by_cover(status: str) -> list[BriefingRow]:
+        return sorted(
+            (r for r in rows if r.status == status and r.sku_name not in requested),
+            key=lambda r: r.days_of_stock if r.days_of_stock is not None else 1e9,
+        )
+
+    for r in by_cover("critical"):
+        cover_en = (
+            ", about {0} days of cover".format(_days(r.days_of_stock))
+            if r.days_of_stock is not None else ""
+        )
+        cover_hi = (
+            ", लगभग {0} दिन का स्टॉक".format(_days(r.days_of_stock))
+            if r.days_of_stock is not None else ""
+        )
+        items.append(TodoItem(
+            "order",
+            "Order {0} today: {1} {2} left{3}.".format(r.sku_name, _qty(r.qty), r.unit, cover_en),
+            "{0} का ऑर्डर आज ही दें: {1} {2} बचा है{3}।".format(
+                r.sku_name, _qty(r.qty), r.unit, cover_hi
+            ),
+            "medicines",
+        ))
+
+    late = sorted((d for d in deliveries if d.overdue), key=lambda d: d.expected_on)
+    for d in late:
+        when = day_words(d.expected_on)
+        items.append(TodoItem(
+            "delivery_overdue",
+            "Delivery overdue: {0} {1} of {2} from {3}, expected {4}. If it has arrived, "
+            "count it and confirm it on Orders.".format(
+                _qty(d.qty), d.unit, d.sku_name, d.from_name, when
+            ),
+            "डिलीवरी में देरी: {3} से {2} की {0} {1}, {4} तक आनी थी। आ चुकी हो तो गिनकर "
+            "ऑर्डर टैब पर पुष्टि करें।".format(_qty(d.qty), d.unit, d.sku_name, d.from_name, when),
+            "orders",
+        ))
+
+    if awaiting_your_reply > 0:
+        one = awaiting_your_reply == 1
+        items.append(TodoItem(
+            "reply_needed",
+            "{0} request{1} for your stock {2} waiting for your answer on Orders.".format(
+                awaiting_your_reply, "" if one else "s", "is" if one else "are"
+            ),
+            "आपके स्टॉक के लिए {0} अनुरोध आपके उत्तर की प्रतीक्षा में {1} — ऑर्डर टैब "
+            "देखें।".format(awaiting_your_reply, "है" if one else "हैं"),
+            "orders",
+        ))
+
+    for headline in outbreaks:
+        items.append(TodoItem(
+            "outbreak",
+            "{0}. Check your cover for its medicines.".format(headline),
+            "ज़िले में प्रकोप की सूचना: {0}। इसकी दवाओं का स्टॉक जाँचें।".format(headline),
+            "medicines",
+        ))
+
+    for r in by_cover("at_risk"):
+        if r.days_of_stock is None:
+            continue
+        items.append(TodoItem(
+            "order_soon",
+            "Request {0} this week: about {1} days of cover left.".format(
+                r.sku_name, _days(r.days_of_stock)
+            ),
+            "{0} के लिए इस सप्ताह अनुरोध करें: लगभग {1} दिन का स्टॉक बचा है।".format(
+                r.sku_name, _days(r.days_of_stock)
+            ),
+            "medicines",
+        ))
+
+    for d in sorted((d for d in deliveries if not d.overdue), key=lambda d: d.expected_on):
+        when = day_words(d.expected_on)
+        items.append(TodoItem(
+            "delivery_arriving",
+            "Expect {0} {1} of {2} from {3} by {4}. Count it before you confirm.".format(
+                _qty(d.qty), d.unit, d.sku_name, d.from_name, when
+            ),
+            "{3} से {2} की {0} {1} {4} तक आने वाली है। पुष्टि से पहले गिन लें।".format(
+                _qty(d.qty), d.unit, d.sku_name, d.from_name, when
+            ),
+            "orders",
+        ))
+
+    for q in own_waiting:
+        items.append(TodoItem(
+            "request_waiting",
+            "Your request for {0} {1} of {2} from {3} is awaiting a reply.".format(
+                _qty(q.qty), q.unit, q.sku_name, q.donor
+            ),
+            "{3} से {2} की {0} {1} का आपका अनुरोध उत्तर की प्रतीक्षा में है।".format(
+                _qty(q.qty), q.unit, q.sku_name, q.donor
+            ),
+            "orders",
+        ))
+
+    if bed_report_today is False:
+        items.append(TodoItem(
+            "bed_report",
+            "No ward bed report has been sent today. Today's code is on the Beds tab.",
+            "आज वार्ड की बेड रिपोर्ट नहीं भेजी गई है। आज का कोड बेड टैब पर है।",
+            "beds",
+        ))
+
+    if checked_in_today == 0:
+        items.append(TodoItem(
+            "check_in",
+            "No staff check-in has been recorded at this centre today.",
+            "आज इस केंद्र पर किसी कर्मचारी की उपस्थिति दर्ज नहीं हुई है।",
+            "attendance",
+        ))
+
+    if not items:
+        line = rules_briefing(rows)
+        return [TodoItem("all_clear", line["en"], line["hi"], "medicines")]
+    return items[:MAX_TODO]
+
+
+def todo_hash(items: list[TodoItem]) -> str:
+    """A fingerprint of the list a briefing describes: the cached wording
+    expires when the list changes, not only when the clock says so."""
+    return hashlib.sha256("\n".join(i.en for i in items).encode("utf-8")).hexdigest()
+
+
 # ====================================================== bounded reads ===
 # Everything below touches the database. Each query is bounded by one facility
 # or by one (state, sku) pair; none of them may grow into a national scan.
@@ -1017,7 +1252,7 @@ async def store_briefing(
     expire together — a screen that showed a fresh English line beside a stale
     Hindi one would be worse than showing neither.
 
-    The composite primary key already caps a facility at two rows; this evicts
+    The composite primary key already caps a facility at one row per language; this evicts
     across facilities once `max_briefing_rows` is reached, oldest first,
     because this is a cache and the oldest line is the one nobody is reading.
     """

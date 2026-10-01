@@ -369,7 +369,12 @@ export default function Medicines({
         </section>
       ))}
 
-      <Briefing facilityId={facilityId} computed={view.briefing} />
+      <Briefing
+        facilityId={facilityId}
+        computed={view.briefing}
+        todo={view.todo}
+        localLanguage={view.local_language}
+      />
 
       <StockPhoto facilityId={facilityId} onCommitted={onChanged} />
 

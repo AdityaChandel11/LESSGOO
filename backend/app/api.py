@@ -942,6 +942,21 @@ class OwnRequestOut(BaseModel):
     lapses_at: datetime
 
 
+class TodoOut(BaseModel):
+    """One line of today's list (fix #85), computed, in both languages."""
+
+    kind: str
+    en: str
+    hi: str
+    tab: str
+
+
+class LanguageOut(BaseModel):
+    code: str
+    name: str
+    native: str
+
+
 class WorkspaceOut(BaseModel):
     facility: FacilityOut
     skus: list[WorkspaceSkuOut]
@@ -954,6 +969,10 @@ class WorkspaceOut(BaseModel):
     # Both languages of the computed line, always present and needing no key.
     # The screen renders this on load; the model is an overlay on top of it.
     briefing: dict[str, str]
+    # Today's prioritised list, computed from this centre's rows (fix #85).
+    todo: list[TodoOut] = []
+    # The state's own language, where Gemini can write the list in it.
+    local_language: LanguageOut | None = None
     # Active outbreaks in this centre's district, with its own cover at the
     # outbreak rate (fix #58). Empty when there is none: nothing is shown.
     outbreaks: list[dict] = []
@@ -1092,27 +1111,25 @@ async def facility_workspace(
             )
         )
 
-    alerts = [
-        outbreak.centre_alert(
-            await outbreak.evaluate(session, row, now),
-            {r.sku_code: r.days_of_stock for r in rows},
-        )
-        for row in await outbreak.active(session, now, facility.state_silo)
-        if row.district == facility.district
-    ]
+    alerts = await _centre_alerts(
+        session, facility, {r.sku_code: r.days_of_stock for r in rows}, now
+    )
+    brief_rows = _briefing_rows(snap.skus, units, now, snap.warning_multiplier)
+    todo = await _todo_for(session, facility, snap.skus, brief_rows, alerts, units, now)
+    local = workspace.state_language(facility.state_silo)
 
     return WorkspaceOut(
         facility=_to_out(snap),
         outbreaks=alerts,
+        todo=[TodoOut(**vars(i)) for i in todo],
+        local_language=LanguageOut(**vars(local)) if local else None,
         skus=rows,
         open_requests=open_here,
         max_open_requests=settings.max_open_requests_per_facility,
         requests=[
             OwnRequestOut(**vars(r)) for r in await workspace.own_requests(session, facility.id)
         ],
-        briefing=workspace.rules_briefing(
-            _briefing_rows(snap.skus, units, now, snap.warning_multiplier)
-        ),
+        briefing=workspace.rules_briefing(brief_rows),
     )
 
 
@@ -1198,14 +1215,16 @@ async def facility_usage(
 
 
 class BriefingOut(BaseModel):
-    """One line of "what to do today".
+    """Today's list, in one language.
 
     `ai` is the only thing the screen may use to decide whether to put a model's
     name on it. When the model is unavailable, out of quota or switched off,
-    this comes back with the deterministic line, `source="rules"` and
+    this comes back with the computed list, `source="rules"` and
     `ai=False` — the app never presents computed text as a model's work.
     """
 
+    # The list, most urgent first. `body` is the same lines joined.
+    lines: list[str] = []
     body: str
     lang: str
     source: str            # "rules" | "gemini"
@@ -1254,6 +1273,119 @@ def _briefing_rows(
     return rows
 
 
+async def _centre_alerts(
+    session: AsyncSession, facility: Facility, cover: dict[str, float | None], now: datetime
+) -> list[dict]:
+    """Active outbreaks in this centre's district, with its own cover at the
+    outbreak rate (fix #58). `cover` is its as-of-now cover per medicine."""
+    return [
+        outbreak.centre_alert(await outbreak.evaluate(session, row, now), cover)
+        for row in await outbreak.active(session, now, facility.state_silo)
+        if row.district == facility.district
+    ]
+
+
+async def _waiting_on(session: AsyncSession, facility_id: str, now: datetime) -> list[dict]:
+    """Requests waiting for this centre, as the donor, to accept or decline.
+    A request that lapsed without a reply is no longer waiting, and could not
+    be accepted anyway (fix list #31), so it is not listed."""
+    rows = await redistribution.list_transfers(
+        session, from_facility=facility_id, statuses=["proposed"], limit=50
+    )
+    window = redistribution.request_window()
+    return [
+        r for r in rows
+        if not (
+            r["triggered_by"] == workspace.FACILITY_REQUEST
+            and redistribution.request_lapsed(r["created_at"], now, window)
+        )
+    ]
+
+
+async def _todo_for(
+    session: AsyncSession,
+    facility: Facility,
+    skus: list[services.SkuStock],
+    rows: list[workspace.BriefingRow],
+    alerts: list[dict],
+    units: dict[str, str],
+    now: datetime,
+) -> list[workspace.TodoItem]:
+    """Today's list for one centre (fix #85). Every read is bounded by the
+    centre: its open consignments, its requests, its last ward report and its
+    check-ins."""
+    open_rows = [
+        *await movements.list_movements(
+            session, facility_id=facility.id, view=movements.OVERDUE, limit=10
+        ),
+        *await movements.list_movements(
+            session, facility_id=facility.id, view=movements.OPEN, limit=10
+        ),
+    ]
+    senders: dict[str, str] = {}
+    for m in open_rows:
+        if m.from_ref in senders:
+            continue
+        donor = await session.get(Facility, m.from_ref) if m.dispatch_source == "transfer" else None
+        senders[m.from_ref] = donor.name if donor else "warehouse {0}".format(m.from_ref)
+    deliveries = [
+        workspace.TodoDelivery(
+            sku_name=m.sku_name, unit=m.unit, qty=m.qty_dispatched,
+            from_name=senders[m.from_ref],
+            expected_on=workspace.in_india(m.expected_by).date(),
+            overdue=m.status == movements.OVERDUE,
+        )
+        for m in open_rows
+    ]
+
+    names = {s.sku_code: s.sku_name for s in skus}
+    own_waiting = [
+        workspace.TodoRequest(
+            sku_name=names.get(r.sku_code, r.sku_code), unit=units.get(r.sku_code, "unit"),
+            qty=r.qty, donor=r.from_name,
+        )
+        for r in await workspace.own_requests(session, facility.id, now=now)
+        if r.status == "proposed" and not r.lapsed
+    ]
+
+    bed_today: bool | None = None
+    if facility.beds_total:
+        latest = await beds.recent_reports(session, facility.id, limit=1)
+        bed_today = bool(latest) and (
+            workspace.in_india(latest[0].reported_at).date() == workspace.in_india(now).date()
+        )
+
+    return workspace.todo_items(
+        rows=rows,
+        deliveries=deliveries,
+        awaiting_your_reply=len(await _waiting_on(session, facility.id, now)),
+        own_waiting=own_waiting,
+        outbreaks=[a["headline"] for a in alerts],
+        bed_report_today=bed_today,
+        checked_in_today=(await attendance.summarise(session, facility.id)).present,
+    )
+
+
+def _rules_reply(
+    items: list[workspace.TodoItem],
+    lang: str,
+    local: workspace.StateLanguage | None,
+    note: str | None,
+) -> BriefingOut:
+    """The computed list as the answer. The state's language has no computed
+    wording — only the model writes it — so it falls back to English and says
+    so rather than passing a translation off as checked."""
+    lines = [i.hi if lang == "hi" else i.en for i in items]
+    if local and lang == local.code:
+        note = "The {0} list is written by Gemini; showing the computed list in English.{1}".format(
+            local.name, " " + note if note else ""
+        )
+    return BriefingOut(
+        lines=lines, body="\n".join(lines), lang=lang, source="rules", ai=False,
+        model=None, generated_at=None, cached=False, note=note,
+    )
+
+
 @router.post(
     "/facilities/{facility_id}/briefing",
     response_model=BriefingOut,
@@ -1261,68 +1393,80 @@ def _briefing_rows(
 )
 async def facility_briefing(
     facility_id: str,
-    lang: str = Query(default="en", pattern="^(en|hi)$"),
+    lang: str = Query(default="en", pattern="^[a-z]{2}$"),
     session: AsyncSession = Depends(get_session),
     user: Principal = Depends(current_user),
 ) -> BriefingOut:
-    """Ask the model for today's line. POST, and only ever from a click.
+    """Ask the model to write today's list. POST, and only ever from a click.
 
     Never called on page load: the free tier allows 20 generate requests a day
     per model, and a screen that spent one on every render would be out of
-    quota before the first demo finished. The deterministic line already
-    travels with the workspace payload, so this endpoint is an overlay on
-    something that is already on screen, not the thing that fills it.
+    quota before the first demo finished. The computed list already travels
+    with the workspace payload, so this endpoint is an overlay on something
+    that is already on screen, not the thing that fills it. One call writes
+    every language, and all of them are cached together.
     """
     facility = await _facility_in_scope(session, facility_id, user)
     snaps = await services.get_snapshots(session, facility_ids=[facility.id], live_trust=True)
     if not snaps:
         raise HTTPException(status_code=404, detail="Facility not found")
+    snap = snaps[0]
+
+    local = workspace.state_language(facility.state_silo)
+    if lang not in {"en", "hi"} | ({local.code} if local else set()):
+        raise HTTPException(
+            status_code=422, detail="This centre's list is not written in that language"
+        )
 
     units = {
         row.code: row.unit for row in (await session.execute(select(Sku))).scalars().all()
     }
-    rows = _briefing_rows(
-        snaps[0].skus, units, datetime.now(timezone.utc), snaps[0].warning_multiplier
+    now = datetime.now(timezone.utc)
+    rows = _briefing_rows(snap.skus, units, now, snap.warning_multiplier)
+    alerts = await _centre_alerts(
+        session, facility,
+        {
+            s.sku_code: workspace.cover_now(
+                s.days_of_stock, s.last_reported_at, s.status, now, snap.warning_multiplier
+            ).days_of_stock
+            for s in snap.skus
+        },
+        now,
     )
-    fallback = workspace.rules_briefing(rows)
-    inputs_hash = workspace.briefing_hash(rows)
-
-    def rules_answer(note: str | None) -> BriefingOut:
-        return BriefingOut(
-            body=fallback[lang], lang=lang, source="rules", ai=False,
-            model=None, generated_at=None, cached=False, note=note,
-        )
+    items = await _todo_for(session, facility, snap.skus, rows, alerts, units, now)
+    inputs_hash = workspace.todo_hash(items)
 
     if not vision.briefing_available():
-        return rules_answer(None)
+        return _rules_reply(items, lang, local, None)
 
     cached = await workspace.cached_briefing(session, facility.id, lang, inputs_hash)
     if cached is not None:
         return BriefingOut(
-            body=cached.body, lang=lang, source="gemini", ai=True,
-            model=cached.model, generated_at=cached.generated_at, cached=True,
+            lines=cached.body.split("\n"), body=cached.body, lang=lang, source="gemini",
+            ai=True, model=cached.model, generated_at=cached.generated_at, cached=True,
         )
 
     try:
         written = await vision.write_briefing(
             facility_name=facility.name,
-            rows=workspace.briefing_rows_from_skus(rows),
+            rows=[i.en for i in items],
+            local=(local.code, local.name) if local else None,
         )
     except vision.VisionError as exc:
-        # One attempt, then the computed line. No retry loop: the caller is a
+        # One attempt, then the computed list. No retry loop: the caller is a
         # person clicking a button, and a spent quota does not recover in the
         # time it takes to try again.
-        return rules_answer("Showing the computed line — {0}.".format(exc))
+        return _rules_reply(items, lang, local, "Showing the computed list — {0}.".format(exc))
 
     await workspace.store_briefing(
         session, facility.id,
-        {"en": written.en, "hi": written.hi},
+        {code: "\n".join(lines) for code, lines in written.lines.items()},
         inputs_hash=inputs_hash, model=written.model,
     )
     await session.commit()
 
     return BriefingOut(
-        body=written.en if lang == "en" else written.hi,
+        lines=written.lines[lang], body="\n".join(written.lines[lang]),
         lang=lang, source="gemini", ai=True, model=written.model,
         generated_at=datetime.now(timezone.utc), cached=False,
     )
@@ -1704,18 +1848,9 @@ async def incoming_requests(
     A request that lapsed without a reply is no longer waiting, and could not
     be accepted anyway (fix list #31), so it is not listed."""
     facility = await _facility_in_scope(session, facility_id, user)
-    rows = await redistribution.list_transfers(
-        session, from_facility=facility.id, statuses=["proposed"], limit=50
-    )
-    now = datetime.now(timezone.utc)
-    window = redistribution.request_window()
     return [
         TransferOut.model_validate(r)
-        for r in rows
-        if not (
-            r["triggered_by"] == workspace.FACILITY_REQUEST
-            and redistribution.request_lapsed(r["created_at"], now, window)
-        )
+        for r in await _waiting_on(session, facility.id, datetime.now(timezone.utc))
     ]
 
 

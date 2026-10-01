@@ -399,7 +399,7 @@ export const api = {
       `/facilities/${encodeURIComponent(facilityId)}/stock-photo`,
       body,
     ),
-  briefing: (facilityId: string, lang: "en" | "hi") =>
+  briefing: (facilityId: string, lang: string) =>
     post<Briefing>(
       `/facilities/${encodeURIComponent(facilityId)}/briefing?lang=${lang}`,
     ),
@@ -713,6 +713,11 @@ export interface WorkspaceView {
   /** Both languages of the computed line. Always present, needs no key, and is
    *  what the screen shows until somebody asks the model for its version. */
   briefing: Record<string, string>;
+  /** Fix #85: today's list, most urgent first, computed from this centre's
+   *  rows. Absent from a server that predates it. */
+  todo?: TodoItem[];
+  /** The state's own language, where Gemini can write the list in it. */
+  local_language?: { code: string; name: string; native: string } | null;
   /** Fix #58: active outbreaks in this centre's district; empty when none. */
   outbreaks: {
     outbreak_id: number;
@@ -729,7 +734,17 @@ export interface WorkspaceView {
   }[];
 }
 
+export interface TodoItem {
+  kind: string;
+  en: string;
+  hi: string;
+  /** The workspace tab where the thing is done. */
+  tab: "medicines" | "orders" | "beds" | "attendance";
+}
+
 export interface Briefing {
+  /** The list in `lang`, most urgent first. */
+  lines: string[];
   body: string;
   lang: string;
   /** "rules" = computed here. "gemini" = written by the model. */
