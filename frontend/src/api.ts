@@ -230,34 +230,40 @@ export interface ChaseResult {
 
 /**
  * Fix #77, mirroring auth.can_read_facility_rows: the area whose centres this
- * account may read, or null when it reads aggregates only. Facility-level
- * rows stay with the state that holds them; the national role reads state and
- * district summaries. A public demo administrator reads its sandbox district,
- * the one labelled exception, so the drill can run.
+ * account may read, or null when it reads aggregates only. A state's officer
+ * reads their state, a district officer their district, and the national role
+ * every state (state: null).
  */
-export function rowsScope(u: User): { state: string; district: string | null } | null {
+export type RowsScope = { state: string | null; district: string | null };
+
+export function rowsScope(u: User): RowsScope | null {
+  if (u.role === "admin") return { state: null, district: null };
   if (u.role === "state_officer" && u.state_silo) return { state: u.state_silo, district: null };
   if (u.role === "block_mo" && u.state_silo && u.district) return { state: u.state_silo, district: u.district };
-  if (u.role === "admin" && u.demo_sandbox) return { state: u.demo_sandbox.state, district: u.demo_sandbox.district };
   return null;
+}
+
+/** Whether a second record agrees with a row, and why (verification.py). */
+export interface Verification {
+  verified: boolean;
+  reason: string;
 }
 
 /** Whether this account reads centres in that state (and district, if given). */
 export function readsRows(u: User, state: string | null, district?: string | null): boolean {
   const scope = rowsScope(u);
-  if (!scope || !state || scope.state !== state) return false;
+  if (!scope) return false;
+  if (scope.state === null) return true;
+  if (!state || scope.state !== state) return false;
   return scope.district === null || district == null || scope.district === district;
 }
 
 /** What a reader outside the scope is told instead of the rows. */
 export function heldNote(u: User, stateName: string | null): string {
   const held = stateName ? `Held in ${stateName}'s store` : "Held in each state's store";
-  if (u.role === "admin") return `${held} — the national view sees district summaries only.`;
   if (u.role === "block_mo") return `${held} — an officer of ${u.district} district sees district summaries outside it.`;
   return `${held} — an officer of another state sees district summaries only.`;
 }
-
-export const HELD_HINDI = "केंद्र-स्तर के आँकड़े उसी राज्य के पास रहते हैं; यहाँ केवल ज़िला-स्तर का सार दिखता है।";
 
 export const can = {
   planState: (u: User, state: string) =>
@@ -667,6 +673,8 @@ export interface AuditRow extends Trust {
   state_silo: string;
   lat: number;
   lng: number;
+  /** Whether every signal behind the score had enough observations. */
+  verification?: Verification | null;
 }
 
 export const TRUST_BAND: Record<string, { label: string; className: string; dot: string }> = {
@@ -1021,6 +1029,8 @@ export interface Movement {
   discrepancy_qty: number | null;
   days_outstanding: number | null;
   note: string | null;
+  /** The dispatch record against the centre's confirmation. */
+  verification?: Verification | null;
 }
 
 export interface Movements {
@@ -1118,6 +1128,8 @@ export interface Transfer {
   rationale: TransferRationale;
   from: FacilityRef;
   to: FacilityRef;
+  /** Verified once the receiver's count matches what was dispatched for it. */
+  verification?: Verification | null;
 }
 
 export interface Shortfall {
@@ -1539,6 +1551,7 @@ export interface OversightTrip {
   from: OversightPlace;
   to: OversightPlace;
   created_at: string;
+  verification?: Verification | null;
 }
 
 export interface OversightShort extends OversightPlace {
@@ -1576,6 +1589,7 @@ export interface Oversight {
     to: OversightPlace;
     sent: number;
     received: number;
+    verification?: Verification | null;
   }[];
   window_days: number;
   recommended_open: number;
@@ -1605,6 +1619,7 @@ export interface Oversight {
     qty: number;
     to: OversightPlace;
     expected_by: string;
+    verification?: Verification | null;
   }[];
   not_received_total: number;
   declined: OversightTrip[];

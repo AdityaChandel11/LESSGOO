@@ -25,7 +25,6 @@ import {
   type User,
   can,
   heldNote,
-  HELD_HINDI,
   inDemoSandbox,
   readsRows,
   rowsScope,
@@ -915,20 +914,6 @@ export default function App({ session, onSignOut }: { session: Session; onSignOu
               }}
             />
             </>
-          ) : mode === "trust" && user.role === "admin" && !readsRows(user, activeState) ? (
-            // Fix #77: the queue is a list of named centres with their
-            // evidence, so it belongs to that state's and district's officers.
-            <div className="p-4">
-              <div className="text-[11px] font-semibold tracking-[0.09em] text-ink-3 uppercase">Data trust</div>
-              <h2 className="mt-1 text-[18px] font-semibold tracking-tight text-ink">
-                {activeState ? stateName(activeState) : "India"}
-              </h2>
-              <p role="note" className="mt-3 rounded border border-line bg-canvas px-3 py-2 text-[12.5px] leading-snug text-ink-2">
-                {heldNote(user, activeState ? stateName(activeState) : null)} The audit queue names
-                centres and shows their evidence; sign in as that state's officer to open it.
-                <span lang="hi" className="mt-1 block text-ink-3">{HELD_HINDI}</span>
-              </p>
-            </div>
           ) : mode === "trust" ? (
             <AuditQueuePanel
               // One value decides both the request and the heading. An

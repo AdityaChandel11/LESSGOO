@@ -80,9 +80,9 @@ interface Props {
   siloStates?: string[];
   /** Districts with an active outbreak (fix #59), marked at every zoom. */
   outbreakDistricts?: OutbreakMark[];
-  /** The area whose centres this reader may see (fix #77); null for the
-   *  national role. Elsewhere the district summary stands in for the pins. */
-  rowsScope?: { state: string; district: string | null } | null;
+  /** The area whose centres this reader may see (fix #77); state null is
+   *  every state. Elsewhere the district summary stands in for the pins. */
+  rowsScope?: { state: string | null; district: string | null } | null;
   /** Null until runtime config has loaded. */
   basemap?: { mode: "osm" | "google"; key: string } | null;
   onBasemapFallback?: (reason: string) => void;
@@ -315,7 +315,9 @@ export default function NationalMap({
     const scope = props.current.rowsScope;
     for (const b of districtsRef.current) {
       const readable =
-        !!scope && scope.state === b.parent && (scope.district === null || scope.district === b.label);
+        !!scope &&
+        (scope.state === null ||
+          (scope.state === b.parent && (scope.district === null || scope.district === b.label)));
       if (readable) continue;
       L.marker([b.lat, b.lng], { icon: donutIcon(b, "district"), riseOnHover: true })
         .bindTooltip(bucketTooltip(b, skuLabel()), { direction: "top", offset: [0, -22] })

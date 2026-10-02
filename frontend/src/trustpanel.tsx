@@ -23,6 +23,7 @@ import {
   type TrustComponent,
   api,
 } from "./api";
+import { VerifiedLine } from "./verified";
 import { WhyLine } from "./why";
 
 function Bar({
@@ -440,6 +441,7 @@ function AuditQueue({
                     <span className="text-ink-3"> {r.components[0].basis}</span>
                   )}
                 </p>
+                <VerifiedLine v={r.verification} />
 
                 <WhyLine
                   load={() => api.explainTrust(r.facility_id)}

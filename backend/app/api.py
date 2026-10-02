@@ -47,6 +47,7 @@ from . import (
     comms,
     stockphoto,
     trust,
+    verification,
     vision,
     workspace,
 )
@@ -367,15 +368,18 @@ async def map_states(
 
 def _narrow_to_rows_scope(
     user: Principal, state: str | None, district: str | None
-) -> tuple[str, str | None] | None:
+) -> tuple[str | None, str | None] | None:
     """The (state, district) filter a facility-level list is read with, or
     None when the caller may read no rows there (fix #77).
 
     A state officer is narrowed to their state, a district officer to their
     district; asking for somewhere else yields nothing rather than an error,
     because a map viewport crosses borders all the time. The national role
-    and a centre's own account have no list of centres to read here.
+    reads wherever it asks, so its filter is the one it sent (state may be
+    None: every state). A centre's own account has no list of centres here.
     """
+    if user.role == "admin":
+        return state, district
     if user.role == "state_officer" and user.state_silo:
         if state and state != user.state_silo:
             return None
@@ -384,13 +388,6 @@ def _narrow_to_rows_scope(
         if (state and state != user.state_silo) or (district and district != user.district):
             return None
         return user.state_silo, user.district
-    if user.role == "admin" and is_public_demo(user):
-        # The labelled exception (auth.can_read_facility_rows): the sandbox
-        # district, and nothing else.
-        box = (settings.demo_sandbox_state, settings.demo_sandbox_district)
-        if (state and state != box[0]) or (district and district != box[1]):
-            return None
-        return box
     return None
 
 
@@ -459,6 +456,14 @@ async def map_facilities(
 # --------------------------------------------------------------------------
 # Redistribution (spec 12.3) — plan, review, decide
 # --------------------------------------------------------------------------
+class VerificationOut(BaseModel):
+    """Whether a second record agrees with this row, and the reason in words
+    (verification.py). Built from the row's own fields, never estimated."""
+
+    verified: bool
+    reason: str
+
+
 class FacilityRef(BaseModel):
     id: str
     name: str
@@ -485,6 +490,7 @@ class TransferOut(BaseModel):
     rationale: dict
     from_: FacilityRef = Field(alias="from")
     to: FacilityRef
+    verification: VerificationOut | None = None
 
 
 class ShortfallOut(BaseModel):
@@ -628,8 +634,9 @@ async def transfers_oversight(
         raise HTTPException(status_code=404, detail="Unknown state")
     out = await redistribution.oversight(session, state, datetime.now(timezone.utc))
     # Fix #77: the pipeline's counts are an aggregate anyone signed in may see;
-    # the lists beneath it name centres, and are the state's officer's.
-    if user.role == "state_officer" and user.state_silo == state:
+    # the lists beneath it name centres, and are read by the state's officer
+    # and the national role.
+    if user.role == "admin" or (user.role == "state_officer" and user.state_silo == state):
         return {**out, "rows_withheld": None}
     # Every list in the reply names centres (stuck trips, unconfirmed
     # deliveries, declined, controlled, unreached); every count beside it stays.
@@ -2526,6 +2533,7 @@ class MovementOut(BaseModel):
     discrepancy_qty: float | None
     days_outstanding: float | None
     note: str | None
+    verification: VerificationOut | None = None
 
 
 class MovementsOut(BaseModel):
@@ -3134,6 +3142,7 @@ class TrustOut(BaseModel):
 
 
 class AuditRowOut(TrustOut):
+    verification: VerificationOut | None = None
     facility_name: str
     type: str
     district: str
@@ -3185,6 +3194,7 @@ async def audit_queue(
             **{k: v for k, v in row.items() if k != "components"},
             components=[TrustComponentOut(**c) for c in row["components"]],
             warning_multiplier=trust.warning_multiplier(row["score"]),
+            verification=VerificationOut(**verification.trust_row(row["components"])),
         )
         for row in rows
     ]
@@ -4577,7 +4587,8 @@ async def list_calls(
     if user.role == "facility_user":
         stmt = stmt.where(CallLog.facility_id == user.facility_id)
     else:
-        stmt = stmt.where(Facility.state_silo == narrowed[0])
+        if narrowed[0]:
+            stmt = stmt.where(Facility.state_silo == narrowed[0])
         if narrowed[1]:
             stmt = stmt.where(Facility.district == narrowed[1])
     rows = (

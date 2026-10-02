@@ -1,13 +1,13 @@
 """Fix #77: data governance tiers, enforced in the API.
 
-Facility-level rows stay with the state that holds them. The national role
-sees state and district aggregates and model outputs; a state officer sees the
-centres of their own state; a district officer those of their own district; a
-centre sees itself. Anyone else asking for a centre's rows is told where they
-are held instead of being handed them.
+A state officer sees the centres of their own state; a district officer those
+of their own district; a centre sees itself. Anyone else asking for a centre's
+rows — an officer of another state or district — is told where they are held
+instead of being handed them.
 
-The challenge asks for national visibility, so aggregates are legitimate at
-every level. What must not cross a state line is a row about one centre.
+The national role reads every centre's rows: it is the national console, and
+its trips, consignments and audit flags are overseen row by row. Each such row
+carries whether it is verified and why (test_verification.py).
 """
 
 from __future__ import annotations
@@ -20,7 +20,9 @@ import pytest
 from fastapi import HTTPException
 from fastapi.routing import APIRoute
 
-from app import aggregates, api, auth, earlywarning, events, movements, outbreak, redistribution
+from app import (
+    aggregates, api, auth, earlywarning, events, movements, outbreak, redistribution, trust,
+)
 from app.auth import Principal
 
 
@@ -62,7 +64,8 @@ def run(coro):
 @pytest.mark.parametrize(
     "person, where, allowed",
     [
-        (ADMIN, NASHIK_PHC, False),   # national: aggregates only, everywhere
+        (ADMIN, NASHIK_PHC, True),    # national: reads every centre
+        (ADMIN, PUNE_PHC, True),
         (MH, NASHIK_PHC, True),
         (MH, PUNE_PHC, True),
         (UP, NASHIK_PHC, False),      # another state's officer
@@ -79,21 +82,16 @@ def test_who_may_read_a_centres_rows(person, where, allowed):
 DEMO_ADMIN = Principal(9, "admin@demo.swasthsetu.in", "Platform Admin", "admin", None, None, None, None)
 
 
-def test_a_demo_account_reads_centres_inside_the_sandbox_and_nowhere_else(monkeypatch):
-    # The same labelled exception every demo rule makes (fix #74, #82): the
-    # drill runs in the sandbox district, so a demo administrator reads there.
-    monkeypatch.setattr(auth.settings, "demo_mode", True)
-    assert auth.can_read_facility_rows(DEMO_ADMIN, **NASHIK_PHC)
-    assert not auth.can_read_facility_rows(DEMO_ADMIN, **PUNE_PHC)
-    assert api._narrow_to_rows_scope(DEMO_ADMIN, None, None) == ("MH", "Nashik")
-    assert api._narrow_to_rows_scope(DEMO_ADMIN, "MH", "Pune") is None
-    assert api._narrow_to_rows_scope(DEMO_ADMIN, "UP", None) is None
-    # A real national account has no such exception, and neither has a demo
-    # account once demo mode is off.
-    assert not auth.can_read_facility_rows(ADMIN, **NASHIK_PHC)
-    monkeypatch.setattr(auth.settings, "demo_mode", False)
-    assert not auth.can_read_facility_rows(DEMO_ADMIN, **NASHIK_PHC)
-    assert api._narrow_to_rows_scope(DEMO_ADMIN, None, None) is None
+def test_the_national_role_reads_wherever_it_asks_demo_account_or_not(monkeypatch):
+    # Reading is not limited to the demo sandbox; changing things still is
+    # (test_demo_sandbox.py).
+    for demo_mode in (True, False):
+        monkeypatch.setattr(auth.settings, "demo_mode", demo_mode)
+        for person in (ADMIN, DEMO_ADMIN):
+            assert auth.can_read_facility_rows(person, **PUNE_PHC)
+            assert api._narrow_to_rows_scope(person, None, None) == (None, None)
+            assert api._narrow_to_rows_scope(person, "UP", None) == ("UP", None)
+            assert api._narrow_to_rows_scope(person, "MH", "Pune") == ("MH", "Pune")
 
 
 def test_the_refusal_says_where_the_rows_are_held():
@@ -115,13 +113,13 @@ def test_the_refusal_says_where_the_rows_are_held():
 )
 def test_a_centre_outside_scope_is_refused_before_anything_is_read(handler):
     call = getattr(api, handler)
-    kwargs = {"session": FakeSession(centre()), "user": ADMIN}
+    kwargs = {"session": FakeSession(centre()), "user": UP}
     if handler == "facility_usage":
         kwargs["sku"] = "ORS"
     with pytest.raises(HTTPException) as refused:
         run(call("HFR-MH-PHC-00001", **kwargs))
     assert refused.value.status_code == 403
-    assert refused.value.detail == auth.held_message(ADMIN, "MH")
+    assert refused.value.detail == auth.held_message(UP, "MH")
 
 
 def test_an_unknown_centre_is_not_found_rather_than_refused():
@@ -148,9 +146,11 @@ def pins_call(user, monkeypatch, **query):
     return out, asked
 
 
-def test_the_national_role_gets_no_pins_and_the_database_is_not_asked(monkeypatch):
-    out, asked = pins_call(ADMIN, monkeypatch, state="MH")
-    assert out == [] and asked == {}
+def test_the_national_role_gets_the_pins_it_asks_for(monkeypatch):
+    _, asked = pins_call(ADMIN, monkeypatch, state="MH")
+    assert (asked["state"], asked["district"]) == ("MH", None)
+    _, asked = pins_call(ADMIN, monkeypatch, south=18.0, west=72.0, north=21.0, east=80.0)
+    assert asked["state"] is None      # a viewport across states is read whole
 
 
 def test_a_state_officer_gets_pins_only_in_their_own_state(monkeypatch):
@@ -191,8 +191,8 @@ def test_transfer_rows_follow_the_same_scope(monkeypatch):
     get = lambda user, state: run(  # noqa: E731
         api.get_transfers(state=state, status=None, limit=50, session=object(), user=user)
     )
-    assert get(ADMIN, "MH") == [] and asked == []
     assert get(UP, "MH") == [] and asked == []
+    assert get(ADMIN, "MH") == [1, 2, 3] and asked[-1]["state"] == "MH"
     assert get(MH, "MH") == [1, 2, 3] and asked[-1]["state"] == "MH"
     # A district officer sees the trips that touch their district.
     assert get(NASHIK, "MH") == [1, 3]
@@ -204,7 +204,7 @@ def test_a_trips_explanation_is_its_two_centres_rows(monkeypatch):
 
     monkeypatch.setattr(redistribution, "list_transfers", listed)
     body = api.TripExplainIn(transfer_ids=[1])
-    for outsider in (ADMIN, UP, who("block_mo", "MH", "Pune")):
+    for outsider in (UP, who("block_mo", "MH", "Pune")):
         with pytest.raises(HTTPException) as refused:
             run(api.explain_trip(body, session=object(), user=outsider))
         assert refused.value.status_code == 403
@@ -231,13 +231,16 @@ def test_oversight_keeps_its_counts_and_withholds_its_named_lists(monkeypatch):
 
     monkeypatch.setattr(redistribution, "oversight", overseen)
     session = SimpleNamespace(scalar=known)
+    other = run(api.transfers_oversight(state="MH", session=session, user=UP))
+    assert other["pipeline"] == {"recommended": 4, "received": 1}
+    assert all(other[k] == [] for k in named)
+    assert (other["no_reply_total"], other["unreached_total"]) == (1, 1)
+    assert other["rows_withheld"] == auth.held_message(UP, "MH")
+    # The national role reads the lists as the state's own officer does.
     national = run(api.transfers_oversight(state="MH", session=session, user=ADMIN))
-    assert national["pipeline"] == {"recommended": 4, "received": 1}
-    assert all(national[k] == [] for k in named)
-    assert (national["no_reply_total"], national["unreached_total"]) == (1, 1)
-    assert national["rows_withheld"] == auth.held_message(ADMIN, "MH")
-    # The same for another state's officer and for a district officer: the
-    # lists are state-wide, so only the state's own officer reads them.
+    assert all(national[k] == named[k] for k in named) and national["rows_withheld"] is None
+    # Another state's officer and a district officer: the lists are
+    # state-wide, so neither reads them.
     for outsider in (UP, NASHIK):
         assert all(
             run(api.transfers_oversight(state="MH", session=session, user=outsider))[k] == []
@@ -262,9 +265,12 @@ def test_the_named_lists_in_the_test_above_are_the_real_ones():
 # ----------------------------------------------- movements, trust, calls ---
 
 
-def test_the_national_role_gets_the_ledgers_totals_and_none_of_its_rows(monkeypatch):
+def test_the_national_role_gets_the_ledgers_totals_and_its_rows(monkeypatch):
+    asked: dict = {}
+
     async def rows(session, **kw):
-        raise AssertionError("the national role must not read ledger rows")
+        asked.update(kw)
+        return []
 
     async def totals(session, **kw):
         return {"counts": {"short": 7}, "short_units": 120.0}
@@ -275,15 +281,22 @@ def test_the_national_role_gets_the_ledgers_totals_and_none_of_its_rows(monkeypa
         state="MH", district=None, facility=None, sku=None, view="attention",
         limit=50, offset=0, session=object(), user=ADMIN,
     ))
-    assert out.movements == [] and out.counts == {"short": 7}
-    assert out.rows_withheld == auth.held_message(ADMIN, "MH")
+    assert out.counts == {"short": 7} and out.rows_withheld is None
+    assert (asked["state"], asked["view"]) == ("MH", "attention")
 
 
-def test_the_audit_queue_is_refused_to_the_national_role():
-    with pytest.raises(HTTPException) as refused:
-        run(api.audit_queue(state="MH", district=None, limit=10, session=object(), user=ADMIN))
-    assert refused.value.status_code == 403
-    assert refused.value.detail == auth.held_message(ADMIN, "MH")
+def test_the_audit_queue_is_scored_for_the_state_the_national_role_names(monkeypatch):
+    asked: dict = {}
+
+    async def queue(session, **kw):
+        asked.update(kw)
+        return []
+
+    monkeypatch.setattr(trust, "audit_queue", queue)
+    assert run(
+        api.audit_queue(state="MH", district=None, limit=10, session=object(), user=ADMIN)
+    ) == []
+    assert (asked["state"], asked["district"]) == ("MH", None)
 
 
 # --------------------------------------------------- warnings and events ---
@@ -313,8 +326,10 @@ def test_an_active_outbreaks_named_centres_are_withheld_and_counted(monkeypatch)
     monkeypatch.setattr(outbreak, "active", active)
     monkeypatch.setattr(outbreak, "evaluate", evaluate)
     monkeypatch.setattr(outbreak, "warnings", warnings)
+    other = run(api.active_outbreaks(state=None, session=object(), user=UP)).outbreaks[0]
+    assert other.warnings == [] and other.warnings_count == 2
     national = run(api.active_outbreaks(state=None, session=object(), user=ADMIN)).outbreaks[0]
-    assert national.warnings == [] and national.warnings_count == 2
+    assert len(national.warnings) == 2
     own = run(api.active_outbreaks(state=None, session=object(), user=NASHIK)).outbreaks[0]
     assert [w.facility_name for w in own.warnings] == ["Nashik PHC 9", "Nashik PHC 2"]
 
@@ -333,9 +348,10 @@ def test_the_next_14_days_strip_names_a_centre_only_to_those_who_hold_its_rows(m
         api.next_warnings(state=None, source="all", limit=8, session=object(), user=user)
     ).pairs[0]
     assert call(MH).first_centre == "Nashik PHC 9"
-    national = call(ADMIN)
-    assert national.first_centre is None and "Nashik PHC 9" not in national.line
-    assert national.centres == 3 and national.first_on == date(2026, 10, 4)
+    assert call(ADMIN).first_centre == "Nashik PHC 9"
+    other = call(UP)
+    assert other.first_centre is None and "Nashik PHC 9" not in other.line
+    assert other.centres == 3 and other.first_on == date(2026, 10, 4)
 
 
 def test_an_events_payload_is_withheld_outside_scope():
@@ -347,9 +363,10 @@ def test_an_events_payload_is_withheld_outside_scope():
          "data": {"facility_id": "HFR-MH-PHC-00900", "facility_name": "Pune PHC 1", "qty": 9}},
         {"id": 3, "kind": events.FEDERATION_ROUND, "created_at": None, "data": {"round": 3}},
     ]
-    national = api.scope_events(feed, where, ADMIN)
-    assert [e["data"] for e in national] == [{"withheld": True}, {"withheld": True}, {"round": 3}]
-    assert [e["id"] for e in national] == [1, 2, 3]          # the feed still ticks
+    other = api.scope_events(feed, where, UP)
+    assert [e["data"] for e in other] == [{"withheld": True}, {"withheld": True}, {"round": 3}]
+    assert [e["id"] for e in other] == [1, 2, 3]             # the feed still ticks
+    assert api.scope_events(feed, where, ADMIN) == feed
     district = api.scope_events(feed, where, NASHIK)
     assert district[0]["data"]["facility_name"] == "Nashik PHC 1"
     assert district[1]["data"] == {"withheld": True}
@@ -376,9 +393,9 @@ ROWS = {
     "/facilities/{facility_id}/handsets": "the centre itself",
     "/me/attendance": "the reader's own record",
     "/transfers": "trips narrowed to the caller's scope",
-    "/transfers/oversight": "counts for all; named lists for the state's officer",
+    "/transfers/oversight": "counts for all; named lists for the state's officer and the national role",
     "/movements": "totals for all; rows narrowed to the caller's scope",
-    "/trust/queue": "refused to the national role; officers pinned to their patch",
+    "/trust/queue": "the national role names a state; officers pinned to their patch",
     "/outbreaks/active": "district figures for all; named centres within scope",
     "/warnings/next": "district figures for all; the first centre's name within scope",
     "/events": "payloads about a centre withheld outside scope",

@@ -34,7 +34,7 @@ from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from . import maps, movements, outbreak, services
+from . import maps, movements, outbreak, services, verification
 from .movements import OPEN as MOVEMENT_OPEN, RECEIVED as MOVEMENT_RECEIVED, SHORT as MOVEMENT_SHORT
 from .config import settings
 from .models import (
@@ -681,7 +681,7 @@ async def oversight(session: AsyncSession, state: str, now: datetime) -> dict:
                 "to": m.to_facility, "sku": m.sku_code, "batch": m.batch_id,
                 "qty": float(m.qty_dispatched), "expected_by": m.expected_by,
                 "qty_received": float(m.qty_received) if m.qty_received is not None else None,
-                "received_at": m.received_at,
+                "received_at": m.received_at, "received_via": m.received_via,
             }
             for m in (
                 await session.execute(
@@ -766,8 +766,22 @@ async def oversight(session: AsyncSession, state: str, now: datetime) -> dict:
     # "no reply" means a donor centre has sat on it for a working day.
     reply_window = timedelta(hours=settings.request_reply_hours)
 
+    def checked(m: dict) -> dict:
+        """A ledger row's verdict, with the clock applied to its status."""
+        late = m["status"] == MOVEMENT_OPEN and m["expected_by"] < now
+        status = "overdue" if late else m["status"]
+        return verification.movement(
+            status=status, qty_dispatched=m["qty"], qty_received=m["qty_received"],
+            received_via=m.get("received_via"),
+            days_outstanding=(now - m["expected_by"]).total_seconds() / 86400
+            if late else None,
+        )
+
+    by_movement = {m["id"]: m for m in movements}
+
     def trip(t: dict) -> dict:
         return {
+            "verification": verification.transfer(status=t["status"], movement_row=None),
             "transfer_id": t["id"], "sku_code": t["sku"], "sku_name": sku_names.get(t["sku"], t["sku"]),
             "qty": t["qty"], "from": where(t["from"]) if t["from"] in names else {"facility_id": t["from"], "name": t["from"], "district": ""},
             "to": where(t["to"]), "created_at": t["created_at"],
@@ -798,7 +812,8 @@ async def oversight(session: AsyncSession, state: str, now: datetime) -> dict:
         "not_received": [
             {"movement_id": m["id"], "transfer_id": m["transfer_id"], "batch": m["batch"],
              "sku_name": sku_names.get(m["sku"], m["sku"]), "qty": m["qty"],
-             "to": where(m["to"]), "expected_by": m["expected_by"]}
+             "to": where(m["to"]), "expected_by": m["expected_by"],
+             "verification": checked(m)}
             for m in not_received(movements, now)
         ][:20],
         "not_received_total": len(not_received(movements, now)),
@@ -812,7 +827,8 @@ async def oversight(session: AsyncSession, state: str, now: datetime) -> dict:
         # are a list of their own (and withheld with the other lists, #77).
         "outcomes": {k: v for k, v in done.items() if k != "short_deliveries"},
         "short_deliveries": [
-            {**d, "sku_name": sku_names.get(d["sku"], d["sku"]), "to": where(d["to"])}
+            {**d, "sku_name": sku_names.get(d["sku"], d["sku"]), "to": where(d["to"]),
+             "verification": checked(by_movement[d["movement_id"]])}
             for d in done["short_deliveries"]
         ],
     }
@@ -1055,11 +1071,43 @@ async def list_transfers(
         limit = max(limit, len(ids))
     stmt = stmt.order_by(Transfer.created_at.desc()).limit(limit)
 
+    found = (await session.execute(stmt)).all()
+    now = datetime.now(timezone.utc)
+    # The consignment dispatched for each accepted transfer, bounded by the page.
+    dispatched = {
+        m.transfer_id: m
+        for m in (
+            await session.execute(
+                select(MedicineMovement).where(
+                    MedicineMovement.transfer_id.in_([t.id for t, *_ in found])
+                )
+            )
+        ).scalars()
+    } if found else {}
+
+    def checked(t: Transfer) -> dict:
+        m = dispatched.get(t.id)
+        if m is None:
+            return verification.transfer(status=t.status, movement_row=None)
+        status = movements.display_status(m.status, m.expected_by, now)
+        return verification.transfer(
+            status=t.status,
+            movement_row={
+                "status": status,
+                "qty_dispatched": float(m.qty_dispatched),
+                "qty_received": float(m.qty_received) if m.qty_received is not None else None,
+                "received_via": m.received_via,
+                "days_outstanding": (now - m.expected_by).total_seconds() / 86400
+                if status == movements.OVERDUE else None,
+            },
+        )
+
     out = []
-    for t, f, d, s in (await session.execute(stmt)).all():
+    for t, f, d, s in found:
         out.append(
             {
                 "id": t.id,
+                "verification": checked(t),
                 "status": t.status,
                 "sku_code": s.code,
                 "sku_name": s.name,

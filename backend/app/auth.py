@@ -184,21 +184,15 @@ def can_read_facility_rows(
     Facility-level rows stay with the state that holds them — that is what
     "federated" means here, and it has to be true of the API, not only of the
     training queries. A state's officer reads the centres of their own state,
-    a district officer those of their own district, a centre itself. The
-    national role, and an officer of any other state, read state and district
-    aggregates and model outputs: the challenge asks for national visibility,
-    and an aggregate gives it without a row crossing a state line.
+    a district officer those of their own district, a centre itself. An
+    officer of any other state reads state and district aggregates.
 
-    One labelled exception, the same one every demo rule makes: inside the
-    demo sandbox district a public demo account reads the centres its role
-    oversaw before this rule, so the emergency drill can run. A real national
-    account reads no centre anywhere.
+    The national role reads every centre's rows: this is the national
+    console, and oversight of a trip, a consignment or an audit flag needs
+    the row itself. Reading is all this grants — what the role may change is
+    decided elsewhere (can_plan_state, can_report_facts, demo_may_write).
     """
-    if (
-        p.role == "admin"
-        and is_public_demo(p)
-        and in_demo_sandbox(state, district)
-    ):
+    if p.role == "admin":
         return True
     if p.role == "state_officer":
         return p.state_silo == state
@@ -234,8 +228,8 @@ def can_view_facility(
 
     The workspace is one centre's working screen, with its open requests and
     its delivery queue on it: rows about that centre, so it follows the rule
-    for reading them — the centre, its district officer and its state's
-    officer, and not the national role (fix list #77).
+    for reading them — the centre, its district officer, its state's officer
+    and the national role (fix list #77).
     """
     return can_read_facility_rows(
         p, state=facility_state, district=facility_district, facility_id=facility_id

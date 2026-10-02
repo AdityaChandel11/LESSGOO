@@ -20,6 +20,7 @@ import {
   can,
 } from "./api";
 import { ChaseButton } from "./chase";
+import { VerifiedLine } from "./verified";
 
 const VIEWS: { key: MovementView; label: string; countKey: string }[] = [
   { key: "attention", label: "Needs attention", countKey: "attention" },
@@ -186,6 +187,7 @@ function MovementRow({
       </div>
 
       {reason && <p className="mt-1 text-[12px] text-ink-2">{reason}</p>}
+      <VerifiedLine v={m.verification} />
       {m.note && <p className="mt-0.5 text-[11.5px] italic text-ink-3">“{m.note}”</p>}
 
       {!settled && (

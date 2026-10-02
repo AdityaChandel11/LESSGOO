@@ -13,6 +13,7 @@ import {
 } from "./api";
 import { ChaseButton } from "./chase";
 import { StackBar } from "./panels";
+import { VerifiedLine } from "./verified";
 import { WhyLine } from "./why";
 
 /* ================================================================ trips === */
@@ -321,6 +322,7 @@ function Exceptions({ o }: { o: Oversight }) {
           <li key={d.movement_id} className="text-[11.5px] text-ink-2">
             <span className="font-medium text-ink">{d.to.name}</span> ({d.to.district}) · {d.sku_name} · sent{" "}
             {d.sent.toLocaleString("en-IN")}, counted {d.received.toLocaleString("en-IN")}
+            <VerifiedLine v={d.verification} />
           </li>
         ))}
       </ExceptionGroup>
@@ -329,6 +331,7 @@ function Exceptions({ o }: { o: Oversight }) {
           <li key={t.transfer_id} className="text-[11.5px] text-ink-2">
             <span className="font-medium text-ink">{t.from.name}</span> → {t.to.name} · {t.sku_name} · asked{" "}
             {new Date(t.created_at).toLocaleDateString("en-IN", { day: "numeric", month: "short" })}
+            <VerifiedLine v={t.verification} />
           </li>
         ))}
       </ExceptionGroup>
@@ -340,6 +343,7 @@ function Exceptions({ o }: { o: Oversight }) {
             <span className="ml-1.5 inline-block">
               <ChaseButton facilityId={m.to.facility_id} topic="receipt" movementId={m.movement_id} label="Chase receipt" />
             </span>
+            <VerifiedLine v={m.verification} />
           </li>
         ))}
       </ExceptionGroup>
@@ -364,6 +368,7 @@ function Exceptions({ o }: { o: Oversight }) {
         {o.declined.slice(0, 8).map((t) => (
           <li key={t.transfer_id} className="text-[11.5px] text-ink-2">
             <span className="font-medium text-ink">{t.from.name}</span> declined {t.sku_name} for {t.to.name}
+            <VerifiedLine v={t.verification} />
           </li>
         ))}
       </ExceptionGroup>
@@ -778,9 +783,10 @@ function TripCard({
                     ? "Rejected"
                     : t.status === "cancelled"
                       ? "Cancelled by the centre that asked for it"
-                      : "Approved · dispatched, awaiting confirmation"}
+                      : "Approved by the donor · dispatched"}
                 </div>
               )}
+              <VerifiedLine v={t.verification} />
               {errors[t.id] && <div className="mt-0.5 text-[11px] text-crit">{errors[t.id]}</div>}
             </li>
           );

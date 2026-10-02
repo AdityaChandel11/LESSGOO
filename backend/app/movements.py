@@ -21,7 +21,7 @@ from decimal import Decimal
 from sqlalchemy import Select, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from . import events, services, stockphoto
+from . import events, services, stockphoto, verification
 from .config import settings
 from .models import Facility, MedicineMovement, Sku, StockReading
 
@@ -85,6 +85,8 @@ class MovementRow:
     discrepancy_qty: float | None
     days_outstanding: float | None
     note: str | None
+    # Verified or not, and why — from this row's own two records.
+    verification: dict
 
 
 def _row(m: MedicineMovement, f: Facility, sku: Sku, now: datetime) -> MovementRow:
@@ -120,6 +122,13 @@ def _row(m: MedicineMovement, f: Facility, sku: Sku, now: datetime) -> MovementR
         discrepancy_qty=discrepancy,
         days_outstanding=outstanding,
         note=m.note,
+        verification=verification.movement(
+            status=status,
+            qty_dispatched=float(m.qty_dispatched),
+            qty_received=float(m.qty_received) if m.qty_received is not None else None,
+            received_via=m.received_via,
+            days_outstanding=outstanding,
+        ),
     )
 
 

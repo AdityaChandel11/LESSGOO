@@ -55,23 +55,20 @@ def test_an_administrator_with_no_state_is_refused_before_any_query(monkeypatch)
     monkeypatch.setattr(trust, "audit_queue", spy)
     with pytest.raises(HTTPException) as exc:
         _call(_user("admin"))
-    assert exc.value.status_code == 403
+    assert exc.value.status_code == 400 and "Choose a state" in exc.value.detail
     assert not called
 
 
-def test_an_administrator_naming_a_state_is_refused_too(monkeypatch):
-    called = False
+def test_an_administrator_naming_a_state_reaches_the_scorer(monkeypatch):
+    seen = {}
 
-    async def spy(*args, **kwargs):
-        nonlocal called
-        called = True
+    async def spy(session, *, state=None, district=None, limit=50):
+        seen["scope"] = (state, district)
         return []
 
     monkeypatch.setattr(trust, "audit_queue", spy)
-    with pytest.raises(HTTPException) as exc:
-        _call(_user("admin"), state="MH")
-    assert exc.value.status_code == 403 and "Maharashtra" in exc.value.detail
-    assert not called
+    assert _call(_user("admin"), state="MH") == []
+    assert seen["scope"] == ("MH", None)
 
 
 @pytest.mark.parametrize(
