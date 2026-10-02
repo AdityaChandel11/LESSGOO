@@ -3,7 +3,9 @@
 # switch (spec Section 1, rule 3).
 fastapi>=0.115
 uvicorn[standard]>=0.32
-sqlalchemy>=2.0.36
+# [asyncio] pulls in greenlet, which SQLAlchemy 2.1 no longer installs by default;
+# without it the async engine (and alembic on start) cannot import.
+sqlalchemy[asyncio]>=2.0.36
 asyncpg>=0.30
 alembic>=1.14
 pydantic>=2.10
