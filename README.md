@@ -4,9 +4,12 @@
 
 Four states train one medicine-demand model without sharing a single facility record. The platform turns that model's forecasts, and the outbreaks NCDC reports, into stock-out warnings and transfer proposals, and a person decides each one.
 
+[![Deploy Status](https://img.shields.io/badge/deploy-live-brightgreen?style=flat-square&logo=render)](https://swasthsetu-m4x5.onrender.com) [![Version](https://img.shields.io/badge/version-0.2.0-blue?style=flat-square)](CHANGELOG.md) [![Tests](https://img.shields.io/badge/tests-891_passing-success?style=flat-square)]() [![License](https://img.shields.io/badge/license-prototype-lightgrey?style=flat-square)]()
+
 **Live demo:** https://swasthsetu-m4x5.onrender.com
 
 **Brief description:** [docs/submission/DESCRIPTION.md](docs/submission/DESCRIPTION.md)
+
 
 This is a working prototype on synthetic data. Every facility, stock figure, bed count, check-in and consignment is generated. District names and coordinates are real, so the map is honest about geography, but no real patient or facility record exists anywhere in the system, and the schema has nowhere to put patient data. The outbreak rows are the one real dataset: they are parsed from NCDC's published IDSP weekly outbreak reports.
 
@@ -249,6 +252,39 @@ The web image carries no PyTorch. Training writes predictions into the `forecast
 | Messaging | Twilio SMS / WhatsApp / voice via `COMMS_MODE` (simulator on the demo) |
 
 `LLM_MODE`, `MAPS_MODE` and `COMMS_MODE` each default to a mode that needs no key, so the app starts, seeds and demos with every credential blank. Both paths are tested.
+
+### System flow
+
+```mermaid
+flowchart LR
+    subgraph Ingestion
+        A["Web / SMS / Photo"] --> B["Dedupe + Validate"]
+    end
+    subgraph Core
+        B --> C["Stock Reading"]
+        C --> D["Trust Scoring"]
+        C --> E["Demand Forecast"]
+        E --> F["Early Warning"]
+        F --> G["Redistribution Solver"]
+    end
+    subgraph Actions
+        G --> H["Transfer Proposal"]
+        H --> I["Human Approval"]
+        I --> J["Dispatch + Receipt"]
+    end
+    subgraph AI
+        K["Gemini Vision"] -.-> B
+        L["Gemini Text"] -.-> H
+    end
+    subgraph Federated
+        M["State Silo 1"] --> N["Flower Aggregator"]
+        O["State Silo 2"] --> N
+        P["State Silo 3"] --> N
+        Q["State Silo 4"] --> N
+        N --> E
+    end
+```
+
 
 ## Federated result
 

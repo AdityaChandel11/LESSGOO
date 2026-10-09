@@ -331,6 +331,26 @@ async def health() -> HealthOut:
     )
 
 
+class VersionOut(BaseModel):
+    """Lightweight version response for deploy verification and CI checks."""
+    app: str
+    version: str
+    environment: str
+    python_version: str
+
+
+@public_router.get("/version", response_model=VersionOut, tags=["meta"])
+async def version() -> VersionOut:
+    """Return the running application version — no database call, no secrets."""
+    import platform
+    return VersionOut(
+        app=settings.app_name,
+        version=settings.api_version,
+        environment=settings.environment,
+        python_version=platform.python_version(),
+    )
+
+
 # --------------------------------------------------------------------------
 # Map — level of detail by zoom (see aggregates.py)
 # --------------------------------------------------------------------------
